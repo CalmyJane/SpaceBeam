@@ -253,50 +253,89 @@ class MainActivity : AppCompatActivity() {
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main(){ gl_Position=p; v=t; }"
+
             val fSrc = """
-                #extension GL_OES_EGL_image_external : require
-                precision mediump float;
-                varying vec2 v;
-                uniform samplerExternalOES uTex;
-                uniform float uMR, uLR, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB;
-                uniform vec2 uF; 
-                mat2 rot(float d) { float a=radians(d); float s=sin(a), c=cos(a); return mat2(c,-s,s,c); }
-                vec3 hueShift(vec3 color, float hue) {
-                    const vec3 k = vec3(0.57735, 0.57735, 0.57735);
-                    float cosAngle = cos(hue * 6.283185);
-                    return vec3(color * cosAngle + cross(k, color) * sin(hue * 6.283185) + k * dot(k, color) * (1.0 - cosAngle));
-                }
-                void main() {
-                    vec2 uvOrig = (v - 0.5); uvOrig.x *= uA;
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            varying vec2 v;
+            uniform samplerExternalOES uTex;
+            uniform float uMR, uLR, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB;
+            uniform vec2 uF; 
+        
+            mat2 rot(float d) { 
+                float a = radians(d); 
+                float s = sin(a), c = cos(a); 
+                return mat2(c, -s, s, c); 
+            }
+        
+            vec3 hueShift(vec3 color, float hue) {
+                const vec3 k = vec3(0.57735, 0.57735, 0.57735);
+                float cosAngle = cos(hue * 6.283185);
+                return vec3(color * cosAngle + cross(k, color) * sin(hue * 6.283185) + k * dot(k, color) * (1.0 - cosAngle));
+            }
+        
+            void main() {
+                // 1. Center and aspect correction
+                vec2 uv = (v - 0.5); 
+                uv.x *= uA;
+        
+                // 2. Master Zoom & Rotation
+                uv *= uMZ; 
+                uv = rot(uMR) * uv;
+        
+                // 3. Kaleidoscope Symmetry
+                if(uAx > 1.1) {
+                    float r = length(uv);
+                    float a = atan(uv.y, uv.x);
+                    float slice = 6.283185 / uAx;
                     
-                    // APPLY FLIP AT THE START so it impacts all modes correctly
-                    uvOrig *= uF;
+                    // This creates the "pie slice"
+                    a = mod(a, slice); 
+                    // This mirrors every other slice for seamless symmetry
+                    if(mod(uAx, 2.0) < 0.1) a = abs(a - slice / 2.0);
                     
-                    vec2 uv = uvOrig * uMZ; uv = rot(uMR) * uv;
-                    if(uAx > 1.1) {
-                        float r = length(uv), a = atan(uv.y, uv.x), slice = 6.283185 / uAx;
-                        a = mod(a, slice); if(mod(uAx, 2.0) < 0.1) a = abs(a - slice / 2.0);
-                        uv = vec2(cos(a), sin(a)) * r; uv *= uLZ; uv = rot(uLR) * uv;
-                        uv.x /= uA; uv = abs(fract(uv - 0.5) * 2.0 - 1.0);
-                    } else {
-                        uv *= uLZ; uv = rot(uLR) * uv; uv.x /= uA; uv = fract(uv + 0.5); 
-                    }
-                    vec4 col;
-                    if (uRGB > 0.001) {
-                        col.r = texture2D(uTex, uv + vec2(uRGB, 0.0)).r;
-                        col.g = texture2D(uTex, uv).g;
-                        col.b = texture2D(uTex, uv - vec2(uRGB, 0.0)).b;
-                    } else col.rgb = texture2D(uTex, uv).rgb;
-                    col.a = 1.0;
-                    if (uSol > 0.01) col.rgb = mix(col.rgb, abs(col.rgb - uSol), step(0.1, uSol));
-                    if (uHue > 0.001) col.rgb = hueShift(col.rgb, uHue);
-                    col.rgb = (col.rgb - 0.5) * uC + 0.5;
-                    float l = dot(col.rgb, vec3(0.299, 0.587, 0.114));
-                    col.rgb = mix(vec3(l), col.rgb, uS);
-                    if (uBloom > 0.01) col.rgb += smoothstep(0.6, 1.0, l) * col.rgb * uBloom * 3.0;
-                    gl_FragColor = col;
+                    uv = vec2(cos(a), sin(a)) * r;
                 }
-            """.trimIndent()
+        
+                // 4. Local (Channel) Zoom & Rotation
+                uv *= uLZ; 
+                uv = rot(uLR) * uv;
+                uv.x /= uA;
+        
+                // 5. Final Wrap & Flip Application
+                // We use fract to tile the image, then apply uF to the result
+                vec2 finalUV;
+                if(uAx > 1.1) {
+                    finalUV = abs(fract(uv - 0.5) * 2.0 - 1.0);
+                } else {
+                    finalUV = fract(uv + 0.5);
+                }
+        
+                // --- THE FIX: APPLY FLIP TO FINAL SAMPLING COORDINATES ---
+                if(uF.x < 0.0) finalUV.x = 1.0 - finalUV.x;
+                if(uF.y > 0.0) finalUV.y = 1.0 - finalUV.y; 
+        
+                // 6. Sampling with RGB Shift
+                vec3 color;
+                if (uRGB > 0.001) {
+                    color.r = texture2D(uTex, finalUV + vec2(uRGB, 0.0)).r;
+                    color.g = texture2D(uTex, finalUV).g;
+                    color.b = texture2D(uTex, finalUV - vec2(uRGB, 0.0)).b;
+                } else {
+                    color = texture2D(uTex, finalUV).rgb;
+                }
+        
+                // 7. Post-processing (Hue, Contrast, Saturation, etc.)
+                if (uSol > 0.01) color = mix(color, abs(color - uSol), step(0.1, uSol));
+                if (uHue > 0.001) color = hueShift(color, uHue);
+                color = (color - 0.5) * uC + 0.5;
+                float luma = dot(color, vec3(0.299, 0.587, 0.114));
+                color = mix(vec3(luma), color, uS);
+                if (uBloom > 0.01) color += smoothstep(0.6, 1.0, luma) * color * uBloom * 3.0;
+        
+                gl_FragColor = vec4(color, 1.0);
+            }
+        """.trimIndent()
             program = createProgram(vSrc, fSrc)
             uMRLoc = GLES20.glGetUniformLocation(program, "uMR")
             uLRLoc = GLES20.glGetUniformLocation(program, "uLR")
