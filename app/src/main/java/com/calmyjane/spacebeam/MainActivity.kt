@@ -50,15 +50,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var togglePanel: FrameLayout
     private lateinit var flashOverlay: View
 
-    // --- Enhanced Gesture State ---
+    private var axisLocked = false
+    private lateinit var lockBtn: Button
+    private lateinit var saveConfirmBtn: Button
+
     private var lastFingerDist = 0f
     private var lastFingerAngle = 0f
     private var lastFingerFocusX = 0f
     private var lastFingerFocusY = 0f
 
-    private data class Preset(val sliderValues: Map<String, Int>, val flipX: Float, val flipY: Float, val rot180: Boolean)
+    private data class Preset(val sliderValues: Map<String, Int>, val flipX: Float, val flipY: Float, val rot180: Boolean, val axis: Int)
     private val presets = mutableMapOf<Int, Preset>()
-    private var heldPresetIndex: Int? = null
+    private var pendingSaveIndex: Int? = null
 
     private var transitionMs: Long = 1000L
     private var readabilityMode = false
@@ -83,6 +86,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         glView.setOnTouchListener { _, event ->
+            if (saveConfirmBtn.visibility == View.VISIBLE) {
+                saveConfirmBtn.visibility = View.GONE
+                pendingSaveIndex = null
+            }
             handleInteraction(event)
             true
         }
@@ -96,13 +103,11 @@ class MainActivity : AppCompatActivity() {
             applyPreset(1)
         }
 
-        val perms = arrayOf(Manifest.permission.CAMERA, Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        if (!allPermissionsGranted()) {
+        val perms = arrayOf(Manifest.permission.CAMERA)
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, perms, 10)
         }
     }
-
-    // --- Map-Like Navigation Logic ---
 
     private fun handleInteraction(event: MotionEvent) {
         if (event.pointerCount >= 2) {
@@ -114,116 +119,51 @@ class MainActivity : AppCompatActivity() {
             val angle = Math.toDegrees(atan2((p1y - p2y).toDouble(), (p1x - p2x).toDouble())).toFloat()
 
             if (event.actionMasked == MotionEvent.ACTION_MOVE) {
-                // 1. Translation (Panning)
                 val dx = (focusX - lastFingerFocusX) / glView.width.toFloat() * 2.0f
                 val dy = (focusY - lastFingerFocusY) / glView.height.toFloat() * 2.0f
 
-                val txSb = sliders["M_TX"]
-                val tySb = sliders["M_TY"]
-                txSb?.progress = (txSb?.progress ?: 500) - (dx * 500).toInt()
-                tySb?.progress = (tySb?.progress ?: 500) + (dy * 500).toInt()
+                sliders["M_TX"]?.let { it.progress = (it.progress - (dx * 500).toInt()).coerceIn(0, 1000) }
+                sliders["M_TY"]?.let { it.progress = (it.progress + (dy * 500).toInt()).coerceIn(0, 1000) }
 
-                // 2. Zoom (Pinching)
                 val scaleFactor = dist / lastFingerDist
-                val zoomSb = sliders["M_ZOOM"]
-                if (zoomSb != null) {
-                    val currentZoom = zoomSb.progress
-                    val zoomDelta = (log2(scaleFactor) * 300).toInt()
-                    zoomSb.progress = (currentZoom - zoomDelta).coerceIn(0, 1000)
-                }
+                sliders["M_ZOOM"]?.let { it.progress = (it.progress - (log2(scaleFactor) * 300).toInt()).coerceIn(0, 1000) }
 
-                // 3. Rotation
                 val dAngle = angle - lastFingerAngle
-                val angleSb = sliders["M_ANGLE"]
-                if (angleSb != null) {
-                    val sliderDelta = (-dAngle * (1000f / 360f)).toInt()
-                    angleSb.progress = (angleSb.progress + sliderDelta) % 1000
-                    if (angleSb.progress < 0) angleSb.progress += 1000
-                }
+                sliders["M_ANGLE"]?.let { it.progress = (it.progress + (-dAngle * (1000f / 360f)).toInt() + 1000) % 1000 }
             }
-            lastFingerDist = dist
-            lastFingerAngle = angle
-            lastFingerFocusX = focusX
-            lastFingerFocusY = focusY
+            lastFingerDist = dist; lastFingerAngle = angle; lastFingerFocusX = focusX; lastFingerFocusY = focusY
         } else if (event.action == MotionEvent.ACTION_UP) {
             if (event.eventTime - event.downTime < 200) toggleHud()
         }
     }
 
-    // --- UI Logic & SVG Integration ---
-
     private fun createLogoDrawable(): ShapeDrawable {
         val p = Path().apply {
-            // Your SVG Path Data converted to Android Path
-            moveTo(46.648479f, 131.26477f)
-            lineTo(46.645479f, 162.60033f)
-            lineTo(159.91391f, 162.60033f)
-            lineTo(159.91391f, 144.77816f)
-            lineTo(64.562629f, 144.77816f)
-            lineTo(64.562629f, 131.26477f)
-            close()
-            moveTo(126.77385f, 99.98706f)
-            lineTo(145.39344f, 99.98706f)
-            lineTo(145.39344f, 118.61969f)
-            lineTo(126.77385f, 118.61969f)
-            close()
-            moveTo(64.193819f, 99.98706f)
-            lineTo(82.813409f, 99.98706f)
-            lineTo(82.813409f, 118.61969f)
-            lineTo(64.193819f, 118.61969f)
-            close()
-            moveTo(28.346749f, 67.346711f)
-            lineTo(28.346749f, 193.34677f)
-            lineTo(28.395349f, 193.34677f)
-            lineTo(178.29628f, 193.34677f)
-            lineTo(178.29628f, 67.346711f)
-            close()
-            moveTo(33.846669f, 72.846631f)
-            lineTo(172.79633f, 72.846631f)
-            lineTo(172.79633f, 187.84685f)
-            lineTo(33.846669f, 187.84685f)
-            close()
+            moveTo(46.64f, 131.26f); lineTo(46.64f, 162.60f); lineTo(159.91f, 162.60f); lineTo(159.91f, 144.77f); lineTo(64.56f, 144.77f); lineTo(64.56f, 131.26f); close()
+            moveTo(126.77f, 99.98f); lineTo(145.39f, 99.98f); lineTo(145.39f, 118.61f); lineTo(126.77f, 118.61f); close()
+            moveTo(64.19f, 99.98f); lineTo(82.81f, 99.98f); lineTo(82.81f, 118.61f); lineTo(64.19f, 99.98f); close()
+            moveTo(28.34f, 67.34f); lineTo(28.34f, 193.34f); lineTo(178.29f, 193.34f); lineTo(178.29f, 67.34f); close()
+            moveTo(33.84f, 72.84f); lineTo(172.79f, 72.84f); lineTo(172.79f, 187.84f); lineTo(33.84f, 187.84f); close()
         }
-        return ShapeDrawable(PathShape(p, 200f, 200f)).apply {
-            paint.color = Color.WHITE
-            paint.style = Paint.Style.FILL
-            paint.isAntiAlias = true
-        }
+        return ShapeDrawable(PathShape(p, 200f, 200f)).apply { paint.color = Color.WHITE; paint.isAntiAlias = true }
     }
 
     private fun setupUltraMinimalHUD() {
         hudContainer = FrameLayout(this).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
         flashOverlay = View(this).apply { setBackgroundColor(Color.WHITE); alpha = 0f; layoutParams = FrameLayout.LayoutParams(-1, -1) }
 
-        // --- Inline Logo ---
-        val logoView = ImageView(this).apply {
-            setImageDrawable(createLogoDrawable())
-            alpha = 0.5f
-            layoutParams = FrameLayout.LayoutParams(220, 220).apply {
-                gravity = Gravity.TOP or Gravity.START
-                topMargin = 40
-                leftMargin = 40
-            }
-        }
+        val logoView = ImageView(this).apply { setImageDrawable(createLogoDrawable()); alpha = 0.4f; layoutParams = FrameLayout.LayoutParams(180, 180).apply { gravity = Gravity.TOP or Gravity.START; topMargin = 40; leftMargin = 40 } }
 
         val leftMenuContainer = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = FrameLayout.LayoutParams(-2, -1).apply { gravity = Gravity.START } }
-        sliderBox = ScrollView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(850, -1); layoutDirection = View.LAYOUT_DIRECTION_RTL
-            isVerticalScrollBarEnabled = true; setOnTouchListener { v, _ -> v.parent.requestDisallowInterceptTouchEvent(true); false }
-        }
-        val menu = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 60, 20, 240); layoutDirection = View.LAYOUT_DIRECTION_LTR }
+        sliderBox = ScrollView(this).apply { layoutParams = LinearLayout.LayoutParams(850, -1); layoutDirection = View.LAYOUT_DIRECTION_RTL; isVerticalScrollBarEnabled = false }
+        val menu = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 40, 20, 240); layoutDirection = View.LAYOUT_DIRECTION_LTR }
         sliderBox.addView(menu)
 
         togglePanel = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(80, 140).apply { gravity = Gravity.CENTER_VERTICAL }
-            menuToggleBtn = Button(this@MainActivity).apply {
-                text = "<"; setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.6f; textSize = 14f
-                layoutParams = FrameLayout.LayoutParams(-1, -1)
-                setOnClickListener { toggleMenu() }
-            }
+            menuToggleBtn = Button(this@MainActivity).apply { text = "<"; setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.6f; setOnClickListener { toggleMenu() } }
             addView(menuToggleBtn)
         }
-
         leftMenuContainer.addView(sliderBox); leftMenuContainer.addView(togglePanel)
 
         fun textToIcon(t: String, size: Float = 60f): BitmapDrawable {
@@ -231,7 +171,34 @@ class MainActivity : AppCompatActivity() {
             c.drawText(t, 60f, size + 20f, p); return BitmapDrawable(resources, b)
         }
 
-        // --- Sliders ---
+        // --- Minimal Axis Lock (Icon Only) ---
+        val axisContainer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 10) }
+        val axisLabel = TextView(this).apply { text = "COUNT"; setTextColor(Color.WHITE); textSize = 8f; minWidth = 140; alpha = 0.8f }
+        val axisSb = SeekBar(this).apply {
+            max = 15; progress = 1; layoutParams = LinearLayout.LayoutParams(540, 65)
+            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(16, 32) }
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { renderer.axisCount = (p + 1).toFloat() }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+        sliders["AXIS"] = axisSb
+
+        lockBtn = Button(this).apply {
+            text = "🔓"; setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); textSize = 14f
+            layoutParams = LinearLayout.LayoutParams(80, 80).apply { leftMargin = 10 }
+            setOnClickListener {
+                axisLocked = !axisLocked
+                text = if(axisLocked) "🔒" else "🔓"
+                alpha = if(axisLocked) 1.0f else 0.5f
+            }
+            alpha = 0.5f
+        }
+
+        axisContainer.addView(axisLabel); axisContainer.addView(axisSb); axisContainer.addView(lockBtn)
+        menu.addView(axisContainer)
+
         fun createSlider(id: String, label: String, max: Int, start: Int, onP: (Int) -> Unit) {
             val container = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 4, 0, 0) }
             val tv = TextView(this).apply { text = label; setTextColor(Color.WHITE); textSize = 8f; minWidth = 140; alpha = 0.8f; setOnClickListener { sliders[id]?.progress = start } }
@@ -269,10 +236,6 @@ class MainActivity : AppCompatActivity() {
             container.addView(sub("${baseId}_MOD", "↕")); container.addView(sub("${baseId}_RATE", "⏱")); menu.addView(container)
         }
 
-        // --- Build Menu Sections ---
-        addHeader(menu, "AXIS CONTROL")
-        createSlider("AXIS", "COUNT", 15, 1) { renderer.axisCount = (it + 1).toFloat() }
-
         addHeader(menu, "MASTER PIPE")
         createSlider("M_ANGLE", "ANGLE", 1000, 0) { renderer.mAngleBase = (it/1000f) * 360f }; createModPair("M_ANGLE", "M_ANGLE")
         createSlider("M_ROT", "ROTATION", 1000, 500) { renderer.mRotSpd = ((it-500)/500.0).pow(3.0)*1.5 }
@@ -290,7 +253,6 @@ class MainActivity : AppCompatActivity() {
         createSlider("CONTRAST", "CONTRAST", 1000, 500) { renderer.contrast = (it / 500f) }
         createSlider("VIBRANCE", "VIBRANCE", 1000, 500) { renderer.saturation = (it / 500f) }
 
-        // --- Buttons & Panels ---
         sideBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(10, 20, 10, 20) }
         fun createSideBtn(action: () -> Unit) = ImageButton(this).apply { setColorFilter(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.3f; layoutParams = LinearLayout.LayoutParams(100, 100); setOnClickListener { action(); updateSidebarVisuals() } }
         sideBox.addView(createSideBtn { currentSelector = if (currentSelector == CameraSelector.DEFAULT_BACK_CAMERA) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA; startCamera() }.apply { setImageResource(android.R.drawable.ic_menu_camera) })
@@ -316,26 +278,37 @@ class MainActivity : AppCompatActivity() {
             })
         }
         transContainer.addView(timeLabel); transContainer.addView(transSeekBar)
-        val presetRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+
+        val presetRow = FrameLayout(this)
+        val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         fun createPresetBtn(idx: Int) = Button(this).apply {
             text = idx.toString(); setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.8f; textSize = 16f
             layoutParams = LinearLayout.LayoutParams(80, 140); setPadding(0, 0, 0, 20)
-            setOnTouchListener { _, ev ->
-                if (ev.action == MotionEvent.ACTION_DOWN) { heldPresetIndex = idx; alpha = 1f }
-                if (ev.action == MotionEvent.ACTION_UP) { if (heldPresetIndex == idx) applyPreset(idx); heldPresetIndex = null; alpha = 0.8f; performClick() }
+            setOnClickListener { applyPreset(idx) }
+            setOnLongClickListener {
+                pendingSaveIndex = idx
+                saveConfirmBtn.visibility = View.VISIBLE
+                saveConfirmBtn.text = "SAVE $idx?"
                 true
             }
         }
-        (8 downTo 1).forEach { val b = createPresetBtn(it); presetButtons[it] = b; presetRow.addView(b) }
+        (8 downTo 1).forEach { val b = createPresetBtn(it); presetButtons[it] = b; btnRow.addView(b) }
+
+        saveConfirmBtn = Button(this).apply {
+            visibility = View.GONE; setTextColor(Color.BLACK); textSize = 12f; setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = 8f }
+            layoutParams = FrameLayout.LayoutParams(250, 100, Gravity.CENTER)
+            setOnClickListener { pendingSaveIndex?.let { savePreset(it) }; visibility = View.GONE }
+        }
+
+        presetRow.addView(btnRow); presetRow.addView(saveConfirmBtn)
         presetBox.addView(transContainer); presetBox.addView(presetRow)
 
         val blackCirc = GradientDrawable().apply { setColor(Color.BLACK); shape = GradientDrawable.OVAL }
         readabilityBtn = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_view); setColorFilter(Color.WHITE); background = blackCirc; alpha = 0.3f; layoutParams = FrameLayout.LayoutParams(110, 110).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 140; rightMargin = 35 }; setOnClickListener { toggleReadability() } }
-        resetBtn = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_close_clear_cancel); setColorFilter(Color.WHITE); background = blackCirc; alpha = 0.3f; layoutParams = FrameLayout.LayoutParams(110, 110).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 30; rightMargin = 35 }; setOnClickListener { heldPresetIndex?.let { savePreset(it) } ?: globalReset() } }
+        resetBtn = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_close_clear_cancel); setColorFilter(Color.WHITE); background = blackCirc; alpha = 0.3f; layoutParams = FrameLayout.LayoutParams(110, 110).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 30; rightMargin = 35 }; setOnClickListener { globalReset() } }
 
-        hudContainer.addView(flashOverlay)
-        hudContainer.addView(logoView) // Added Logo
-        hudContainer.addView(leftMenuContainer)
+        hudContainer.addView(flashOverlay); hudContainer.addView(logoView); hudContainer.addView(leftMenuContainer)
         hudContainer.addView(captureBox, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30 })
         hudContainer.addView(sideBox, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.TOP or Gravity.END; topMargin = 40; rightMargin = 40 })
         hudContainer.addView(presetBox, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 180 })
@@ -343,54 +316,37 @@ class MainActivity : AppCompatActivity() {
         addContentView(hudContainer, ViewGroup.LayoutParams(-1, -1)); updateSidebarVisuals()
     }
 
-    // --- Core Operations ---
-
     private fun globalReset() {
         currentAnimator?.cancel(); renderer.mRotAccum = 0.0; renderer.lRotAccum = 0.0; renderer.resetPhases()
         renderer.flipX = 1f; renderer.flipY = -1f; renderer.rot180 = false; activePreset = -1; updatePresetHighlights()
-
         sliders.forEach { (id, sb) ->
             sb.progress = when (id) {
-                "AXIS" -> 1
-                "M_ROT", "C_ROT" -> 500
-                "CONTRAST", "VIBRANCE" -> 500 // Corrected Reset Value
-                "M_ZOOM", "C_ZOOM" -> 250
-                "M_TX", "M_TY", "C_TX", "C_TY" -> 500
-                else -> 0
+                "AXIS" -> 1; "M_ROT", "CONTRAST", "VIBRANCE", "M_TX", "M_TY", "C_TX", "C_TY" -> 500; "M_ZOOM" -> 250; "C_ANGLE" -> 0; else -> 0
             }
         }
         updateSidebarVisuals()
     }
 
     private fun updatePresetHighlights() {
-        presetButtons.forEach { (idx, btn) ->
-            val bg = GradientDrawable().apply { setColor(Color.TRANSPARENT); if (idx == activePreset) setStroke(4, Color.WHITE); cornerRadius = 12f }
-            btn.background = bg
-        }
+        presetButtons.forEach { (idx, btn) -> btn.background = GradientDrawable().apply { setColor(Color.TRANSPARENT); if (idx == activePreset) setStroke(4, Color.WHITE); cornerRadius = 12f } }
     }
 
     private fun triggerFlashPulse() {
-        flashOverlay.alpha = 0.6f
-        flashOverlay.animate().alpha(0f).setDuration(400).start()
+        flashOverlay.alpha = 0.6f; flashOverlay.animate().alpha(0f).setDuration(400).start()
         photoBtn.animate().scaleX(1.8f).scaleY(1.8f).setDuration(100).withEndAction { photoBtn.animate().scaleX(1.5f).scaleY(1.5f).setDuration(200).start() }.start()
     }
 
     private fun applyPreset(idx: Int) {
         val p = presets[idx] ?: return
-        activePreset = idx
-        updatePresetHighlights()
-        currentAnimator?.cancel()
+        activePreset = idx; updatePresetHighlights(); currentAnimator?.cancel()
         val startValues = sliders.mapValues { it.value.progress }
         currentAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = transitionMs
             addUpdateListener { anim ->
                 val t = anim.animatedValue as Float
                 sliders.forEach { (id, sb) ->
-                    if (id != "AXIS") {
-                        val start = startValues[id] ?: sb.progress
-                        val target = p.sliderValues[id] ?: start
-                        sb.progress = (start + (target - start) * t).toInt()
-                    }
+                    if (id == "AXIS") { if (!axisLocked) sb.progress = p.axis - 1 }
+                    else { val start = startValues[id] ?: sb.progress; val target = p.sliderValues[id] ?: start; sb.progress = (start + (target - start) * t).toInt() }
                 }
                 renderer.flipX = p.flipX; renderer.flipY = p.flipY; renderer.rot180 = p.rot180; updateSidebarVisuals()
             }
@@ -399,29 +355,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun savePreset(idx: Int) {
-        presets[idx] = Preset(sliders.filter { it.key != "AXIS" }.mapValues { it.value.progress }, renderer.flipX, renderer.flipY, renderer.rot180)
-        activePreset = idx
-        updatePresetHighlights()
+        presets[idx] = Preset(sliders.filter { it.key != "AXIS" }.mapValues { it.value.progress }, renderer.flipX, renderer.flipY, renderer.rot180, sliders["AXIS"]?.progress?.plus(1) ?: 1)
+        activePreset = idx; updatePresetHighlights()
+        Toast.makeText(this, "Preset $idx Saved", Toast.LENGTH_SHORT).show()
     }
 
     private fun initDefaultPresets() {
         fun p(ax: Int=1, mAng: Int=0, mAm: Int=0, mAr: Int=0, mRot: Int=500, mZm: Int=250, mZMod: Int=0, mZR: Int=0,
-              cAng: Int=0, cAm: Int=0, cAr: Int=0, cRot: Int=500, cZm: Int=250,
-              rgb: Int=0, hue: Int=0, neg: Int=0, glw: Int=0, mRgb: Int=0) = Preset(mapOf(
+              cAng: Int=0, cAm: Int=0, cAr: Int=0, rgb: Int=0, rR: Int=0, rM: Int=0, hue: Int=0, hR: Int=0, hM: Int=0,
+              neg: Int=0, glw: Int=0, gR: Int=0, gM: Int=0, mRgb: Int=0, txM: Int=0, txR: Int=0,
+              satur: Int=500, contrast: Int=500) = Preset(mapOf(
             "M_ANGLE" to mAng, "M_ANGLE_MOD" to mAm, "M_ANGLE_RATE" to mAr, "M_ROT" to mRot,
             "M_ZOOM" to mZm, "M_ZOOM_MOD" to mZMod, "M_ZOOM_RATE" to mZR,
-            "C_ANGLE" to cAng, "C_ANGLE_MOD" to cAm, "C_ANGLE_RATE" to cAr, "C_ROT" to cRot,
-            "C_ZOOM" to cZm, "RGB" to rgb, "HUE" to hue, "NEG" to neg, "GLOW" to glw, "M_RGB" to mRgb,
-            "CONTRAST" to 500, "VIBRANCE" to 500, "M_TX" to 500, "M_TY" to 500, "C_TX" to 500, "C_TY" to 500
-        ), 1f, -1f, false)
-        presets[1] = p(ax=3, mRot=508, mZm=200, mZMod=50, mZR=50)
-        presets[2] = p(ax=4, mAng=120, mAm=200, mAr=80, glw=200)
-        presets[3] = p(ax=6, mRot=525, mAm=300, mAr=150, rgb=150)
-        presets[4] = p(ax=8, mAng=450, mRot=480, neg=400, hue=200)
-        presets[5] = p(ax=5, mRot=650, mZm=400, mZR=200, mRgb=300)
-        presets[6] = p(ax=10, cAng=500, cAm=800, cAr=200, neg=800, glw=500)
-        presets[7] = p(ax=12, mRot=550, cRot=450, hue=1000, mZm=600, mZMod=400)
-        presets[8] = p(ax=15, mRot=800, mAm=1000, mAr=400, glw=1000, rgb=1000)
+            "C_ANGLE" to cAng, "C_ANGLE_MOD" to cAm, "C_ANGLE_RATE" to cAr,
+            "RGB" to rgb, "RGB_RATE" to rR, "RGB_MOD" to rM, "HUE" to hue, "HUE_RATE" to hR, "HUE_MOD" to hM,
+            "NEG" to neg, "GLOW" to glw, "GLOW_RATE" to gR, "GLOW_MOD" to gM, "M_RGB" to mRgb,
+            "M_TX_MOD" to txM, "M_TX_RATE" to txR, "CONTRAST" to contrast, "VIBRANCE" to satur, "M_TX" to 500, "M_TY" to 500
+        ), 1f, -1f, false, ax)
+
+        // 1: Minimal Geometric (Axis 2, Light rotation)
+        presets[1] = p(ax=2, mRot=505, mAm=80, mAr=50, mZm=250, mZMod=120, mZR=80)
+        // 2: Soft Bloom (Adds Camera modulation + Glow)
+        presets[2] = p(ax=3, mRot=510, cAm=150, cAr=100, glw=200, gM=300, gR=120)
+        // 3: Hue Drift (Introduces Color cycling)
+        presets[3] = p(ax=4, mRot=500, mZm=300, hue=200, hM=800, hR=150, satur=700)
+        // 4: Crystal Fractal (Higher axis, tight zoom modulation)
+        presets[4] = p(ax=8, mRot=502, mZm=180, mZMod=600, mZR=200, glw=350, contrast=650)
+        // 5: Neon Ghost (Careful RGB shifts + Solarization)
+        presets[5] = p(ax=6, mRot=520, mRgb=120, rgb=100, rM=300, rR=150, neg=200, glw=500, contrast=800)
+        // 6: Deep Kaleidoscope (Heavy Axis + Panning mods)
+        presets[6] = p(ax=12, mRot=505, mAm=1000, mAr=50, txM=400, txR=100, hue=400, glw=400)
+        // 7: Chrome Chaos (High RGB shift + High Contrast)
+        presets[7] = p(ax=5, mRot=560, mRgb=250, rgb=200, rM=600, rR=300, neg=400, glw=700, contrast=1000, satur=800)
+        // 8: Spectral Nightmare (Max axis, fast modulation across all parameters)
+        presets[8] = p(ax=16, mRot=500, mAm=1000, mAr=400, mZMod=800, mZR=350, cAm=1000, cAr=200, neg=1000, glw=1000, satur=1000)
     }
 
     private fun toggleHud() { isHudVisible = !isHudVisible; hudContainer.visibility = if (isHudVisible) View.VISIBLE else View.GONE; if (isHudVisible) hideSystemUI() }
@@ -439,9 +406,6 @@ class MainActivity : AppCompatActivity() {
         cp.addListener({ val provider = cp.get(); val preview = Preview.Builder().build().apply { setSurfaceProvider { renderer.provideSurface(it) } }; try { provider.unbindAll(); provider.bindToLifecycle(this, currentSelector, preview) } catch (e: Exception) { e.printStackTrace() } }, ContextCompat.getMainExecutor(this))
     }
     private fun hideSystemUI() { window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) }
-    private fun allPermissionsGranted() = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-
-    // --- Kaleidoscope Renderer ---
 
     inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
         private var program = 0; private var texID = -1; private var surfaceTexture: SurfaceTexture? = null
@@ -510,7 +474,8 @@ class MainActivity : AppCompatActivity() {
                 val r = (rates[id] ?: 0f).toDouble(); val drift = (driftPhases[id] ?: 0.0) + (r * 0.13) * d * tpi; driftPhases[id] = drift
                 val p = (phases[id] ?: 0.0) + (r + sin(drift) * r * 0.4) * d * tpi; phases[id] = p; return sin(p).toFloat() * (mods[id] ?: 0f)
             }
-            val phMap = mapOf("M_ANGLE" to calcPh("M_ANGLE"), "C_ANGLE" to calcPh("C_ANGLE"), "M_ZOOM" to calcPh("M_ZOOM"), "C_ZOOM" to calcPh("C_ZOOM"), "HUE" to calcPh("HUE"), "NEG" to calcPh("NEG"), "GLOW" to calcPh("GLOW"), "RGB" to calcPh("RGB"), "M_RGB" to calcPh("M_RGB"), "M_TX" to calcPh("M_TX"), "M_TY" to calcPh("M_TY"), "C_TX" to calcPh("C_TX"), "C_TY" to calcPh("C_TY"))
+            val ids = listOf("M_ANGLE", "C_ANGLE", "M_ZOOM", "C_ZOOM", "HUE", "NEG", "GLOW", "RGB", "M_RGB", "M_TX", "M_TY", "C_TX", "C_TY")
+            val phMap = ids.associateWith { calcPh(it) }
             mRotAccum += mRotSpd * 120.0 * d; lRotAccum += lRotSpd * 120.0 * d
             try { surfaceTexture?.updateTexImage() } catch(e: Exception) { return }
             drawScene(phMap, viewWidth, viewHeight)
@@ -528,16 +493,16 @@ class MainActivity : AppCompatActivity() {
 
         private fun drawScene(ph: Map<String, Float>, w: Int, h: Int) {
             GLES20.glViewport(0, 0, w, h); GLES20.glUseProgram(program)
-            GLES20.glUniform1f(uLocs["uMR"]!!, (mAngleBase + mRotAccum + ph["M_ANGLE"]!! * 90.0).toFloat() + (if(rot180) 180f else 0f))
-            GLES20.glUniform1f(uLocs["uLR"]!!, (lAngleBase + lRotAccum + ph["C_ANGLE"]!! * 45.0).toFloat())
-            GLES20.glUniform1f(uLocs["uA"]!!, w.toFloat()/h.toFloat()); GLES20.glUniform1f(uLocs["uMZ"]!!, (mZoomBase + ph["M_ZOOM"]!! * 0.5 * mZoomBase).toFloat())
-            GLES20.glUniform1f(uLocs["uLZ"]!!, (lZoomBase + ph["C_ZOOM"]!! * 0.5 * lZoomBase).toFloat()); GLES20.glUniform1f(uLocs["uAx"]!!, axisCount)
+            GLES20.glUniform1f(uLocs["uMR"]!!, (mAngleBase + mRotAccum + (ph["M_ANGLE"] ?: 0f) * 90.0).toFloat() + (if(rot180) 180f else 0f))
+            GLES20.glUniform1f(uLocs["uLR"]!!, (lAngleBase + lRotAccum + (ph["C_ANGLE"] ?: 0f) * 45.0).toFloat())
+            GLES20.glUniform1f(uLocs["uA"]!!, w.toFloat()/h.toFloat()); GLES20.glUniform1f(uLocs["uMZ"]!!, (mZoomBase + (ph["M_ZOOM"] ?: 0f) * 0.5 * mZoomBase).toFloat())
+            GLES20.glUniform1f(uLocs["uLZ"]!!, (lZoomBase + (ph["C_ZOOM"] ?: 0f) * 0.5 * lZoomBase).toFloat()); GLES20.glUniform1f(uLocs["uAx"]!!, axisCount)
             GLES20.glUniform2f(uLocs["uF"]!!, flipX, flipY); GLES20.glUniform1f(uLocs["uC"]!!, contrast); GLES20.glUniform1f(uLocs["uS"]!!, saturation)
-            GLES20.glUniform1f(uLocs["uHue"]!!, hueShiftBase + ph["HUE"]!!); GLES20.glUniform1f(uLocs["uSol"]!!, solarizeBase + ph["NEG"]!!)
-            GLES20.glUniform1f(uLocs["uBloom"]!!, bloomBase + ph["GLOW"]!!); GLES20.glUniform1f(uLocs["uRGB"]!!, rgbShiftBase + ph["RGB"]!!)
-            GLES20.glUniform1f(uLocs["uMRGB"]!!, mRgbShiftBase + ph["M_RGB"]!!)
-            GLES20.glUniform2f(uLocs["uMT"]!!, mTx + ph["M_TX"]!!, mTy + ph["M_TY"]!!)
-            GLES20.glUniform2f(uLocs["uCT"]!!, lTx + ph["C_TX"]!!, lTy + ph["C_TY"]!!)
+            GLES20.glUniform1f(uLocs["uHue"]!!, hueShiftBase + (ph["HUE"] ?: 0f)); GLES20.glUniform1f(uLocs["uSol"]!!, solarizeBase + (ph["NEG"] ?: 0f))
+            GLES20.glUniform1f(uLocs["uBloom"]!!, bloomBase + (ph["GLOW"] ?: 0f)); GLES20.glUniform1f(uLocs["uRGB"]!!, rgbShiftBase + (ph["RGB"] ?: 0f))
+            GLES20.glUniform1f(uLocs["uMRGB"]!!, mRgbShiftBase + (ph["M_RGB"] ?: 0f))
+            GLES20.glUniform2f(uLocs["uMT"]!!, mTx + (ph["M_TX"] ?: 0f), mTy + (ph["M_TY"] ?: 0f))
+            GLES20.glUniform2f(uLocs["uCT"]!!, lTx + (ph["C_TX"] ?: 0f), lTy + (ph["C_TY"] ?: 0f))
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texID); GLES20.glUniform1i(uLocs["uTex"]!!, 0)
             val pL = GLES20.glGetAttribLocation(program, "p"); val tL = GLES20.glGetAttribLocation(program, "t")
             GLES20.glEnableVertexAttribArray(pL); GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf)
