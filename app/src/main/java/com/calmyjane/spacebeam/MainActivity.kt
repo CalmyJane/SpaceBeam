@@ -32,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var hudContainer: FrameLayout
     private val sliders = mutableMapOf<String, SeekBar>()
     private var currentAnimator: ValueAnimator? = null
+    private lateinit var gestureDetector: GestureDetector
 
     private lateinit var flipXBtn: ImageButton
     private lateinit var flipYBtn: ImageButton
@@ -65,6 +66,7 @@ class MainActivity : AppCompatActivity() {
 
         setupUltraMinimalHUD()
         initDefaultPresets()
+        setupGestures()
 
         glView.post {
             globalReset()
@@ -73,6 +75,16 @@ class MainActivity : AppCompatActivity() {
 
         if (allPermissionsGranted()) startCamera()
         else ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 10)
+    }
+
+    private fun setupGestures() {
+        gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                hudContainer.visibility = if (hudContainer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                return true
+            }
+        })
+        glView.setOnTouchListener { _, event -> gestureDetector.onTouchEvent(event) }
     }
 
     private fun initDefaultPresets() {
@@ -84,7 +96,8 @@ class MainActivity : AppCompatActivity() {
             "C_ROT" to cRot, "C_ROT_MOD" to cRm, "C_ROT_RATE" to cRr,
             "C_ZOOM" to cZm, "C_ZOOM_MOD" to cZm_m, "C_ZOOM_RATE" to cZm_r,
             "RGB" to rgb, "HUE" to hue, "NEG" to neg, "GLOW" to glw, "M_RGB" to mRgb,
-            "CONTRAST" to 500, "VIBRANCE" to 500
+            "CONTRAST" to 500, "VIBRANCE" to 500,
+            "M_TX" to 500, "M_TY" to 500, "C_TX" to 500, "C_TY" to 500
         ), 1f, -1f, false)
 
         presets[1] = p(ax=3, mRot=505, mRm=150, mRr=120, mZm=250, mZm_m=180, mZm_r=90)
@@ -99,7 +112,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupUltraMinimalHUD() {
         hudContainer = FrameLayout(this)
-
         sliderBox = ScrollView(this).apply {
             layoutParams = FrameLayout.LayoutParams(850, -1)
             verticalScrollbarPosition = View.SCROLLBAR_POSITION_LEFT
@@ -108,7 +120,7 @@ class MainActivity : AppCompatActivity() {
         val menu = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 60, 20, 240) }
         sliderBox.addView(menu)
 
-        // AXIS
+        // AXIS Slider
         val axisCont = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 10, 0, 25) }
         val axisTv = TextView(this).apply { text = "AXIS"; setTextColor(Color.WHITE); textSize = 10f; setTypeface(null, Typeface.BOLD); minWidth = 140; setOnClickListener { sliders["AXIS"]?.progress = 1 } }
         val axisSb = SeekBar(this).apply {
@@ -165,21 +177,27 @@ class MainActivity : AppCompatActivity() {
             container.addView(sub("${baseId}_MOD", "↕")); container.addView(sub("${baseId}_RATE", "⏱")); menu.addView(container)
         }
 
-        addHeader(menu, "MASTER")
+        // --- UI SECTIONS ---
+        addHeader(menu, "MASTER PIPE")
         createSlider("M_ROT", "ROTATION", 1000, 500) { renderer.mRotSpd = ((it-500)/500.0).pow(3.0)*1.5 }; createModPair("M_ROT")
         createSlider("M_ZOOM", "ZOOM", 1000, 250) { renderer.mZoomBase = 0.1 + ((it/1000.0).pow(2.0)*9.9) }; createModPair("M_ZOOM")
-        createSlider("M_RGB", "RGB-SMUDGE", 1000, 0) { renderer.mRgbShift = it / 1000f * 0.15f }
+        createSlider("M_TX", "TRANSLATE X", 1000, 500) { renderer.mTx = (it - 500) / 250f }; createModPair("M_TX")
+        createSlider("M_TY", "TRANSLATE Y", 1000, 500) { renderer.mTy = (it - 500) / 250f }; createModPair("M_TY")
+        createSlider("M_RGB", "RGB SMUDGE", 1000, 0) { renderer.mRgbShiftBase = it / 1000f * 0.15f }; createModPair("M_RGB")
 
-        addHeader(menu, "CAMERA")
+        addHeader(menu, "CAMERA PIPE")
         createSlider("C_ROT", "ROTATION", 1000, 500) { renderer.lRotSpd = ((it-500)/500.0).pow(3.0)*1.5 }; createModPair("C_ROT")
         createSlider("C_ZOOM", "ZOOM", 1000, 250) { renderer.lZoomBase = 0.1 + ((it/1000.0).pow(2.0)*9.9) }; createModPair("C_ZOOM")
-        createSlider("RGB", "RGB-SHIFT", 1000, 0) { renderer.rgbShiftBase = it / 1000f * 0.05f }; createModPair("RGB")
+        createSlider("C_TX", "TRANSLATE X", 1000, 500) { renderer.lTx = (it - 500) / 250f }; createModPair("C_TX")
+        createSlider("C_TY", "TRANSLATE Y", 1000, 500) { renderer.lTy = (it - 500) / 250f }; createModPair("C_TY")
+        createSlider("RGB", "RGB SHIFT", 1000, 0) { renderer.rgbShiftBase = it / 1000f * 0.05f }; createModPair("RGB")
         createSlider("HUE", "HUE", 1000, 0) { renderer.hueShiftBase = it / 1000f }; createModPair("HUE")
         createSlider("NEG", "NEGATIVE", 1000, 0) { renderer.solarizeBase = it / 1000f }; createModPair("NEG")
         createSlider("GLOW", "GLOW", 1000, 0) { renderer.bloomBase = it / 1000f }; createModPair("GLOW")
         createSlider("CONTRAST", "CONTRAST", 1000, 500) { renderer.contrast = 0.5f + (it / 500f) }
         createSlider("VIBRANCE", "VIBRANCE", 1000, 500) { renderer.saturation = it / 500f }
 
+        // --- Side/Preset Controls ---
         sideBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(10, 20, 10, 20) }
         fun textToIcon(t: String): BitmapDrawable {
             val b = Bitmap.createBitmap(120, 120, Bitmap.Config.ARGB_8888); val c = Canvas(b); val p = Paint().apply { color = Color.WHITE; textSize = 60f; textAlign = Paint.Align.CENTER; isFakeBoldText = true }
@@ -290,6 +308,7 @@ class MainActivity : AppCompatActivity() {
                 "AXIS" -> 1
                 "M_ROT", "C_ROT", "CONTRAST", "VIBRANCE" -> 500
                 "M_ZOOM", "C_ZOOM" -> 250
+                "M_TX", "M_TY", "C_TX", "C_TY" -> 500
                 else -> 0
             }
         }
@@ -308,9 +327,10 @@ class MainActivity : AppCompatActivity() {
 
         var axisCount = 2.0f; var flipX = 1.0f; var flipY = -1.0f; var rot180 = false
         var contrast = 1.0f; var saturation = 1.0f
-        var mRotSpd = 0.0; var mAngle = 0.0; var mZoomBase = 1.0; var mRgbShift = 0f
+        var mRotSpd = 0.0; var mAngle = 0.0; var mZoomBase = 1.0; var mRgbShiftBase = 0f
         var lRotSpd = 0.0; var lAngle = 0.0; var lZoomBase = 1.0
         var rgbShiftBase = 0f; var hueShiftBase = 0f; var solarizeBase = 0f; var bloomBase = 0f
+        var mTx = 0f; var mTy = 0f; var lTx = 0f; var lTy = 0f
 
         private val mods = mutableMapOf<String, Float>()
         private val rates = mutableMapOf<String, Float>()
@@ -326,22 +346,39 @@ class MainActivity : AppCompatActivity() {
             val fSrc = """
             #extension GL_OES_EGL_image_external : require
             precision mediump float;
-            varying vec2 v; uniform samplerExternalOES uTex; uniform float uMR, uLR, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB; uniform vec2 uF; 
+            varying vec2 v; 
+            uniform samplerExternalOES uTex; 
+            uniform float uMR, uLR, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB; 
+            uniform vec2 uMT, uCT;
+            uniform vec2 uF; 
+
             mat2 rot(float d) { float a=radians(d); float s=sin(a), c=cos(a); return mat2(c,-s,s,c); }
             vec3 hS(vec3 c, float h) { const vec3 k=vec3(0.577); float ca=cos(h*6.28); return c*ca+cross(k,c)*sin(h*6.28)+k*dot(k,c)*(1.0-ca); }
             
             vec3 sampleK(vec2 uvS) {
                 vec2 uv = uvS - 0.5; uv.x *= uA;
+                
+                // Master Translation
+                uv += uMT;
+                // Master Pipe
                 uv *= uMZ; uv = rot(uMR) * uv;
+
+                // Folding Logic
                 if(uAx > 1.1) {
                     float r = length(uv); float a = atan(uv.y, uv.x);
                     float w = 6.28318 / uAx; a = mod(a, w);
                     if(mod(uAx, 2.0) < 0.1) a = abs(a - w/2.0);
                     uv = vec2(cos(a), sin(a)) * r;
                 }
+
+                // Camera Translation
+                uv += uCT;
+                // Camera Pipe
                 uv *= uLZ; uv = rot(uLR) * uv; uv.x /= uA;
+                
                 vec2 fuv = (uAx > 1.1) ? abs(fract(uv - 0.5) * 2.0 - 1.0) : fract(uv + 0.5);
                 if(uF.x < 0.0) fuv.x = 1.0 - fuv.x; if(uF.y > 0.0) fuv.y = 1.0 - fuv.y; 
+                
                 if(uRGB > 0.001) return vec3(texture2D(uTex, fuv + vec2(uRGB, 0.0)).r, texture2D(uTex, fuv).g, texture2D(uTex, fuv - vec2(uRGB, 0.0)).b);
                 return texture2D(uTex, fuv).rgb;
             }
@@ -362,7 +399,7 @@ class MainActivity : AppCompatActivity() {
             }
             """.trimIndent()
             program = GLES20.glCreateProgram().apply { GLES20.glAttachShader(this, compile(GLES20.GL_VERTEX_SHADER, vSrc)); GLES20.glAttachShader(this, compile(GLES20.GL_FRAGMENT_SHADER, fSrc)); GLES20.glLinkProgram(this) }
-            listOf("uMR", "uLR", "uA", "uMZ", "uLZ", "uAx", "uC", "uS", "uHue", "uSol", "uBloom", "uRGB", "uMRGB", "uF", "uTex").forEach { uLocs[it] = GLES20.glGetUniformLocation(program, it) }
+            listOf("uMR", "uLR", "uA", "uMZ", "uLZ", "uAx", "uC", "uS", "uHue", "uSol", "uBloom", "uRGB", "uMRGB", "uF", "uMT", "uCT", "uTex").forEach { uLocs[it] = GLES20.glGetUniformLocation(program, it) }
             texID = createOESTex(); surfaceTexture = SurfaceTexture(texID)
             pBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(-1f,-1f, 1f,-1f, -1f,1f, 1f,1f)).position(0) }
             tBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(0f,0f, 1f,0f, 0f,1f, 1f,1f)).position(0) }
@@ -374,12 +411,10 @@ class MainActivity : AppCompatActivity() {
             val now = System.nanoTime(); val d = (now - lastTime) / 1e9; lastTime = now; val tpi = 2.0 * PI
             fun updPh(id: String): Float {
                 val r = (rates[id] ?: 0f).toDouble()
-                // Do not exit early if r == 0.0; this keeps the phase frozen at its current sine offset
                 val drift = (driftPhases[id] ?: 0.0) + (r * 0.13) * d * tpi; driftPhases[id] = drift
                 val p = (phases[id] ?: 0.0) + (r + sin(drift) * r * 0.4) * d * tpi; phases[id] = p
                 return sin(p).toFloat() * (mods[id] ?: 0f)
             }
-            // Use floor-style modulo to keep mAngle strictly positive for smoother wrap-arounds
             mAngle = (mAngle + mRotSpd * 120.0 * d); mAngle -= floor(mAngle / 360.0) * 360.0
             lAngle = (lAngle + lRotSpd * 120.0 * d); lAngle -= floor(lAngle / 360.0) * 360.0
 
@@ -391,7 +426,10 @@ class MainActivity : AppCompatActivity() {
             GLES20.glUniform2f(uLocs["uF"]!!, flipX, flipY); GLES20.glUniform1f(uLocs["uC"]!!, contrast); GLES20.glUniform1f(uLocs["uS"]!!, saturation)
             GLES20.glUniform1f(uLocs["uHue"]!!, hueShiftBase + updPh("HUE")); GLES20.glUniform1f(uLocs["uSol"]!!, solarizeBase + updPh("NEG"))
             GLES20.glUniform1f(uLocs["uBloom"]!!, bloomBase + updPh("GLOW")); GLES20.glUniform1f(uLocs["uRGB"]!!, rgbShiftBase + updPh("RGB"))
-            GLES20.glUniform1f(uLocs["uMRGB"]!!, mRgbShift); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texID); GLES20.glUniform1i(uLocs["uTex"]!!, 0)
+            GLES20.glUniform1f(uLocs["uMRGB"]!!, mRgbShiftBase + updPh("M_RGB"));
+            GLES20.glUniform2f(uLocs["uMT"]!!, mTx + updPh("M_TX"), mTy + updPh("M_TY"))
+            GLES20.glUniform2f(uLocs["uCT"]!!, lTx + updPh("C_TX"), lTy + updPh("C_TY"))
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texID); GLES20.glUniform1i(uLocs["uTex"]!!, 0)
             val pL = GLES20.glGetAttribLocation(program, "p"); val tL = GLES20.glGetAttribLocation(program, "t"); GLES20.glEnableVertexAttribArray(pL); GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf); GLES20.glEnableVertexAttribArray(tL); GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
         fun provideSurface(req: SurfaceRequest) { glView.queueEvent { surfaceTexture?.setDefaultBufferSize(req.resolution.width, req.resolution.height); val s = android.view.Surface(surfaceTexture); req.provideSurface(s, ContextCompat.getMainExecutor(this@MainActivity)) { s.release() } } }
