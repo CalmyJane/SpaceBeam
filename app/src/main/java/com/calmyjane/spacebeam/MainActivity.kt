@@ -32,7 +32,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var hudContainer: FrameLayout
     private val sliders = mutableMapOf<String, SeekBar>()
     private var currentAnimator: ValueAnimator? = null
-    private lateinit var gestureDetector: GestureDetector
 
     private lateinit var flipXBtn: ImageButton
     private lateinit var flipYBtn: ImageButton
@@ -46,6 +45,7 @@ class MainActivity : AppCompatActivity() {
 
     private var transitionMs: Long = 1000L
     private var readabilityMode = false
+    private var isHudVisible = true
 
     private lateinit var sliderBox: ScrollView
     private lateinit var sideBox: LinearLayout
@@ -66,7 +66,6 @@ class MainActivity : AppCompatActivity() {
 
         setupUltraMinimalHUD()
         initDefaultPresets()
-        setupGestures()
 
         glView.post {
             globalReset()
@@ -75,16 +74,6 @@ class MainActivity : AppCompatActivity() {
 
         if (allPermissionsGranted()) startCamera()
         else ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 10)
-    }
-
-    private fun setupGestures() {
-        gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                hudContainer.visibility = if (hudContainer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-                return true
-            }
-        })
-        glView.setOnTouchListener { _, event -> gestureDetector.onTouchEvent(event) }
     }
 
     private fun initDefaultPresets() {
@@ -111,11 +100,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupUltraMinimalHUD() {
-        hudContainer = FrameLayout(this)
+        // --- HUD CONTAINER (TAP TO HIDE) ---
+        hudContainer = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(-1, -1)
+            // Tapping the background toggles visibility
+            setOnClickListener { toggleHud() }
+        }
+
         sliderBox = ScrollView(this).apply {
             layoutParams = FrameLayout.LayoutParams(850, -1)
             verticalScrollbarPosition = View.SCROLLBAR_POSITION_LEFT
             isVerticalScrollBarEnabled = true
+            // Prevent clicks on the sliders from triggering the background toggle
+            setOnClickListener { /* Consume tap */ }
+            setOnTouchListener { v, _ -> v.parent.requestDisallowInterceptTouchEvent(true); false }
         }
         val menu = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 60, 20, 240) }
         sliderBox.addView(menu)
@@ -177,7 +175,6 @@ class MainActivity : AppCompatActivity() {
             container.addView(sub("${baseId}_MOD", "↕")); container.addView(sub("${baseId}_RATE", "⏱")); menu.addView(container)
         }
 
-        // --- UI SECTIONS ---
         addHeader(menu, "MASTER PIPE")
         createSlider("M_ROT", "ROTATION", 1000, 500) { renderer.mRotSpd = ((it-500)/500.0).pow(3.0)*1.5 }; createModPair("M_ROT")
         createSlider("M_ZOOM", "ZOOM", 1000, 250) { renderer.mZoomBase = 0.1 + ((it/1000.0).pow(2.0)*9.9) }; createModPair("M_ZOOM")
@@ -197,8 +194,7 @@ class MainActivity : AppCompatActivity() {
         createSlider("CONTRAST", "CONTRAST", 1000, 500) { renderer.contrast = 0.5f + (it / 500f) }
         createSlider("VIBRANCE", "VIBRANCE", 1000, 500) { renderer.saturation = it / 500f }
 
-        // --- Side/Preset Controls ---
-        sideBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(10, 20, 10, 20) }
+        sideBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(10, 20, 10, 20); setOnClickListener { /* consume */ } }
         fun textToIcon(t: String): BitmapDrawable {
             val b = Bitmap.createBitmap(120, 120, Bitmap.Config.ARGB_8888); val c = Canvas(b); val p = Paint().apply { color = Color.WHITE; textSize = 60f; textAlign = Paint.Align.CENTER; isFakeBoldText = true }
             c.drawText(t, 60f, 80f, p); return BitmapDrawable(resources, b)
@@ -210,7 +206,7 @@ class MainActivity : AppCompatActivity() {
         rot180Btn = createSideBtn { renderer.rot180 = !renderer.rot180 }.apply { setImageResource(android.R.drawable.ic_menu_rotate) }
         sideBox.addView(flipXBtn); sideBox.addView(flipYBtn); sideBox.addView(rot180Btn)
 
-        presetBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(15, 10, 15, 12) }
+        presetBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(15, 10, 15, 12); setOnClickListener { /* consume */ } }
         val transContainer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(10, 0, 10, 0) }
         val stopwatch = ImageView(this).apply { setImageResource(android.R.drawable.ic_menu_recent_history); setColorFilter(Color.WHITE); alpha = 0.6f; scaleX=0.5f; scaleY=0.5f }
         val timeLabel = TextView(this).apply { text = "1.0s"; setTextColor(Color.WHITE); textSize = 9f; setPadding(4, 0, 8, 0) }
@@ -254,6 +250,17 @@ class MainActivity : AppCompatActivity() {
         hudContainer.addView(presetBox, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 180 })
         hudContainer.addView(readabilityBtn); hudContainer.addView(resetBtn)
         addContentView(hudContainer, ViewGroup.LayoutParams(-1, -1)); updateSidebarVisuals()
+    }
+
+    private fun toggleHud() {
+        isHudVisible = !isHudVisible
+        // Instead of GONE, we toggle alpha/visibility of children to keep hudContainer clickable
+        val vis = if (isHudVisible) View.VISIBLE else View.INVISIBLE
+        sliderBox.visibility = vis
+        sideBox.visibility = vis
+        presetBox.visibility = vis
+        readabilityBtn.visibility = vis
+        resetBtn.visibility = vis
     }
 
     private fun toggleReadability() {
@@ -346,39 +353,24 @@ class MainActivity : AppCompatActivity() {
             val fSrc = """
             #extension GL_OES_EGL_image_external : require
             precision mediump float;
-            varying vec2 v; 
-            uniform samplerExternalOES uTex; 
-            uniform float uMR, uLR, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB; 
-            uniform vec2 uMT, uCT;
-            uniform vec2 uF; 
-
+            varying vec2 v; uniform samplerExternalOES uTex; uniform float uMR, uLR, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB; uniform vec2 uMT, uCT, uF; 
             mat2 rot(float d) { float a=radians(d); float s=sin(a), c=cos(a); return mat2(c,-s,s,c); }
             vec3 hS(vec3 c, float h) { const vec3 k=vec3(0.577); float ca=cos(h*6.28); return c*ca+cross(k,c)*sin(h*6.28)+k*dot(k,c)*(1.0-ca); }
             
             vec3 sampleK(vec2 uvS) {
                 vec2 uv = uvS - 0.5; uv.x *= uA;
-                
-                // Master Translation
                 uv += uMT;
-                // Master Pipe
                 uv *= uMZ; uv = rot(uMR) * uv;
-
-                // Folding Logic
                 if(uAx > 1.1) {
                     float r = length(uv); float a = atan(uv.y, uv.x);
                     float w = 6.28318 / uAx; a = mod(a, w);
                     if(mod(uAx, 2.0) < 0.1) a = abs(a - w/2.0);
                     uv = vec2(cos(a), sin(a)) * r;
                 }
-
-                // Camera Translation
                 uv += uCT;
-                // Camera Pipe
                 uv *= uLZ; uv = rot(uLR) * uv; uv.x /= uA;
-                
                 vec2 fuv = (uAx > 1.1) ? abs(fract(uv - 0.5) * 2.0 - 1.0) : fract(uv + 0.5);
                 if(uF.x < 0.0) fuv.x = 1.0 - fuv.x; if(uF.y > 0.0) fuv.y = 1.0 - fuv.y; 
-                
                 if(uRGB > 0.001) return vec3(texture2D(uTex, fuv + vec2(uRGB, 0.0)).r, texture2D(uTex, fuv).g, texture2D(uTex, fuv - vec2(uRGB, 0.0)).b);
                 return texture2D(uTex, fuv).rgb;
             }
@@ -426,7 +418,7 @@ class MainActivity : AppCompatActivity() {
             GLES20.glUniform2f(uLocs["uF"]!!, flipX, flipY); GLES20.glUniform1f(uLocs["uC"]!!, contrast); GLES20.glUniform1f(uLocs["uS"]!!, saturation)
             GLES20.glUniform1f(uLocs["uHue"]!!, hueShiftBase + updPh("HUE")); GLES20.glUniform1f(uLocs["uSol"]!!, solarizeBase + updPh("NEG"))
             GLES20.glUniform1f(uLocs["uBloom"]!!, bloomBase + updPh("GLOW")); GLES20.glUniform1f(uLocs["uRGB"]!!, rgbShiftBase + updPh("RGB"))
-            GLES20.glUniform1f(uLocs["uMRGB"]!!, mRgbShiftBase + updPh("M_RGB"));
+            GLES20.glUniform1f(uLocs["uMRGB"]!!, mRgbShiftBase + updPh("M_RGB"))
             GLES20.glUniform2f(uLocs["uMT"]!!, mTx + updPh("M_TX"), mTy + updPh("M_TY"))
             GLES20.glUniform2f(uLocs["uCT"]!!, lTx + updPh("C_TX"), lTy + updPh("C_TY"))
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texID); GLES20.glUniform1i(uLocs["uTex"]!!, 0)
