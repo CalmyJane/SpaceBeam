@@ -30,7 +30,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var renderer: KaleidoscopeRenderer
     private var currentSelector = CameraSelector.DEFAULT_BACK_CAMERA
     private lateinit var hudContainer: FrameLayout
-    private var isHudVisible = true
     private val sliders = mutableMapOf<String, SeekBar>()
     private var currentAnimator: ValueAnimator? = null
 
@@ -166,12 +165,12 @@ class MainActivity : AppCompatActivity() {
             container.addView(sub("${baseId}_MOD", "↕")); container.addView(sub("${baseId}_RATE", "⏱")); menu.addView(container)
         }
 
-        addHeader(menu, "MASTER (FINAL OUTPUT)")
+        addHeader(menu, "MASTER")
         createSlider("M_ROT", "ROTATION", 1000, 500) { renderer.mRotSpd = ((it-500)/500.0).pow(3.0)*1.5 }; createModPair("M_ROT")
         createSlider("M_ZOOM", "ZOOM", 1000, 250) { renderer.mZoomBase = 0.1 + ((it/1000.0).pow(2.0)*9.9) }; createModPair("M_ZOOM")
         createSlider("M_RGB", "RGB-SMUDGE", 1000, 0) { renderer.mRgbShift = it / 1000f * 0.15f }
 
-        addHeader(menu, "CAMERA (INSIDE MIRRORS)")
+        addHeader(menu, "CAMERA")
         createSlider("C_ROT", "ROTATION", 1000, 500) { renderer.lRotSpd = ((it-500)/500.0).pow(3.0)*1.5 }; createModPair("C_ROT")
         createSlider("C_ZOOM", "ZOOM", 1000, 250) { renderer.lZoomBase = 0.1 + ((it/1000.0).pow(2.0)*9.9) }; createModPair("C_ZOOM")
         createSlider("RGB", "RGB-SHIFT", 1000, 0) { renderer.rgbShiftBase = it / 1000f * 0.05f }; createModPair("RGB")
@@ -246,6 +245,7 @@ class MainActivity : AppCompatActivity() {
         sliderBox.background = bg; sideBox.background = bg; presetBox.background = bg
         readabilityBtn.background = circ; resetBtn.background = circ
         readabilityBtn.alpha = if (readabilityMode) 1.0f else 0.3f
+        resetBtn.alpha = if (readabilityMode) 1.0f else 0.3f
     }
 
     private fun applyPreset(idx: Int) {
@@ -254,6 +254,7 @@ class MainActivity : AppCompatActivity() {
         val startValues = sliders.mapValues { it.value.progress }
         currentAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = transitionMs
+            interpolator = android.view.animation.LinearInterpolator()
             addUpdateListener { anim ->
                 val t = anim.animatedValue as Float
                 sliders.forEach { (id, sb) ->
@@ -325,80 +326,38 @@ class MainActivity : AppCompatActivity() {
             val fSrc = """
             #extension GL_OES_EGL_image_external : require
             precision mediump float;
-            varying vec2 v; 
-            uniform samplerExternalOES uTex; 
-            uniform float uMR, uLR, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB; 
-            uniform vec2 uF; 
-
+            varying vec2 v; uniform samplerExternalOES uTex; uniform float uMR, uLR, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB; uniform vec2 uF; 
             mat2 rot(float d) { float a=radians(d); float s=sin(a), c=cos(a); return mat2(c,-s,s,c); }
             vec3 hS(vec3 c, float h) { const vec3 k=vec3(0.577); float ca=cos(h*6.28); return c*ca+cross(k,c)*sin(h*6.28)+k*dot(k,c)*(1.0-ca); }
-
-            // Helper to get Kaleidoscope color at a specific screen UV
-            vec3 getKaleido(vec2 screenUv) {
-                // 1. Center and Aspect
-                vec2 uv = screenUv - 0.5;
-                uv.x *= uA;
-
-                // 2. MASTER TRANSFORMATION (Rotates/Zooms the whole mandala)
-                uv *= uMZ;
-                uv = rot(uMR) * uv;
-
-                // 3. KALEIDOSCOPE SYMMETRY folding
+            
+            vec3 sampleK(vec2 uvS) {
+                vec2 uv = uvS - 0.5; uv.x *= uA;
+                uv *= uMZ; uv = rot(uMR) * uv;
                 if(uAx > 1.1) {
-                    float r = length(uv);
-                    float a = atan(uv.y, uv.x);
-                    float wedge = 6.28318 / uAx;
-                    a = mod(a, wedge);
-                    if(mod(uAx, 2.0) < 0.1) a = abs(a - wedge/2.0);
+                    float r = length(uv); float a = atan(uv.y, uv.x);
+                    float w = 6.28318 / uAx; a = mod(a, w);
+                    if(mod(uAx, 2.0) < 0.1) a = abs(a - w/2.0);
                     uv = vec2(cos(a), sin(a)) * r;
                 }
-
-                // 4. CAMERA TRANSFORMATION (Moves the feed inside the mirrors)
-                uv *= uLZ;
-                uv = rot(uLR) * uv;
-                uv.x /= uA;
-
-                // 5. SAMPLE WRAPPING
+                uv *= uLZ; uv = rot(uLR) * uv; uv.x /= uA;
                 vec2 fuv = (uAx > 1.1) ? abs(fract(uv - 0.5) * 2.0 - 1.0) : fract(uv + 0.5);
-                
-                // Flip Logic
-                if(uF.x < 0.0) fuv.x = 1.0 - fuv.x; 
-                if(uF.y > 0.0) fuv.y = 1.0 - fuv.y; 
-
-                // Camera RGB Shift
-                if(uRGB > 0.001) {
-                    return vec3(
-                        texture2D(uTex, fuv + vec2(uRGB, 0.0)).r,
-                        texture2D(uTex, fuv).g,
-                        texture2D(uTex, fuv - vec2(uRGB, 0.0)).b
-                    );
-                }
+                if(uF.x < 0.0) fuv.x = 1.0 - fuv.x; if(uF.y > 0.0) fuv.y = 1.0 - fuv.y; 
+                if(uRGB > 0.001) return vec3(texture2D(uTex, fuv + vec2(uRGB, 0.0)).r, texture2D(uTex, fuv).g, texture2D(uTex, fuv - vec2(uRGB, 0.0)).b);
                 return texture2D(uTex, fuv).rgb;
             }
 
             void main() {
                 vec3 col;
-                // MASTER RGB SMUDGE (Post-processing on the whole image)
                 if(uMRGB > 0.001) {
-                    col.r = getKaleido(v + vec2(uMRGB, 0.0)).r;
-                    col.g = getKaleido(v).g;
-                    col.b = getKaleido(v - vec2(uMRGB, 0.0)).b;
-                } else {
-                    col = getKaleido(v);
-                }
-
-                // Color FX
+                    col.r = sampleK(v + vec2(uMRGB, 0.0)).r;
+                    col.g = sampleK(v).g;
+                    col.b = sampleK(v - vec2(uMRGB, 0.0)).b;
+                } else { col = sampleK(v); }
                 if(uSol > 0.01) col = mix(col, abs(col - uSol), step(0.1, uSol)); 
                 if(uHue > 0.001) col = hS(col, uHue); 
-                
-                // Contrast/Vibrance
                 col = (col - 0.5) * uC + 0.5; 
-                float lum = dot(col, vec3(0.299, 0.587, 0.114));
-                col = mix(vec3(lum), col, uS); 
-                
-                // Bloom
-                if(uBloom > 0.01) col += smoothstep(0.5, 1.0, lum) * col * uBloom * 2.5;
-                
+                float l = dot(col, vec3(0.299, 0.587, 0.114)); col = mix(vec3(l), col, uS); 
+                if(uBloom > 0.01) col += smoothstep(0.5, 1.0, l) * col * uBloom * 2.5;
                 gl_FragColor = vec4(col, 1.0);
             }
             """.trimIndent()
@@ -414,38 +373,26 @@ class MainActivity : AppCompatActivity() {
         override fun onDrawFrame(gl: GL10?) {
             val now = System.nanoTime(); val d = (now - lastTime) / 1e9; lastTime = now; val tpi = 2.0 * PI
             fun updPh(id: String): Float {
-                val r = (rates[id] ?: 0f).toDouble(); if (r == 0.0) return 0f
+                val r = (rates[id] ?: 0f).toDouble()
+                // Do not exit early if r == 0.0; this keeps the phase frozen at its current sine offset
                 val drift = (driftPhases[id] ?: 0.0) + (r * 0.13) * d * tpi; driftPhases[id] = drift
                 val p = (phases[id] ?: 0.0) + (r + sin(drift) * r * 0.4) * d * tpi; phases[id] = p
                 return sin(p).toFloat() * (mods[id] ?: 0f)
             }
-            mAngle = (mAngle + mRotSpd * 120.0 * d) % 360.0; lAngle = (lAngle + lRotSpd * 120.0 * d) % 360.0
-            surfaceTexture?.updateTexImage(); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT); GLES20.glUseProgram(program)
+            // Use floor-style modulo to keep mAngle strictly positive for smoother wrap-arounds
+            mAngle = (mAngle + mRotSpd * 120.0 * d); mAngle -= floor(mAngle / 360.0) * 360.0
+            lAngle = (lAngle + lRotSpd * 120.0 * d); lAngle -= floor(lAngle / 360.0) * 360.0
 
+            surfaceTexture?.updateTexImage(); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT); GLES20.glUseProgram(program)
             GLES20.glUniform1f(uLocs["uMR"]!!, (mAngle + updPh("M_ROT") * 90.0).toFloat() + (if(rot180) 180f else 0f))
             GLES20.glUniform1f(uLocs["uLR"]!!, (lAngle + updPh("C_ROT") * 45.0).toFloat())
-            GLES20.glUniform1f(uLocs["uA"]!!, aspect)
-            GLES20.glUniform1f(uLocs["uMZ"]!!, (mZoomBase + updPh("M_ZOOM") * 0.5 * mZoomBase).toFloat())
-            GLES20.glUniform1f(uLocs["uLZ"]!!, (lZoomBase + updPh("C_ZOOM") * 0.5 * lZoomBase).toFloat())
-            GLES20.glUniform1f(uLocs["uAx"]!!, axisCount)
-            GLES20.glUniform2f(uLocs["uF"]!!, flipX, flipY)
-            GLES20.glUniform1f(uLocs["uC"]!!, contrast)
-            GLES20.glUniform1f(uLocs["uS"]!!, saturation)
-            GLES20.glUniform1f(uLocs["uHue"]!!, hueShiftBase + updPh("HUE"))
-            GLES20.glUniform1f(uLocs["uSol"]!!, solarizeBase + updPh("NEG"))
-            GLES20.glUniform1f(uLocs["uBloom"]!!, bloomBase + updPh("GLOW"))
-            GLES20.glUniform1f(uLocs["uRGB"]!!, rgbShiftBase + updPh("RGB"))
-            GLES20.glUniform1f(uLocs["uMRGB"]!!, mRgbShift)
-
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texID)
-            GLES20.glUniform1i(uLocs["uTex"]!!, 0)
-
-            val pL = GLES20.glGetAttribLocation(program, "p")
-            val tL = GLES20.glGetAttribLocation(program, "t")
-            GLES20.glEnableVertexAttribArray(pL); GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf)
-            GLES20.glEnableVertexAttribArray(tL); GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glUniform1f(uLocs["uA"]!!, aspect); GLES20.glUniform1f(uLocs["uMZ"]!!, (mZoomBase + updPh("M_ZOOM") * 0.5 * mZoomBase).toFloat())
+            GLES20.glUniform1f(uLocs["uLZ"]!!, (lZoomBase + updPh("C_ZOOM") * 0.5 * lZoomBase).toFloat()); GLES20.glUniform1f(uLocs["uAx"]!!, axisCount)
+            GLES20.glUniform2f(uLocs["uF"]!!, flipX, flipY); GLES20.glUniform1f(uLocs["uC"]!!, contrast); GLES20.glUniform1f(uLocs["uS"]!!, saturation)
+            GLES20.glUniform1f(uLocs["uHue"]!!, hueShiftBase + updPh("HUE")); GLES20.glUniform1f(uLocs["uSol"]!!, solarizeBase + updPh("NEG"))
+            GLES20.glUniform1f(uLocs["uBloom"]!!, bloomBase + updPh("GLOW")); GLES20.glUniform1f(uLocs["uRGB"]!!, rgbShiftBase + updPh("RGB"))
+            GLES20.glUniform1f(uLocs["uMRGB"]!!, mRgbShift); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texID); GLES20.glUniform1i(uLocs["uTex"]!!, 0)
+            val pL = GLES20.glGetAttribLocation(program, "p"); val tL = GLES20.glGetAttribLocation(program, "t"); GLES20.glEnableVertexAttribArray(pL); GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf); GLES20.glEnableVertexAttribArray(tL); GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
         fun provideSurface(req: SurfaceRequest) { glView.queueEvent { surfaceTexture?.setDefaultBufferSize(req.resolution.width, req.resolution.height); val s = android.view.Surface(surfaceTexture); req.provideSurface(s, ContextCompat.getMainExecutor(this@MainActivity)) { s.release() } } }
         private fun createOESTex(): Int { val t = IntArray(1); GLES20.glGenTextures(1, t, 0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, t[0]); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR); return t[0] }
