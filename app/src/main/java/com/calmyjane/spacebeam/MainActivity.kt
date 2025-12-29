@@ -7,7 +7,6 @@ import android.content.pm.PackageManager
 import android.graphics.*
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.GradientDrawable
-import android.media.MediaRecorder
 import android.opengl.*
 import android.os.Bundle
 import android.os.Environment
@@ -21,14 +20,12 @@ import androidx.camera.core.SurfaceRequest
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import kotlin.math.*
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
-import android.graphics.Matrix
 
 class MainActivity : AppCompatActivity() {
 
@@ -44,12 +41,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rot180Btn: ImageButton
     private lateinit var readabilityBtn: ImageButton
     private lateinit var resetBtn: ImageButton
-
-    // Recording UI
     private lateinit var photoBtn: ImageButton
-    private lateinit var recordBtn: ImageButton
-    private lateinit var stopBtn: ImageButton
-    private var isRecording = false
 
     private data class Preset(val sliderValues: Map<String, Int>, val flipX: Float, val flipY: Float, val rot180: Boolean)
     private val presets = mutableMapOf<Int, Preset>()
@@ -74,9 +66,13 @@ class MainActivity : AppCompatActivity() {
             setEGLContextClientVersion(2)
             setRenderer(renderer)
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+            setOnTouchListener { _, event ->
+                if (event.action == MotionEvent.ACTION_UP) toggleHud()
+                true
+            }
         }
-        setContentView(glView)
 
+        setContentView(glView)
         setupUltraMinimalHUD()
         initDefaultPresets()
 
@@ -85,11 +81,9 @@ class MainActivity : AppCompatActivity() {
             applyPreset(1)
         }
 
-        val perms = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+        val perms = arrayOf(Manifest.permission.CAMERA, Manifest.permission.WRITE_EXTERNAL_STORAGE)
         if (!allPermissionsGranted()) {
             ActivityCompat.requestPermissions(this, perms, 10)
-        } else {
-            glView.postDelayed({ startCamera() }, 500)
         }
     }
 
@@ -117,21 +111,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupUltraMinimalHUD() {
-        hudContainer = FrameLayout(this).apply {
-            layoutParams = FrameLayout.LayoutParams(-1, -1)
-            setOnClickListener { toggleHud() }
-        }
+        hudContainer = FrameLayout(this).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
 
         sliderBox = ScrollView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(850, -1)
-            setOnClickListener { }
+            layoutParams = FrameLayout.LayoutParams(850, -1).apply { gravity = Gravity.START }
             setOnTouchListener { v, _ -> v.parent.requestDisallowInterceptTouchEvent(true); false }
         }
         val menu = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 60, 20, 240) }
         sliderBox.addView(menu)
 
         val axisCont = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 10, 0, 25) }
-        val axisTv = TextView(this).apply { text = "AXIS"; setTextColor(Color.WHITE); textSize = 10f; setTypeface(null, Typeface.BOLD); minWidth = 140 }
+        val axisTv = TextView(this).apply {
+            text = "AXIS"; setTextColor(Color.WHITE); textSize = 10f; setTypeface(null, Typeface.BOLD); minWidth = 140
+            setOnClickListener { sliders["AXIS"]?.progress = 1 }
+        }
         val axisSb = SeekBar(this).apply {
             max = 15; progress = 1; layoutParams = LinearLayout.LayoutParams(610, 80)
             thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(26, 52) }
@@ -145,7 +138,16 @@ class MainActivity : AppCompatActivity() {
 
         fun createSlider(id: String, label: String, max: Int, start: Int, onP: (Int) -> Unit) {
             val container = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 4, 0, 0) }
-            val tv = TextView(this).apply { text = label; setTextColor(Color.WHITE); textSize = 8f; minWidth = 140; alpha = 0.8f }
+            val tv = TextView(this).apply {
+                text = label; setTextColor(Color.WHITE); textSize = 8f; minWidth = 140; alpha = 0.8f
+                setOnClickListener {
+                    sliders[id]?.progress = start
+                    if (id.contains("ROT")) {
+                        if (id.startsWith("M")) renderer.mAngle = 0.0 else renderer.lAngle = 0.0
+                    }
+                    renderer.resetSpecificPhase(id)
+                }
+            }
             val sb = SeekBar(this).apply {
                 this.max = max; progress = start; layoutParams = LinearLayout.LayoutParams(610, 65)
                 thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(16, 32) }
@@ -162,14 +164,18 @@ class MainActivity : AppCompatActivity() {
             val container = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(140, -12, 0, 8) }
             fun sub(subId: String, icon: String) = LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(0, 50, 1f)
-                val iv = TextView(this@MainActivity).apply { text = icon; setTextColor(Color.WHITE); textSize = 11f; setTypeface(null, Typeface.BOLD); setPadding(0, 0, 4, 0) }
+                val iv = TextView(this@MainActivity).apply {
+                    text = icon; setTextColor(Color.WHITE); textSize = 11f; setTypeface(null, Typeface.BOLD); setPadding(0, 0, 4, 0)
+                    setOnClickListener { sliders[subId]?.progress = 0 }
+                }
                 val sb = SeekBar(this@MainActivity).apply {
                     max = 1000; progress = 0; layoutParams = LinearLayout.LayoutParams(-1, -1)
                     thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(12, 22) }
                     setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                         override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
                             if(subId.contains("MOD")) renderer.setMod(baseId, (p/1000f).pow(3f))
-                            else renderer.setRate(baseId, (p/1000f).pow(3f))
+                            // Adjusted rate calculation to start slightly above zero
+                            else renderer.setRate(baseId, (p/1000f + 0.05f).pow(3f))
                         }
                         override fun onStartTrackingTouch(s: SeekBar?) {}
                         override fun onStopTrackingTouch(s: SeekBar?) {}
@@ -199,14 +205,10 @@ class MainActivity : AppCompatActivity() {
         createSlider("CONTRAST", "CONTRAST", 1000, 500) { renderer.contrast = 0.5f + (it / 500f) }
         createSlider("VIBRANCE", "VIBRANCE", 1000, 500) { renderer.saturation = it / 500f }
 
-        sideBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(10, 20, 10, 20); setOnClickListener {} }
+        sideBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(10, 20, 10, 20) }
         fun textToIcon(t: String, size: Float = 60f): BitmapDrawable {
             val b = Bitmap.createBitmap(120, 120, Bitmap.Config.ARGB_8888); val c = Canvas(b); val p = Paint().apply { color = Color.WHITE; textSize = size; textAlign = Paint.Align.CENTER; isFakeBoldText = true }
             c.drawText(t, 60f, size + 20f, p); return BitmapDrawable(resources, b)
-        }
-        // Shape drawable helper for recording buttons
-        fun createShapeDrawable(color: Int, oval: Boolean): GradientDrawable {
-            return GradientDrawable().apply { setColor(color); shape = if (oval) GradientDrawable.OVAL else GradientDrawable.RECTANGLE; setSize(120, 120) }
         }
 
         fun createSideBtn(action: () -> Unit) = ImageButton(this).apply { setColorFilter(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.3f; layoutParams = LinearLayout.LayoutParams(100, 100); setOnClickListener { action(); updateSidebarVisuals() } }
@@ -216,40 +218,15 @@ class MainActivity : AppCompatActivity() {
         rot180Btn = createSideBtn { renderer.rot180 = !renderer.rot180 }.apply { setImageResource(android.R.drawable.ic_menu_rotate) }
         sideBox.addView(flipXBtn); sideBox.addView(flipYBtn); sideBox.addView(rot180Btn)
 
-        // --- CAPTURE BOX (TOP CENTER) ---
-        captureBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_HORIZONTAL // Center items horizontally within box
-            setPadding(20, 10, 20, 10)
-            setOnClickListener {} // Consume clicks
-        }
-
-        // Standard Gallery Icon for screenshot
+        captureBox = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(20, 10, 20, 10) }
         photoBtn = ImageButton(this).apply {
-            setImageResource(android.R.drawable.ic_menu_gallery)
-            setBackgroundColor(Color.TRANSPARENT); setColorFilter(Color.WHITE); alpha = 0.8f; scaleX = 1.5f; scaleY = 1.5f
-            layoutParams = LinearLayout.LayoutParams(150, 150).apply { rightMargin = 30 }
+            setImageResource(android.R.drawable.ic_menu_gallery); setBackgroundColor(Color.TRANSPARENT); setColorFilter(Color.WHITE); alpha = 0.8f; scaleX = 1.5f; scaleY = 1.5f
+            layoutParams = LinearLayout.LayoutParams(150, 150)
             setOnClickListener { renderer.capturePhoto() }
         }
+        captureBox.addView(photoBtn)
 
-        // Red Circle for Record
-        recordBtn = ImageButton(this).apply {
-            setImageDrawable(createShapeDrawable(Color.RED, true))
-            setBackgroundColor(Color.TRANSPARENT); alpha = 0.8f;
-            layoutParams = LinearLayout.LayoutParams(150, 150)
-            setOnClickListener { if(!isRecording) startRecording() else cancelRecording() }
-        }
-
-        // Red Square for Stop
-        stopBtn = ImageButton(this).apply {
-            setImageDrawable(createShapeDrawable(Color.RED, false))
-            setBackgroundColor(Color.TRANSPARENT); alpha = 0.8f; visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(150, 150).apply { leftMargin = 30 }
-            setOnClickListener { stopRecording() }
-        }
-        captureBox.addView(photoBtn); captureBox.addView(recordBtn); captureBox.addView(stopBtn)
-
-        presetBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(15, 10, 15, 12); setOnClickListener {} }
+        presetBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(15, 10, 15, 12) }
         val transContainer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(10, 0, 10, 0) }
         val stopwatch = ImageView(this).apply { setImageResource(android.R.drawable.ic_menu_recent_history); setColorFilter(Color.WHITE); alpha = 0.6f; scaleX=0.5f; scaleY=0.5f }
         val timeLabel = TextView(this).apply { text = "1.0s"; setTextColor(Color.WHITE); textSize = 9f; setPadding(4, 0, 8, 0) }
@@ -277,77 +254,37 @@ class MainActivity : AppCompatActivity() {
         (8 downTo 1).forEach { presetRow.addView(createPresetBtn(it)) }
         presetBox.addView(transContainer); presetBox.addView(presetRow)
 
+        val blackCirc = GradientDrawable().apply { setColor(Color.BLACK); shape = GradientDrawable.OVAL }
         readabilityBtn = ImageButton(this).apply {
-            setImageResource(android.R.drawable.ic_menu_view); setColorFilter(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.3f
+            setImageResource(android.R.drawable.ic_menu_view); setColorFilter(Color.WHITE); background = blackCirc; alpha = 0.3f
             layoutParams = FrameLayout.LayoutParams(110, 110).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 140; rightMargin = 35 }
             setOnClickListener { toggleReadability() }
         }
         resetBtn = ImageButton(this).apply {
-            setImageResource(android.R.drawable.ic_menu_close_clear_cancel); setColorFilter(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.3f
+            setImageResource(android.R.drawable.ic_menu_close_clear_cancel); setColorFilter(Color.WHITE); background = blackCirc; alpha = 0.3f
             layoutParams = FrameLayout.LayoutParams(110, 110).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 30; rightMargin = 35 }
             setOnClickListener { heldPresetIndex?.let { savePreset(it) } ?: globalReset() }
         }
 
         hudContainer.addView(sliderBox)
-        // Corrected LayoutParams for Top Center positioning
-        hudContainer.addView(captureBox, FrameLayout.LayoutParams(-2, -2).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            topMargin = 30
-        })
+        hudContainer.addView(captureBox, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30 })
         hudContainer.addView(sideBox, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.TOP or Gravity.END; topMargin = 40; rightMargin = 40 })
         hudContainer.addView(presetBox, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 180 })
         hudContainer.addView(readabilityBtn); hudContainer.addView(resetBtn)
         addContentView(hudContainer, ViewGroup.LayoutParams(-1, -1)); updateSidebarVisuals()
     }
 
-    private fun startRecording() {
-        isRecording = true
-        // Switch record button to Cancel 'X'
-        recordBtn.setImageDrawable(ContextCompat.getDrawable(this, android.R.drawable.ic_menu_close_clear_cancel))
-        recordBtn.setColorFilter(Color.WHITE)
-        recordBtn.scaleX = 1.5f; recordBtn.scaleY = 1.5f // Scale up the standard icon
-
-        photoBtn.visibility = View.GONE // Hide photo button while recording
-        stopBtn.visibility = View.VISIBLE
-        renderer.startRecording()
-    }
-
-    private fun stopRecording() {
-        finishRecordingUI()
-        renderer.stopRecording(save = true)
-    }
-
-    private fun cancelRecording() {
-        finishRecordingUI()
-        renderer.stopRecording(save = false)
-    }
-
-    private fun finishRecordingUI() {
-        isRecording = false
-        // Restore Record circle
-        recordBtn.setImageDrawable(GradientDrawable().apply { setColor(Color.RED); shape = GradientDrawable.OVAL; setSize(120, 120) })
-        recordBtn.setColorFilter(null) // Remove white filter to show red color
-        recordBtn.scaleX = 1.0f; recordBtn.scaleY = 1.0f
-
-        photoBtn.visibility = View.VISIBLE
-        stopBtn.visibility = View.GONE
-    }
-
     private fun toggleHud() {
         isHudVisible = !isHudVisible
-        val vis = if (isHudVisible) View.VISIBLE else View.INVISIBLE
-        sliderBox.visibility = vis; sideBox.visibility = vis; presetBox.visibility = vis
-        readabilityBtn.visibility = vis; resetBtn.visibility = vis; captureBox.visibility = vis
+        hudContainer.visibility = if (isHudVisible) View.VISIBLE else View.GONE
+        if (isHudVisible) hideSystemUI()
     }
 
     private fun toggleReadability() {
         readabilityMode = !readabilityMode
         val bg = if (readabilityMode) GradientDrawable().apply { setColor(Color.argb(205, 12, 12, 12)); cornerRadius = 32f } else null
-        val circ = if (readabilityMode) GradientDrawable().apply { setColor(Color.argb(205, 12, 12, 12)); shape = GradientDrawable.OVAL } else null
         sliderBox.background = bg; sideBox.background = bg; presetBox.background = bg; captureBox.background = bg
-        readabilityBtn.background = circ; resetBtn.background = circ
-        readabilityBtn.alpha = if (readabilityMode) 1.0f else 0.3f
-        resetBtn.alpha = if (readabilityMode) 1.0f else 0.3f
+        readabilityBtn.alpha = if (readabilityMode) 1.0f else 0.3f; resetBtn.alpha = if (readabilityMode) 1.0f else 0.3f
     }
 
     private fun applyPreset(idx: Int) {
@@ -356,7 +293,6 @@ class MainActivity : AppCompatActivity() {
         val startValues = sliders.mapValues { it.value.progress }
         currentAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = transitionMs
-            interpolator = android.view.animation.LinearInterpolator()
             addUpdateListener { anim ->
                 val t = anim.animatedValue as Float
                 sliders.forEach { (id, sb) ->
@@ -400,24 +336,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun addHeader(m: LinearLayout, t: String) = m.addView(TextView(this).apply { text = t; setTextColor(Color.WHITE); textSize = 8f; alpha = 0.3f; setPadding(0, 45, 0, 5) })
 
-    private fun startCamera() {
+    fun startCamera() {
         val cp = ProcessCameraProvider.getInstance(this)
         cp.addListener({
             val provider = cp.get()
-            val preview = Preview.Builder().build().apply {
-                setSurfaceProvider { renderer.provideSurface(it) }
-            }
-            try {
-                provider.unbindAll()
-                provider.bindToLifecycle(this, currentSelector, preview)
-            } catch (e: Exception) { e.printStackTrace() }
+            val preview = Preview.Builder().build().apply { setSurfaceProvider { renderer.provideSurface(it) } }
+            try { provider.unbindAll(); provider.bindToLifecycle(this, currentSelector, preview) } catch (e: Exception) { e.printStackTrace() }
         }, ContextCompat.getMainExecutor(this))
     }
 
     private fun hideSystemUI() { window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) }
-    private fun allPermissionsGranted() = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+    private fun allPermissionsGranted() = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
 
-    inner class KaleidoscopeRenderer(private val ctx: AppCompatActivity) : GLSurfaceView.Renderer {
+    inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
         private var program = 0; private var texID = -1; private var surfaceTexture: SurfaceTexture? = null
         private lateinit var pBuf: FloatBuffer; private lateinit var tBuf: FloatBuffer
         private var uLocs = mutableMapOf<String, Int>()
@@ -431,87 +362,16 @@ class MainActivity : AppCompatActivity() {
 
         private val mods = mutableMapOf<String, Float>(); private val rates = mutableMapOf<String, Float>()
         private val phases = mutableMapOf<String, Double>(); private val driftPhases = mutableMapOf<String, Double>()
-
-        private var mediaRecorder: MediaRecorder? = null
-        private var isRecordingInternal = false
-        private var recordingFile: File? = null
         private var captureRequested = false
 
         fun setMod(id: String, v: Float) { mods[id] = v }; fun setRate(id: String, v: Float) { rates[id] = v }
         fun resetPhases() { phases.clear(); driftPhases.clear(); mods.clear(); rates.clear() }
-
+        fun resetSpecificPhase(id: String) { phases.remove(id); driftPhases.remove(id); mods.remove(id); rates.remove(id) }
         fun capturePhoto() { captureRequested = true }
 
-        fun startRecording() {
-            try {
-                val file = File(ctx.getExternalFilesDir(null), "SB_REC_${System.currentTimeMillis()}.mp4")
-                recordingFile = file
-                mediaRecorder = MediaRecorder().apply {
-                    setAudioSource(MediaRecorder.AudioSource.MIC)
-                    setVideoSource(MediaRecorder.VideoSource.SURFACE)
-                    setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                    setOutputFile(file.absolutePath)
-                    setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-                    setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                    setVideoSize(1920, 1080)
-                    setVideoFrameRate(30)
-                    setVideoEncodingBitRate(12000000)
-                    prepare()
-                    start()
-                }
-                isRecordingInternal = true
-            } catch (e: Exception) {
-                e.printStackTrace()
-                isRecordingInternal = false
-            }
-        }
-
-        fun stopRecording(save: Boolean) {
-            if (!isRecordingInternal) return
-            isRecordingInternal = false
-            var stopped = false
-            try {
-                // Crucial: stop() can throw RuntimeException if called too soon or if no frames were recorded
-                mediaRecorder?.stop()
-                stopped = true
-            } catch (e: Exception) {
-                e.printStackTrace()
-                stopped = false
-            } finally {
-                try { mediaRecorder?.reset() } catch(e:Exception){}
-                try { mediaRecorder?.release() } catch(e:Exception){}
-                mediaRecorder = null
-            }
-
-            if (save && stopped && recordingFile != null && recordingFile!!.exists() && recordingFile!!.length() > 0) {
-                saveVideoToGallery(recordingFile!!)
-            } else {
-                recordingFile?.delete()
-            }
-            recordingFile = null
-        }
-
-        private fun saveVideoToGallery(file: File) {
-            val values = ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, "SB_VIDEO_${System.currentTimeMillis()}.mp4")
-                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SpaceBeam")
-            }
-            ctx.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)?.let { uri ->
-                ctx.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
-            }
-            file.delete()
-        }
-
         private fun saveBitmapToGallery(bmp: Bitmap) {
-            val values = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, "SB_PIC_${System.currentTimeMillis()}.jpg")
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SpaceBeam")
-            }
-            ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)?.let { uri ->
-                ctx.contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
-            }
+            val values = ContentValues().apply { put(MediaStore.Images.Media.DISPLAY_NAME, "SB_${System.currentTimeMillis()}.jpg"); put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg"); put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SpaceBeam") }
+            ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)?.let { uri -> ctx.contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) } }
         }
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -550,51 +410,67 @@ class MainActivity : AppCompatActivity() {
             texID = createOESTex(); surfaceTexture = SurfaceTexture(texID)
             pBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(-1f,-1f, 1f,-1f, -1f,1f, 1f,1f)).position(0) }
             tBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(0f,0f, 1f,0f, 0f,1f, 1f,1f)).position(0) }
+
+            // Initialization Fix: Start camera only after SurfaceTexture is ready
+            ctx.runOnUiThread { ctx.startCamera() }
         }
 
-        private var viewWidth = 1; private var viewHeight = 1; private var aspect = 1.0f; private var lastTime = System.nanoTime()
-        override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) { viewWidth = w; viewHeight = h; aspect = w.toFloat() / h.toFloat(); GLES20.glViewport(0, 0, w, h) }
+        private var viewWidth = 1; private var viewHeight = 1; private var lastTime = System.nanoTime()
+        override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) { viewWidth = w; viewHeight = h; GLES20.glViewport(0, 0, w, h) }
 
         override fun onDrawFrame(gl: GL10?) {
             val now = System.nanoTime(); val d = (now - lastTime) / 1e9; lastTime = now; val tpi = 2.0 * PI
-            fun updPh(id: String): Float {
+            fun calcPh(id: String): Float {
                 val r = (rates[id] ?: 0f).toDouble(); val drift = (driftPhases[id] ?: 0.0) + (r * 0.13) * d * tpi; driftPhases[id] = drift
                 val p = (phases[id] ?: 0.0) + (r + sin(drift) * r * 0.4) * d * tpi; phases[id] = p; return sin(p).toFloat() * (mods[id] ?: 0f)
             }
-            mAngle = (mAngle + mRotSpd * 120.0 * d); mAngle -= floor(mAngle / 360.0) * 360.0
-            lAngle = (lAngle + lRotSpd * 120.0 * d); lAngle -= floor(lAngle / 360.0) * 360.0
 
-            surfaceTexture?.updateTexImage()
-            GLES20.glUseProgram(program)
-            GLES20.glUniform1f(uLocs["uMR"]!!, (mAngle + updPh("M_ROT") * 90.0).toFloat() + (if(rot180) 180f else 0f))
-            GLES20.glUniform1f(uLocs["uLR"]!!, (lAngle + updPh("C_ROT") * 45.0).toFloat())
-            GLES20.glUniform1f(uLocs["uA"]!!, aspect); GLES20.glUniform1f(uLocs["uMZ"]!!, (mZoomBase + updPh("M_ZOOM") * 0.5 * mZoomBase).toFloat())
-            GLES20.glUniform1f(uLocs["uLZ"]!!, (lZoomBase + updPh("C_ZOOM") * 0.5 * lZoomBase).toFloat()); GLES20.glUniform1f(uLocs["uAx"]!!, axisCount)
-            GLES20.glUniform2f(uLocs["uF"]!!, flipX, flipY); GLES20.glUniform1f(uLocs["uC"]!!, contrast); GLES20.glUniform1f(uLocs["uS"]!!, saturation)
-            GLES20.glUniform1f(uLocs["uHue"]!!, hueShiftBase + updPh("HUE")); GLES20.glUniform1f(uLocs["uSol"]!!, solarizeBase + updPh("NEG"))
-            GLES20.glUniform1f(uLocs["uBloom"]!!, bloomBase + updPh("GLOW")); GLES20.glUniform1f(uLocs["uRGB"]!!, rgbShiftBase + updPh("RGB"))
-            GLES20.glUniform1f(uLocs["uMRGB"]!!, mRgbShiftBase + updPh("M_RGB"))
-            GLES20.glUniform2f(uLocs["uMT"]!!, mTx + updPh("M_TX"), mTy + updPh("M_TY"))
-            GLES20.glUniform2f(uLocs["uCT"]!!, lTx + updPh("C_TX"), lTy + updPh("C_TY"))
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texID); GLES20.glUniform1i(uLocs["uTex"]!!, 0)
-            val pL = GLES20.glGetAttribLocation(program, "p"); val tL = GLES20.glGetAttribLocation(program, "t"); GLES20.glEnableVertexAttribArray(pL); GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf); GLES20.glEnableVertexAttribArray(tL); GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
+            val phMap = mapOf("M_ROT" to calcPh("M_ROT"), "C_ROT" to calcPh("C_ROT"), "M_ZOOM" to calcPh("M_ZOOM"), "C_ZOOM" to calcPh("C_ZOOM"), "HUE" to calcPh("HUE"), "NEG" to calcPh("NEG"), "GLOW" to calcPh("GLOW"), "RGB" to calcPh("RGB"), "M_RGB" to calcPh("M_RGB"), "M_TX" to calcPh("M_TX"), "M_TY" to calcPh("M_TY"), "C_TX" to calcPh("C_TX"), "C_TY" to calcPh("C_TY"))
+            mAngle = (mAngle + mRotSpd * 120.0 * d) % 360.0; lAngle = (lAngle + lRotSpd * 120.0 * d) % 360.0
 
-            // DRAW SCREEN
-            GLES20.glViewport(0, 0, viewWidth, viewHeight); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            try { surfaceTexture?.updateTexImage() } catch(e: Exception) { return }
 
-            // PHOTO CAPTURE
+            drawScene(phMap, viewWidth, viewHeight)
+
             if (captureRequested) {
                 captureRequested = false
                 val b = ByteBuffer.allocate(viewWidth * viewHeight * 4)
                 GLES20.glReadPixels(0, 0, viewWidth, viewHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
-                val bmp = Bitmap.createBitmap(viewWidth, viewHeight, Bitmap.Config.ARGB_8888)
-                bmp.copyPixelsFromBuffer(b)
-                val m = Matrix(); m.postScale(1f, -1f)
-                val f = Bitmap.createBitmap(bmp, 0, 0, viewWidth, viewHeight, m, true)
-                saveBitmapToGallery(f)
+                Thread {
+                    val bmp = Bitmap.createBitmap(viewWidth, viewHeight, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
+                    saveBitmapToGallery(Bitmap.createBitmap(bmp, 0, 0, viewWidth, viewHeight, android.graphics.Matrix().apply { postScale(1f, -1f) }, true))
+                }.start()
             }
         }
-        fun provideSurface(req: SurfaceRequest) { glView.queueEvent { surfaceTexture?.setDefaultBufferSize(req.resolution.width, req.resolution.height); val s = android.view.Surface(surfaceTexture); req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() } } }
+
+        private fun drawScene(ph: Map<String, Float>, w: Int, h: Int) {
+            GLES20.glViewport(0, 0, w, h); GLES20.glUseProgram(program)
+            GLES20.glUniform1f(uLocs["uMR"]!!, (mAngle + ph["M_ROT"]!! * 90.0).toFloat() + (if(rot180) 180f else 0f))
+            GLES20.glUniform1f(uLocs["uLR"]!!, (lAngle + ph["C_ROT"]!! * 45.0).toFloat())
+            GLES20.glUniform1f(uLocs["uA"]!!, w.toFloat()/h.toFloat()); GLES20.glUniform1f(uLocs["uMZ"]!!, (mZoomBase + ph["M_ZOOM"]!! * 0.5 * mZoomBase).toFloat())
+            GLES20.glUniform1f(uLocs["uLZ"]!!, (lZoomBase + ph["C_ZOOM"]!! * 0.5 * lZoomBase).toFloat()); GLES20.glUniform1f(uLocs["uAx"]!!, axisCount)
+            GLES20.glUniform2f(uLocs["uF"]!!, flipX, flipY); GLES20.glUniform1f(uLocs["uC"]!!, contrast); GLES20.glUniform1f(uLocs["uS"]!!, saturation)
+            GLES20.glUniform1f(uLocs["uHue"]!!, hueShiftBase + ph["HUE"]!!); GLES20.glUniform1f(uLocs["uSol"]!!, solarizeBase + ph["NEG"]!!)
+            GLES20.glUniform1f(uLocs["uBloom"]!!, bloomBase + ph["GLOW"]!!); GLES20.glUniform1f(uLocs["uRGB"]!!, rgbShiftBase + ph["RGB"]!!)
+            GLES20.glUniform1f(uLocs["uMRGB"]!!, mRgbShiftBase + ph["M_RGB"]!!)
+            GLES20.glUniform2f(uLocs["uMT"]!!, mTx + ph["M_TX"]!!, mTy + ph["M_TY"]!!)
+            GLES20.glUniform2f(uLocs["uCT"]!!, lTx + ph["C_TX"]!!, lTy + ph["C_TY"]!!)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texID); GLES20.glUniform1i(uLocs["uTex"]!!, 0)
+            val pL = GLES20.glGetAttribLocation(program, "p"); val tL = GLES20.glGetAttribLocation(program, "t")
+            GLES20.glEnableVertexAttribArray(pL); GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf)
+            GLES20.glEnableVertexAttribArray(tL); GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+
+        fun provideSurface(req: SurfaceRequest) {
+            glView.queueEvent {
+                if(surfaceTexture == null) return@queueEvent
+                surfaceTexture?.setDefaultBufferSize(req.resolution.width, req.resolution.height)
+                val s = android.view.Surface(surfaceTexture)
+                req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() }
+            }
+        }
+
         private fun createOESTex(): Int { val t = IntArray(1); GLES20.glGenTextures(1, t, 0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, t[0]); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR); return t[0] }
         private fun compile(t: Int, s: String): Int = GLES20.glCreateShader(t).apply { GLES20.glShaderSource(this, s); GLES20.glCompileShader(this) }
     }
