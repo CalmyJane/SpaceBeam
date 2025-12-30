@@ -5,14 +5,13 @@ import android.animation.ValueAnimator
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.graphics.*
-import android.graphics.drawable.BitmapDrawable
-import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.ShapeDrawable
+import android.graphics.drawable.*
 import android.graphics.drawable.shapes.PathShape
 import android.opengl.*
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import android.view.*
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
@@ -103,10 +102,31 @@ class MainActivity : AppCompatActivity() {
             applyPreset(1)
         }
 
-        val perms = arrayOf(Manifest.permission.CAMERA)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, perms, 10)
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 10)
         }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 10 && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startCamera()
+        }
+    }
+
+    fun startCamera() {
+        val cpFuture = ProcessCameraProvider.getInstance(this)
+        cpFuture.addListener({
+            val provider = cpFuture.get()
+            val preview = Preview.Builder().setTargetAspectRatio(androidx.camera.core.AspectRatio.RATIO_16_9).build()
+            preview.setSurfaceProvider { req -> renderer.provideSurface(req) }
+            try {
+                provider.unbindAll()
+                provider.bindToLifecycle(this, currentSelector, preview)
+            } catch (e: Exception) {
+                Log.e("SpaceBeam", "Camera Error: ${e.message}")
+            }
+        }, ContextCompat.getMainExecutor(this))
     }
 
     private fun handleInteraction(event: MotionEvent) {
@@ -129,7 +149,8 @@ class MainActivity : AppCompatActivity() {
                 sliders["M_ZOOM"]?.let { it.progress = (it.progress - (log2(scaleFactor) * 300).toInt()).coerceIn(0, 1000) }
 
                 val dAngle = angle - lastFingerAngle
-                sliders["M_ANGLE"]?.let { it.progress = (it.progress + (-dAngle * (1000f / 360f)).toInt() + 1000) % 1000 }
+                // Fixed: Inverted gesture rotation
+                sliders["M_ANGLE"]?.let { it.progress = (it.progress + (dAngle * (1000f / 360f)).toInt() + 1000) % 1000 }
             }
             lastFingerDist = dist; lastFingerAngle = angle; lastFingerFocusX = focusX; lastFingerFocusY = focusY
         } else if (event.action == MotionEvent.ACTION_UP) {
@@ -148,6 +169,17 @@ class MainActivity : AppCompatActivity() {
         return ShapeDrawable(PathShape(p, 200f, 200f)).apply { paint.color = Color.WHITE; paint.isAntiAlias = true }
     }
 
+    private fun createLockDrawable(locked: Boolean): BitmapDrawable {
+        val b = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+        val c = Canvas(b)
+        val p = Paint().apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 8f; isAntiAlias = true }
+        val shackle = RectF(30f, 20f, 70f, 60f)
+        if (locked) c.drawArc(shackle, 180f, 180f, false, p) else c.drawArc(shackle, 160f, 180f, false, p)
+        p.style = Paint.Style.FILL
+        c.drawRoundRect(RectF(25f, 50f, 75f, 85f), 8f, 8f, p)
+        return BitmapDrawable(resources, b)
+    }
+
     private fun setupUltraMinimalHUD() {
         hudContainer = FrameLayout(this).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
         flashOverlay = View(this).apply { setBackgroundColor(Color.WHITE); alpha = 0f; layoutParams = FrameLayout.LayoutParams(-1, -1) }
@@ -160,8 +192,11 @@ class MainActivity : AppCompatActivity() {
         sliderBox.addView(menu)
 
         togglePanel = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(80, 140).apply { gravity = Gravity.CENTER_VERTICAL }
-            menuToggleBtn = Button(this@MainActivity).apply { text = "<"; setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.6f; setOnClickListener { toggleMenu() } }
+            layoutParams = LinearLayout.LayoutParams(140, -1)
+            menuToggleBtn = Button(this@MainActivity).apply {
+                text = "<"; setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.8f; textSize = 32f
+                layoutParams = FrameLayout.LayoutParams(-1, 400, Gravity.CENTER_VERTICAL); setOnClickListener { toggleMenu() }
+            }
             addView(menuToggleBtn)
         }
         leftMenuContainer.addView(sliderBox); leftMenuContainer.addView(togglePanel)
@@ -171,7 +206,6 @@ class MainActivity : AppCompatActivity() {
             c.drawText(t, 60f, size + 20f, p); return BitmapDrawable(resources, b)
         }
 
-        // --- Minimal Axis Lock (Icon Only) ---
         val axisContainer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 10) }
         val axisLabel = TextView(this).apply { text = "COUNT"; setTextColor(Color.WHITE); textSize = 8f; minWidth = 140; alpha = 0.8f }
         val axisSb = SeekBar(this).apply {
@@ -186,14 +220,14 @@ class MainActivity : AppCompatActivity() {
         sliders["AXIS"] = axisSb
 
         lockBtn = Button(this).apply {
-            text = "🔓"; setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); textSize = 14f
-            layoutParams = LinearLayout.LayoutParams(80, 80).apply { leftMargin = 10 }
+            background = createLockDrawable(false)
+            layoutParams = LinearLayout.LayoutParams(80, 80).apply { leftMargin = 20 }
             setOnClickListener {
                 axisLocked = !axisLocked
-                text = if(axisLocked) "🔒" else "🔓"
-                alpha = if(axisLocked) 1.0f else 0.5f
+                background = createLockDrawable(axisLocked)
+                alpha = if(axisLocked) 1.0f else 0.4f
             }
-            alpha = 0.5f
+            alpha = 0.4f
         }
 
         axisContainer.addView(axisLabel); axisContainer.addView(axisSb); axisContainer.addView(lockBtn)
@@ -339,14 +373,20 @@ class MainActivity : AppCompatActivity() {
     private fun applyPreset(idx: Int) {
         val p = presets[idx] ?: return
         activePreset = idx; updatePresetHighlights(); currentAnimator?.cancel()
+        if (!axisLocked) { sliders["AXIS"]?.progress = p.axis - 1 }
         val startValues = sliders.mapValues { it.value.progress }
         currentAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = transitionMs
             addUpdateListener { anim ->
                 val t = anim.animatedValue as Float
                 sliders.forEach { (id, sb) ->
-                    if (id == "AXIS") { if (!axisLocked) sb.progress = p.axis - 1 }
-                    else { val start = startValues[id] ?: sb.progress; val target = p.sliderValues[id] ?: start; sb.progress = (start + (target - start) * t).toInt() }
+                    val start = startValues[id] ?: sb.progress
+                    if (id == "AXIS") {
+                        if (!axisLocked) sb.progress = (start + ((p.axis - 1) - start) * t).toInt()
+                    } else {
+                        val target = p.sliderValues[id] ?: start
+                        sb.progress = (start + (target - start) * t).toInt()
+                    }
                 }
                 renderer.flipX = p.flipX; renderer.flipY = p.flipY; renderer.rot180 = p.rot180; updateSidebarVisuals()
             }
@@ -373,21 +413,13 @@ class MainActivity : AppCompatActivity() {
             "M_TX_MOD" to txM, "M_TX_RATE" to txR, "CONTRAST" to contrast, "VIBRANCE" to satur, "M_TX" to 500, "M_TY" to 500
         ), 1f, -1f, false, ax)
 
-        // 1: Minimal Geometric (Axis 2, Light rotation)
         presets[1] = p(ax=2, mRot=505, mAm=80, mAr=50, mZm=250, mZMod=120, mZR=80)
-        // 2: Soft Bloom (Adds Camera modulation + Glow)
         presets[2] = p(ax=3, mRot=510, cAm=150, cAr=100, glw=200, gM=300, gR=120)
-        // 3: Hue Drift (Introduces Color cycling)
         presets[3] = p(ax=4, mRot=500, mZm=300, hue=200, hM=800, hR=150, satur=700)
-        // 4: Crystal Fractal (Higher axis, tight zoom modulation)
         presets[4] = p(ax=8, mRot=502, mZm=180, mZMod=600, mZR=200, glw=350, contrast=650)
-        // 5: Neon Ghost (Careful RGB shifts + Solarization)
         presets[5] = p(ax=6, mRot=520, mRgb=120, rgb=100, rM=300, rR=150, neg=200, glw=500, contrast=800)
-        // 6: Deep Kaleidoscope (Heavy Axis + Panning mods)
         presets[6] = p(ax=12, mRot=505, mAm=1000, mAr=50, txM=400, txR=100, hue=400, glw=400)
-        // 7: Chrome Chaos (High RGB shift + High Contrast)
         presets[7] = p(ax=5, mRot=560, mRgb=250, rgb=200, rM=600, rR=300, neg=400, glw=700, contrast=1000, satur=800)
-        // 8: Spectral Nightmare (Max axis, fast modulation across all parameters)
         presets[8] = p(ax=16, mRot=500, mAm=1000, mAr=400, mZMod=800, mZR=350, cAm=1000, cAr=200, neg=1000, glw=1000, satur=1000)
     }
 
@@ -401,12 +433,9 @@ class MainActivity : AppCompatActivity() {
     }
     private fun updateSidebarVisuals() { flipXBtn.alpha = if (renderer.flipX < 0f) 1.0f else 0.3f; flipYBtn.alpha = if (renderer.flipY > 0f) 1.0f else 0.3f; rot180Btn.alpha = if (renderer.rot180) 1.0f else 0.3f }
     private fun addHeader(m: LinearLayout, t: String) = m.addView(TextView(this).apply { text = t; setTextColor(Color.WHITE); textSize = 8f; alpha = 0.3f; setPadding(0, 45, 0, 5) })
-    fun startCamera() {
-        val cp = ProcessCameraProvider.getInstance(this)
-        cp.addListener({ val provider = cp.get(); val preview = Preview.Builder().build().apply { setSurfaceProvider { renderer.provideSurface(it) } }; try { provider.unbindAll(); provider.bindToLifecycle(this, currentSelector, preview) } catch (e: Exception) { e.printStackTrace() } }, ContextCompat.getMainExecutor(this))
-    }
     private fun hideSystemUI() { window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) }
 
+    // --- RENDERER ---
     inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
         private var program = 0; private var texID = -1; private var surfaceTexture: SurfaceTexture? = null
         private lateinit var pBuf: FloatBuffer; private lateinit var tBuf: FloatBuffer
@@ -427,39 +456,75 @@ class MainActivity : AppCompatActivity() {
         fun capturePhoto() { captureRequested = true }
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-            val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main(){ gl_Position=p; v=t; }"
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
             val fSrc = """
-            #extension GL_OES_EGL_image_external : require
-            precision mediump float;
-            varying vec2 v; uniform samplerExternalOES uTex; uniform float uMR, uLR, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB; uniform vec2 uMT, uCT, uF; 
-            mat2 rot(float d) { float a=radians(d); float s=sin(a), c=cos(a); return mat2(c,-s,s,c); }
-            vec3 hS(vec3 c, float h) { const vec3 k=vec3(0.577); float ca=cos(h*6.28); return c*ca+cross(k,c)*sin(h*6.28)+k*dot(k,c)*(1.0-ca); }
-            vec3 sampleK(vec2 uvS) {
-                vec2 uv = uvS - 0.5; uv.x *= uA; uv += uMT; uv *= uMZ; uv = rot(uMR) * uv;
-                if(uAx > 1.1) {
-                    float r = length(uv); float a = atan(uv.y, uv.x);
-                    float w = 6.28318 / uAx; a = mod(a, w);
-                    if(mod(uAx, 2.0) < 0.1) a = abs(a - w/2.0);
-                    uv = vec2(cos(a), sin(a)) * r;
+                #extension GL_OES_EGL_image_external : require
+                precision highp float;
+                varying vec2 v;
+                uniform samplerExternalOES uTex;
+                uniform float uMR, uLR, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB;
+                uniform vec2 uMT, uCT, uF;
+                
+                void main() {
+                    vec3 finalColor;
+                    for(int i=0; i<3; i++) {
+                        float off = (i==0) ? uMRGB : (i==2) ? -uMRGB : 0.0;
+                        vec2 coord = v + vec2(off, 0.0);
+                        vec2 uv = coord - 0.5;
+                        uv.x *= uA;
+                        uv += uMT;
+                        uv *= uMZ;
+                        float a1 = uMR * 0.01745329;
+                        uv = vec2(uv.x * cos(a1) - uv.y * sin(a1), uv.x * sin(a1) + uv.y * cos(a1));
+                        if(uAx > 1.1) {
+                            float r = length(uv);
+                            float slice = 6.283185 / uAx;
+                            float a = mod(atan(uv.y, uv.x), slice);
+                            if(mod(uAx, 2.0) < 0.1) a = abs(a - slice * 0.5);
+                            uv = vec2(cos(a), sin(a)) * r;
+                        }
+                        uv += uCT;
+                        uv *= uLZ;
+                        float a2 = uLR * 0.01745329;
+                        uv = vec2(uv.x * cos(a2) - uv.y * sin(a2), uv.x * sin(a2) + uv.y * cos(a2));
+                        uv.x /= uA;
+                        vec2 fuv = (uAx > 1.1) ? abs(fract(uv - 0.5) * 2.0 - 1.0) : fract(uv + 0.5);
+                        if(uF.x < 0.0) fuv.x = 1.0 - fuv.x;
+                        if(uF.y > 0.0) fuv.y = 1.0 - fuv.y;
+                        if(uRGB > 0.001) {
+                             if(i==0) finalColor.r = texture2D(uTex, fuv + vec2(uRGB, 0.0)).r;
+                             else if(i==1) finalColor.g = texture2D(uTex, fuv).g;
+                             else finalColor.b = texture2D(uTex, fuv - vec2(uRGB, 0.0)).b;
+                        } else {
+                             vec3 smp = texture2D(uTex, fuv).rgb;
+                             if(i==0) finalColor.r = smp.r; else if(i==1) finalColor.g = smp.g; else finalColor.b = smp.b;
+                        }
+                    }
+                    if(uSol > 0.01) finalColor = mix(finalColor, abs(finalColor - uSol), step(0.1, uSol));
+                    if(uHue > 0.001) {
+                        const vec3 k = vec3(0.57735);
+                        float ca = cos(uHue * 6.28318);
+                        finalColor = finalColor * ca + cross(k, finalColor) * sin(uHue * 6.28318) + k * dot(k, finalColor) * (1.0 - ca);
+                    }
+                    finalColor = (finalColor - 0.5) * uC + 0.5;
+                    float l = dot(finalColor, vec3(0.299, 0.587, 0.114));
+                    finalColor = mix(vec3(l), finalColor, uS);
+                    if(uBloom > 0.01) finalColor += smoothstep(0.5, 1.0, l) * finalColor * uBloom * 2.5;
+                    gl_FragColor = vec4(finalColor, 1.0);
                 }
-                uv += uCT; uv *= uLZ; uv = rot(uLR) * uv; uv.x /= uA;
-                vec2 fuv = (uAx > 1.1) ? abs(fract(uv - 0.5) * 2.0 - 1.0) : fract(uv + 0.5);
-                if(uF.x < 0.0) fuv.x = 1.0 - fuv.x; if(uF.y > 0.0) fuv.y = 1.0 - fuv.y; 
-                if(uRGB > 0.001) return vec3(texture2D(uTex, fuv + vec2(uRGB, 0.0)).r, texture2D(uTex, fuv).g, texture2D(uTex, fuv - vec2(uRGB, 0.0)).b);
-                return texture2D(uTex, fuv).rgb;
-            }
-            void main() {
-                vec3 col;
-                if(uMRGB > 0.001) { col.r = sampleK(v + vec2(uMRGB, 0.0)).r; col.g = sampleK(v).g; col.b = sampleK(v - vec2(uMRGB, 0.0)).b; } else { col = sampleK(v); }
-                if(uSol > 0.01) col = mix(col, abs(col - uSol), step(0.1, uSol)); if(uHue > 0.001) col = hS(col, uHue); 
-                col = (col - 0.5) * uC + 0.5; float l = dot(col, vec3(0.299, 0.587, 0.114)); col = mix(vec3(l), col, uS); 
-                if(uBloom > 0.01) col += smoothstep(0.5, 1.0, l) * col * uBloom * 2.5;
-                gl_FragColor = vec4(col, 1.0);
-            }
             """.trimIndent()
-            program = GLES20.glCreateProgram().apply { GLES20.glAttachShader(this, compile(GLES20.GL_VERTEX_SHADER, vSrc)); GLES20.glAttachShader(this, compile(GLES20.GL_FRAGMENT_SHADER, fSrc)); GLES20.glLinkProgram(this) }
-            listOf("uMR", "uLR", "uA", "uMZ", "uLZ", "uAx", "uC", "uS", "uHue", "uSol", "uBloom", "uRGB", "uMRGB", "uF", "uMT", "uCT", "uTex").forEach { uLocs[it] = GLES20.glGetUniformLocation(program, it) }
-            texID = createOESTex(); surfaceTexture = SurfaceTexture(texID)
+
+            program = GLES20.glCreateProgram()
+            GLES20.glAttachShader(program, compile(GLES20.GL_VERTEX_SHADER, vSrc))
+            GLES20.glAttachShader(program, compile(GLES20.GL_FRAGMENT_SHADER, fSrc))
+            GLES20.glLinkProgram(program)
+
+            listOf("uMR", "uLR", "uA", "uMZ", "uLZ", "uAx", "uC", "uS", "uHue", "uSol", "uBloom", "uRGB", "uMRGB", "uF", "uMT", "uCT", "uTex").forEach {
+                uLocs[it] = GLES20.glGetUniformLocation(program, it)
+            }
+            texID = createOESTex()
+            surfaceTexture = SurfaceTexture(texID)
             pBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(-1f,-1f, 1f,-1f, -1f,1f, 1f,1f)).position(0) }
             tBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(0f,0f, 1f,0f, 0f,1f, 1f,1f)).position(0) }
             ctx.runOnUiThread { ctx.startCamera() }
@@ -470,6 +535,7 @@ class MainActivity : AppCompatActivity() {
 
         override fun onDrawFrame(gl: GL10?) {
             val now = System.nanoTime(); val d = (now - lastTime) / 1e9; lastTime = now; val tpi = 2.0 * PI
+            try { surfaceTexture?.updateTexImage() } catch (e: Exception) { return }
             fun calcPh(id: String): Float {
                 val r = (rates[id] ?: 0f).toDouble(); val drift = (driftPhases[id] ?: 0.0) + (r * 0.13) * d * tpi; driftPhases[id] = drift
                 val p = (phases[id] ?: 0.0) + (r + sin(drift) * r * 0.4) * d * tpi; phases[id] = p; return sin(p).toFloat() * (mods[id] ?: 0f)
@@ -477,7 +543,7 @@ class MainActivity : AppCompatActivity() {
             val ids = listOf("M_ANGLE", "C_ANGLE", "M_ZOOM", "C_ZOOM", "HUE", "NEG", "GLOW", "RGB", "M_RGB", "M_TX", "M_TY", "C_TX", "C_TY")
             val phMap = ids.associateWith { calcPh(it) }
             mRotAccum += mRotSpd * 120.0 * d; lRotAccum += lRotSpd * 120.0 * d
-            try { surfaceTexture?.updateTexImage() } catch(e: Exception) { return }
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             drawScene(phMap, viewWidth, viewHeight)
             if (captureRequested) {
                 captureRequested = false
@@ -485,16 +551,19 @@ class MainActivity : AppCompatActivity() {
                 GLES20.glReadPixels(0, 0, viewWidth, viewHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
                 Thread {
                     val bmp = Bitmap.createBitmap(viewWidth, viewHeight, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
-                    val values = ContentValues().apply { put(MediaStore.Images.Media.DISPLAY_NAME, "SB_${System.currentTimeMillis()}.jpg"); put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg"); put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SpaceBeam") }
+                    val values = ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, "SB_${System.currentTimeMillis()}.jpg"); put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg"); put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SpaceBeam")
+                    }
                     ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)?.let { uri -> ctx.contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) } }
                 }.start()
             }
         }
 
         private fun drawScene(ph: Map<String, Float>, w: Int, h: Int) {
-            GLES20.glViewport(0, 0, w, h); GLES20.glUseProgram(program)
+            GLES20.glUseProgram(program)
             GLES20.glUniform1f(uLocs["uMR"]!!, (mAngleBase + mRotAccum + (ph["M_ANGLE"] ?: 0f) * 90.0).toFloat() + (if(rot180) 180f else 0f))
-            GLES20.glUniform1f(uLocs["uLR"]!!, (lAngleBase + lRotAccum + (ph["C_ANGLE"] ?: 0f) * 45.0).toFloat())
+            // Fixed: Added 90 degree initial offset to Camera Rotation (uLR)
+            GLES20.glUniform1f(uLocs["uLR"]!!, (lAngleBase + lRotAccum + (ph["C_ANGLE"] ?: 0f) * 45.0 + 90.0).toFloat())
             GLES20.glUniform1f(uLocs["uA"]!!, w.toFloat()/h.toFloat()); GLES20.glUniform1f(uLocs["uMZ"]!!, (mZoomBase + (ph["M_ZOOM"] ?: 0f) * 0.5 * mZoomBase).toFloat())
             GLES20.glUniform1f(uLocs["uLZ"]!!, (lZoomBase + (ph["C_ZOOM"] ?: 0f) * 0.5 * lZoomBase).toFloat()); GLES20.glUniform1f(uLocs["uAx"]!!, axisCount)
             GLES20.glUniform2f(uLocs["uF"]!!, flipX, flipY); GLES20.glUniform1f(uLocs["uC"]!!, contrast); GLES20.glUniform1f(uLocs["uS"]!!, saturation)
@@ -510,8 +579,26 @@ class MainActivity : AppCompatActivity() {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
 
-        fun provideSurface(req: SurfaceRequest) { glView.queueEvent { if(surfaceTexture == null) return@queueEvent; surfaceTexture?.setDefaultBufferSize(req.resolution.width, req.resolution.height); val s = android.view.Surface(surfaceTexture); req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() } } }
-        private fun createOESTex(): Int { val t = IntArray(1); GLES20.glGenTextures(1, t, 0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, t[0]); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR); return t[0] }
-        private fun compile(t: Int, s: String): Int = GLES20.glCreateShader(t).apply { GLES20.glShaderSource(this, s); GLES20.glCompileShader(this) }
+        fun provideSurface(req: SurfaceRequest) {
+            glView.queueEvent {
+                val st = surfaceTexture ?: return@queueEvent
+                st.setDefaultBufferSize(req.resolution.width, req.resolution.height)
+                val s = Surface(st)
+                req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() }
+            }
+        }
+
+        private fun createOESTex(): Int {
+            val t = IntArray(1); GLES20.glGenTextures(1, t, 0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, t[0])
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            return t[0]
+        }
+
+        private fun compile(t: Int, s: String): Int = GLES20.glCreateShader(t).apply {
+            GLES20.glShaderSource(this, s); GLES20.glCompileShader(this)
+        }
     }
 }
