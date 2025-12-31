@@ -50,12 +50,22 @@ class PropertyControl(
 ) {
     enum class ModMode { WRAP, MIRROR }
 
+    // This is the Integer value for the UI (SeekBar)
     var value: Int = defaultValue
         private set
+
+    // NEW: This is the high-precision value for the Renderer
+    var preciseValue: Float = defaultValue.toFloat()
+        private set
+
     var modRate: Int = 0
         private set
     var modDepth: Int = 0
         private set
+
+    // Modulation floating point counterparts for smooth transitions
+    var preciseModRate: Float = 0f
+    var preciseModDepth: Float = 0f
 
     var lfoPhase: Double = 0.0
     var lfoDrift: Double = 0.0
@@ -69,6 +79,7 @@ class PropertyControl(
     fun getSnapshot(): Snapshot = Snapshot(value, modRate, modDepth)
 
     fun restore(snapshot: Snapshot) {
+        // When restoring immediately (no animation), snap both values
         setProgress(snapshot.value)
         if (hasModulation) {
             setModRate(snapshot.rate)
@@ -76,6 +87,82 @@ class PropertyControl(
         }
     }
 
+    // --- NEW: ANIMATION METHODS ---
+
+    // Called by the Animator: Updates the float for smooth GL rendering
+    // Only updates the UI if the integer changes (Performance Optimization)
+    fun setAnimatedValue(v: Float) {
+        preciseValue = v.coerceIn(min.toFloat(), max.toFloat())
+        val intVal = preciseValue.toInt()
+
+        if (intVal != value) {
+            value = intVal
+            mainSeekBar?.progress = value
+            onValueChanged?.invoke(value)
+        }
+    }
+
+    fun setAnimatedModRate(v: Float) {
+        preciseModRate = v.coerceIn(0f, 1000f)
+        val intVal = preciseModRate.toInt()
+        if (intVal != modRate) {
+            modRate = intVal
+            rateSeekBar?.progress = modRate
+        }
+    }
+
+    fun setAnimatedModDepth(v: Float) {
+        preciseModDepth = v.coerceIn(0f, 1000f)
+        val intVal = preciseModDepth.toInt()
+        if (intVal != modDepth) {
+            modDepth = intVal
+            depthSeekBar?.progress = modDepth
+        }
+    }
+
+    // --- STANDARD UI METHODS ---
+
+    fun setProgress(v: Int) {
+        value = v.coerceIn(min, max)
+        preciseValue = value.toFloat() // Sync float to int
+        mainSeekBar?.progress = value
+        onValueChanged?.invoke(value)
+    }
+
+    fun setModRate(v: Int) {
+        modRate = v.coerceIn(0, 1000)
+        preciseModRate = modRate.toFloat() // Sync float to int
+        rateSeekBar?.progress = modRate
+    }
+
+    fun setModDepth(v: Int) {
+        modDepth = v.coerceIn(0, 1000)
+        preciseModDepth = modDepth.toFloat() // Sync float to int
+        depthSeekBar?.progress = modDepth
+    }
+
+    fun reset() {
+        setProgress(defaultValue)
+        if (hasModulation) {
+            setModRate(0)
+            setModDepth(0)
+        }
+    }
+
+    // --- RENDERER ACCESS ---
+
+    // CRITICAL FIX: Use preciseValue instead of value for calculation
+    fun getNormalized(): Float = preciseValue / max.toFloat()
+
+    fun getMapped(outMin: Float, outMax: Float): Float {
+        return outMin + (getNormalized() * (outMax - outMin))
+    }
+
+    // CRITICAL FIX: Use preciseMod... values
+    fun getModRateNormalized(): Float = (preciseModRate / 1000f + 0.05f).pow(3f)
+    fun getModDepthNormalized(): Float = (preciseModDepth / 1000f).pow(3f)
+
+    // ... attachTo and createSeekBar methods remain unchanged ...
     fun attachTo(parent: ViewGroup) {
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -93,8 +180,7 @@ class PropertyControl(
         container.addView(labelView)
 
         mainSeekBar = createSeekBar(max, value) { p ->
-            value = p
-            onValueChanged?.invoke(p)
+            setProgress(p) // Calls the updated logic
         }
         mainSeekBar?.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 60)
         container.addView(mainSeekBar)
@@ -104,8 +190,8 @@ class PropertyControl(
                 orientation = LinearLayout.VERTICAL
                 setPadding(20, 0, 0, 0)
             }
-            modContainer.addView(createSubRow("SPEED", modRate) { p -> modRate = p; rateSeekBar?.progress = p }.also { rateSeekBar = it.second }.first)
-            modContainer.addView(createSubRow("DEPTH", modDepth) { p -> modDepth = p; depthSeekBar?.progress = p }.also { depthSeekBar = it.second }.first)
+            modContainer.addView(createSubRow("SPEED", modRate) { p -> setModRate(p) }.also { rateSeekBar = it.second }.first)
+            modContainer.addView(createSubRow("DEPTH", modDepth) { p -> setModDepth(p) }.also { depthSeekBar = it.second }.first)
             container.addView(modContainer)
         }
         parent.addView(container)
@@ -138,45 +224,12 @@ class PropertyControl(
             progress = startVal
             thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(16, 32) }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { listener(p) }
+                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if(f) listener(p) } // Only trigger on user touch to avoid loops
                 override fun onStartTrackingTouch(s: SeekBar?) {}
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
         }
     }
-
-    fun setProgress(v: Int) {
-        value = v.coerceIn(min, max)
-        mainSeekBar?.progress = value
-        onValueChanged?.invoke(value)
-    }
-
-    fun setModRate(v: Int) {
-        modRate = v.coerceIn(0, 1000)
-        rateSeekBar?.progress = modRate
-    }
-
-    fun setModDepth(v: Int) {
-        modDepth = v.coerceIn(0, 1000)
-        depthSeekBar?.progress = modDepth
-    }
-
-    fun reset() {
-        setProgress(defaultValue)
-        if (hasModulation) {
-            setModRate(0)
-            setModDepth(0)
-        }
-    }
-
-    fun getNormalized(): Float = value.toFloat() / max.toFloat()
-
-    fun getMapped(outMin: Float, outMax: Float): Float {
-        return outMin + (getNormalized() * (outMax - outMin))
-    }
-
-    fun getModRateNormalized(): Float = (modRate / 1000f + 0.05f).pow(3f)
-    fun getModDepthNormalized(): Float = (modDepth / 1000f).pow(3f)
 }
 
 // --- MAIN ACTIVITY ---
@@ -604,29 +657,44 @@ class MainActivity : AppCompatActivity() {
             controlsMap["AXIS"]?.setProgress(p.axis - 1)
         }
 
-        val startSnapshots = controls.associate { it.id to it.getSnapshot() }
+        // Snapshot current STATE as Floats (using preciseValue)
+        val startValues = controls.associate { it.id to it.preciseValue }
+        val startRates = controls.associate { it.id to it.preciseModRate }
+        val startDepths = controls.associate { it.id to it.preciseModDepth }
 
         currentAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = transitionMs
+            // Use Linear Interpolator for pure calculation, or AccelerateDecelerate for feel
+            // interpolator = android.view.animation.LinearInterpolator()
+
             addUpdateListener { anim ->
                 val t = anim.animatedValue as Float
                 controls.forEach { control ->
                     if (control.id == "AXIS") return@forEach
 
-                    val start = startSnapshots[control.id] ?: control.getSnapshot()
                     val target = p.controlSnapshots[control.id]
 
                     if (target != null) {
-                        val newVal = (start.value + (target.value - start.value) * t).toInt()
-                        control.setProgress(newVal)
+                        // Calculate Float interpolation
+                        val sVal = startValues[control.id] ?: 0f
+                        val newVal = sVal + (target.value - sVal) * t
+                        control.setAnimatedValue(newVal) // Updates float internally
 
                         if (control.hasModulation) {
-                            control.setModRate((start.rate + (target.rate - start.rate) * t).toInt())
-                            control.setModDepth((start.depth + (target.depth - start.depth) * t).toInt())
+                            val sRate = startRates[control.id] ?: 0f
+                            val newRate = sRate + (target.rate - sRate) * t
+                            control.setAnimatedModRate(newRate)
+
+                            val sDepth = startDepths[control.id] ?: 0f
+                            val newDepth = sDepth + (target.depth - sDepth) * t
+                            control.setAnimatedModDepth(newDepth)
                         }
                     }
                 }
-                renderer.flipX = p.flipX; renderer.flipY = p.flipY; renderer.rot180 = p.rot180; updateSidebarVisuals()
+                renderer.flipX = p.flipX
+                renderer.flipY = p.flipY
+                renderer.rot180 = p.rot180
+                updateSidebarVisuals()
             }
             start()
         }
@@ -784,97 +852,96 @@ class MainActivity : AppCompatActivity() {
             varying vec2 v;
             uniform samplerExternalOES uTex;
             
-            // Added uCZ (Camera Zoom)
             uniform float uMR, uLR, uCR, uCZ, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB, uWarp;
             uniform vec2 uMT, uCT, uF;
             uniform vec2 uMTilt, uCTilt;
-
+            
             vec3 sampleCamera(vec2 uv, float rgbShift) {
+                // Keep centered logic within small range
                 vec2 centered = uv - 0.5;
                 
                 // --- PERSPECTIVE TILT (CAMERA) ---
                 float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y);
-                centered /= max(z, 0.1); // Avoid division by zero
+                centered /= max(z, 0.1);
                 
-                // 1. Apply Camera Zoom (Pre-mirror)
                 centered *= uCZ;
-    
-                // --- NEW WARP LOGIC ---
-                // If uWarp is 0.0, we use uA (Correct aspect ratio).
-                // If uWarp is 1.0, we use 1.0 (Ignore aspect ratio -> causes stretching).
+            
                 float aspectFactor = mix(uA, 1.0, uWarp);
-                
-                // Apply aspect ratio correction BEFORE rotation
                 centered.x *= aspectFactor;
-    
-                // 2. Apply Continuous Camera Rotation
+            
+                // Camera Rotation
                 float cr = uCR * 0.01745329; 
                 float c = cos(cr);
                 float s = sin(cr);
                 centered = vec2(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
                 
-                // Remove aspect ratio correction AFTER rotation
                 centered.x /= aspectFactor;
-                // ----------------------
-                
-                // 3. Apply Camera Translation
-                centered.x += uCT.x;
-                centered.y -= uCT.y; 
-    
+                centered += uCT; // Translation
+            
                 vec2 rotatedUV = centered + 0.5;
-    
-                // 4. Apply RGB Shift
                 rotatedUV.x += rgbShift;
                 
-                // 5. Apply Mirror/Flip (FlipX/FlipY)
+                // Flip Logic
                 rotatedUV = (rotatedUV - 0.5) * uF + 0.5;
                 
-                // The mirroring fix from previous step
-                vec2 mirroredUV = 1.0 - abs(fract(rotatedUV * 0.5) * 2.0 - 1.0);
+                // Mirroring using fract and abs - handles tiling smoothly
+                vec2 mirroredUV = abs(mod(rotatedUV + 1.0, 2.0) - 1.0);
                 
                 return texture2D(uTex, mirroredUV).rgb;
             }
-
+            
             void main() {
                 vec3 finalColor = vec3(0.0);
+                
+                // Pre-calculate constants for rotation to avoid repeated math
+                float a1 = -uMR * 0.01745329;
+                float cosA1 = cos(a1);
+                float sinA1 = sin(a1);
+                
+                float a2 = uLR * 0.01745329;
+                float cosA2 = cos(a2);
+                float sinA2 = sin(a2);
+            
                 for(int i=0; i<3; i++) {
                     float mOff = (i==0) ? uMRGB : (i==2) ? -uMRGB : 0.0;
                     vec2 uv = v - 0.5;
-                    // --- PERSPECTIVE TILT (MASTER) ---
+                    
+                    // --- MASTER PERSPECTIVE ---
                     float zM = 1.0 + (uv.x * uMTilt.x) + (uv.y * uMTilt.y);
                     uv /= max(zM, 0.1);
+                    
                     uv.x *= uA; 
                     uv.x += mOff;
-                    uv += uMT;
-                    uv *= uMZ;
                     
-                    // Master Kaleidoscope Rotation
-                    float a1 = - uMR * 0.01745329;
-                    uv = vec2(uv.x * cos(a1) - uv.y * sin(a1), uv.x * sin(a1) + uv.y * cos(a1));
+                    // Apply Translation and Master Zoom
+                    uv = (uv + uMT) * uMZ;
                     
-                    // Kaleidoscope folding logic
+                    // Master Rotation
+                    uv = vec2(uv.x * cosA1 - uv.y * sinA1, uv.x * sinA1 + uv.y * cosA1);
+                    
+                    // Kaleidoscope folding
                     if(uAx > 1.1) {
                         float r = length(uv);
-                        float slice = 6.283185 / uAx;
-                        float a = mod(atan(uv.y, uv.x), slice);
+                        float slice = 6.2831853 / uAx;
+                        float angle = atan(uv.y, uv.x);
+                        // Use small local angle to maintain precision
+                        float a = mod(angle, slice);
                         if(mod(uAx, 2.0) < 0.1) a = abs(a - slice * 0.5);
                         uv = vec2(cos(a), sin(a)) * r;
                     }
                     
-                    // Note: uCT is now handled inside sampleCamera, so we don't add it to Master UVs here
-                    // uLZ (Layer Zoom/L-System zoom) kept for backward compat or secondary effect
                     uv *= uLZ;
                     
-                    // Secondary Rotation (L-system)
-                    float a2 = uLR * 0.01745329;
-                    uv = vec2(uv.x * cos(a2) - uv.y * sin(a2), uv.x * sin(a2) + uv.y * cos(a2));
+                    // Secondary Rotation
+                    uv = vec2(uv.x * cosA2 - uv.y * sinA2, uv.x * sinA2 + uv.y * cosA2);
                     
                     uv.x /= uA; 
                     
-                    // Convert back to Texture Space
-                    vec2 cameraUV = (uAx > 1.1) ? abs(fract(uv - 0.5) * 2.0 - 1.0) : fract(uv + 0.5);
+                    // TILE PRECISION FIX: 
+                    // Instead of pure fract(uv), we use a mirrored repeat pattern 
+                    // that handles large numbers better.
+                    vec2 cameraUV = abs(mod(uv + 1.0, 2.0) - 1.0);
                     
-                    // Sampling
                     float sOff = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
                     vec3 smp = sampleCamera(cameraUV, sOff);
                     
@@ -883,12 +950,14 @@ class MainActivity : AppCompatActivity() {
                     else finalColor.b = smp.b;
                 }
                 
-                // Post-Processing
+                // --- POST PROCESSING ---
                 if(uSol > 0.01) finalColor = mix(finalColor, abs(finalColor - uSol), step(0.1, uSol));
                 
                 if(uHue > 0.001) {
-                    const vec3 k = vec3(0.57735); float ca = cos(uHue * 6.28318);
-                    finalColor = finalColor * ca + cross(k, finalColor) * sin(uHue * 6.28318) + k * dot(k, finalColor) * (1.0 - ca);
+                    const vec3 k = vec3(0.57735); 
+                    float hueAngle = uHue * 6.2831853;
+                    float ca = cos(hueAngle);
+                    finalColor = finalColor * ca + cross(k, finalColor) * sin(hueAngle) + k * dot(k, finalColor) * (1.0 - ca);
                 }
                 
                 finalColor = (finalColor - 0.5) * uC + 0.5;
@@ -899,7 +968,7 @@ class MainActivity : AppCompatActivity() {
                 
                 gl_FragColor = vec4(finalColor, 1.0);
             }
-        """.trimIndent()
+            """.trimIndent()
 
             program = GLES20.glCreateProgram()
             GLES20.glAttachShader(program, compile(GLES20.GL_VERTEX_SHADER, vSrc))
@@ -1037,7 +1106,7 @@ class MainActivity : AppCompatActivity() {
             GLES20.glUniform1f(uLocs["uA"]!!, viewWidth.toFloat() / viewHeight.toFloat())
 
             // Master ZOOM (Non-linear)
-            val mZoomBase = 0.1 + (vMZoom.toDouble().pow(2.0) * 9.9)
+            val mZoomBase = 0.1 + (vMZoom.toDouble().pow(2.0) * 9.9 * 2)
             GLES20.glUniform1f(uLocs["uMZ"]!!, mZoomBase.toFloat())
 
             // Camera ZOOM (Mapping for reasonable range)
