@@ -44,6 +44,11 @@ import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.common.VideoSize
 import androidx.media3.common.Player
 import android.util.Log
+import android.animation.LayoutTransition
+import android.widget.LinearLayout
+import android.view.Gravity
+import android.graphics.Color
+import android.graphics.Typeface
 
 // Use type aliases to distinguish between the incompatible EGL classes
 import javax.microedition.khronos.egl.EGLConfig as GL10EGLConfig
@@ -623,7 +628,15 @@ class MainActivity : AppCompatActivity() {
         parameterPanel = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(850, -1); layoutDirection = View.LAYOUT_DIRECTION_RTL; isVerticalScrollBarEnabled = true; scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
         }
-        val menuLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 40, 20, 240); layoutDirection = View.LAYOUT_DIRECTION_LTR }
+
+        // Main list container
+        val menuLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 40, 20, 240)
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
+            // Enable smooth animations when groups expand/collapse
+            layoutTransition = LayoutTransition().apply { enableTransitionType(LayoutTransition.CHANGING) }
+        }
         parameterPanel.addView(menuLayout)
 
         parameterToggleContainer = FrameLayout(this).apply {
@@ -635,15 +648,86 @@ class MainActivity : AppCompatActivity() {
         }
         leftHUDContainer.addView(parameterPanel); leftHUDContainer.addView(parameterToggleContainer)
 
-        val axisContainer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 10) }
+        // --- NEW COLLAPSIBLE LOGIC ---
 
+        var currentGroupContent: LinearLayout? = null
+
+        // Helper to create a collapsible section
+        fun createGroup(title: String, startOpen: Boolean = false) {
+            val groupContainer = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 15 }
+                layoutTransition = LayoutTransition() // Smooth animation inside the group
+            }
+
+            // The Header Bar
+            val header = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(15, 20, 15, 20)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#22FFFFFF")) // Slight glass background
+                    cornerRadius = 12f
+                }
+            }
+
+            val arrow = TextView(this).apply {
+                text = "▶" // Start pointing right (closed)
+                textSize = 10f
+                setTextColor(Color.LTGRAY)
+                layoutParams = LinearLayout.LayoutParams(60, -2)
+                rotation = if(startOpen) 90f else 0f // Rotate down if open
+            }
+
+            val label = TextView(this).apply {
+                text = title
+                textSize = 10f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.WHITE)
+                letterSpacing = 0.1f
+            }
+
+            header.addView(arrow)
+            header.addView(label)
+
+            // The Content Area
+            val content = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                visibility = if (startOpen) View.VISIBLE else View.GONE
+                setPadding(10, 10, 10, 10)
+            }
+
+            // Toggle Logic
+            header.setOnClickListener {
+                val isVisible = content.visibility == View.VISIBLE
+                if (isVisible) {
+                    content.visibility = View.GONE
+                    arrow.animate().rotation(0f).setDuration(200).start()
+                } else {
+                    content.visibility = View.VISIBLE
+                    arrow.animate().rotation(90f).setDuration(200).start()
+                }
+            }
+
+            groupContainer.addView(header)
+            groupContainer.addView(content)
+            menuLayout.addView(groupContainer)
+
+            // Update reference for subsequent addControl calls
+            currentGroupContent = content
+        }
+
+        // --- 1. GEOMETRY GROUP (Includes Axis) ---
+        createGroup("GEOMETRY", startOpen = true)
+
+        val axisContainer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 10) }
         val axisCtrl = PropertyControl(this, "AXIS", "COUNT", min = 0, max = 15, defaultValue = 1).apply {
-            // This is manually updated by the SeekBar listener below
+            // Manually updated via SeekBar below
         }
         controls.add(axisCtrl); controlsMap["AXIS"] = axisCtrl
 
         axisSb = SeekBar(this).apply {
-            max = 15; progress = 1; layoutParams = LinearLayout.LayoutParams(540, 65); thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(16, 32) }
+            max = 15; progress = 1; layoutParams = LinearLayout.LayoutParams(0, 65, 1f); thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(16, 32) }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
                     renderer.axisCount = (p + 1).toFloat()
@@ -658,21 +742,35 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { axisLocked = !axisLocked; background = createLockDrawable(axisLocked); alpha = if(axisLocked) 1.0f else 0.4f }
             alpha = if(axisLocked) 1.0f else 0.4f
         }
-        axisContainer.addView(TextView(this).apply { text = "COUNT"; setTextColor(Color.WHITE); textSize = 8f; minWidth = 140; alpha = 0.8f }); axisContainer.addView(axisSb); axisContainer.addView(lockBtn); menuLayout.addView(axisContainer)
+        axisContainer.addView(TextView(this).apply { text = "COUNT"; setTextColor(Color.WHITE); textSize = 8f; minWidth = 100; alpha = 0.8f }); axisContainer.addView(axisSb); axisContainer.addView(lockBtn)
 
-        // --- DYNAMIC CONTROLS ---
+        // Add Axis to the first group
+        currentGroupContent?.addView(axisContainer)
 
+        // Wrapper to add to the current collapsible group
         fun addControl(c: PropertyControl) {
             controls.add(c)
             controlsMap[c.id] = c
-            c.attachTo(menuLayout)
+            // Attach to the currently active collapsible content view
+            currentGroupContent?.let { c.attachTo(it) } ?: c.attachTo(menuLayout)
         }
 
-        addHeader(menuLayout, "MASTER")
-        // WRAP: 360 degrees just rolls over
+        // --- DYNAMIC CONTROLS ---
+
+        createGroup("3D")
+        addControl(PropertyControl(this, "3D_MIX", "MIX 3D", defaultValue = 0, hasModulation = true))
+        addControl(PropertyControl(this, "S_SHAPE", "ROOM SHAPE", defaultValue = 0, hasModulation = true))
+        addControl(PropertyControl(this, "S_SPEED", "FLIGHT SPEED", defaultValue = 500, hasModulation = true))
+        addControl(PropertyControl(this, "S_FOV", "FOV DEPTH", defaultValue = 500, hasModulation = true))
+
+        createGroup("MORPHING")
+        addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "TWIST", "VORTEX", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "FLUX", "BIO-FLUX", defaultValue = 0, hasModulation = true))
+
+        createGroup("MASTER TRANSFORM")
         addControl(PropertyControl(this, "M_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
         addControl(PropertyControl(this, "M_ROT", "ROTATION", defaultValue = 500))
-        // MIRROR: Zoom shouldn't snap, it should bounce back
         addControl(PropertyControl(this, "M_ZOOM", "ZOOM", defaultValue = 300, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
         addControl(PropertyControl(this, "M_TX", "TRANSLATE X", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
         addControl(PropertyControl(this, "M_TY", "TRANSLATE Y", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
@@ -680,7 +778,7 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl(this, "M_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "M_RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
 
-        addHeader(menuLayout, "CAMERA")
+        createGroup("CAMERA TRANSFORM")
         addControl(PropertyControl(this, "C_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
         addControl(PropertyControl(this, "C_ROT", "ROTATION", defaultValue = 500))
         addControl(PropertyControl(this, "WARP", "WARP DISTORT", defaultValue = 1000))
@@ -691,12 +789,13 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl(this, "C_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
 
-        addHeader(menuLayout, "COLORS")
+        createGroup("COLOR GRADING")
         addControl(PropertyControl(this, "HUE", "HUE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
         addControl(PropertyControl(this, "NEG", "NEGATIVE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
         addControl(PropertyControl(this, "GLOW", "GLOW", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
         addControl(PropertyControl(this, "CONTRAST", "CONTRAST", defaultValue = 500))
         addControl(PropertyControl(this, "VIBRANCE", "VIBRANCE", defaultValue = 500))
+
         // --- UI BUTTONS & LAYOUTS ---
 
         cameraSettingsPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(10, 20, 10, 20) }
@@ -707,16 +806,12 @@ class MainActivity : AppCompatActivity() {
         rot180Btn = createSideBtn { renderer.rot180 = !renderer.rot180 }.apply { setImageResource(android.R.drawable.ic_menu_rotate) }
         cameraSettingsPanel.addView(flipXBtn); cameraSettingsPanel.addView(flipYBtn); cameraSettingsPanel.addView(rot180Btn)
 
-
-
         // --- NEW RTSP BUTTON ---
         cameraSettingsPanel.addView(createSideBtn {
             showRtspDialog()
         }.apply {
             // Use a globe or wifi icon. Using standard generic icon for now.
             setImageResource(android.R.drawable.ic_menu_compass)
-            // Or create a custom textToIcon("WEB")
-            // setImageDrawable(textToIcon("WEB", 30f))
         })
 
         recordControls = LinearLayout(this).apply {
@@ -1072,6 +1167,7 @@ class MainActivity : AppCompatActivity() {
         private var extEglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
         private var extWidth = 0
         private var extHeight = 0
+        private var startTime = System.nanoTime()
 
         fun resetPhases() {
             ctx.controls.forEach { it.lfoPhase = 0.0; it.lfoDrift = 0.0 }
@@ -1096,14 +1192,19 @@ class MainActivity : AppCompatActivity() {
 
             // --- 1. COMPILE HEAVY KALEIDOSCOPE SHADER ---
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
-            val fSrc = """
-            #extension GL_OES_EGL_image_external : require
+            val fSrc = """#extension GL_OES_EGL_image_external : require
             precision highp float;
             varying vec2 v;
             uniform samplerExternalOES uTex;
+        
+            // --- UNIFORMS ---
             uniform float uMR, uLR, uCR, uCZ, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB, uWarp;
             uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
             
+            // Spatial
+            uniform float uCurve, uTwist, uFlux;
+            uniform float uSShape, uSSpeed, uSFov, uTime, uMode; // Added uMode
+        
             vec3 sampleCamera(vec2 uv, float rgbShift) {
                 vec2 centered = uv - 0.5;
                 float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y);
@@ -1122,19 +1223,21 @@ class MainActivity : AppCompatActivity() {
                 vec2 mirroredUV = abs(mod(rotatedUV + 1.0, 2.0) - 1.0);
                 return texture2D(uTex, mirroredUV).rgb;
             }
-            
+        
             void main() {
                 vec3 finalColor = vec3(0.0);
                 float a1 = -uMR * 0.01745329; float cosA1 = cos(a1); float sinA1 = sin(a1);
                 float a2 = uLR * 0.01745329; float cosA2 = cos(a2); float sinA2 = sin(a2);
-            
+                float flySpeed = (uSSpeed - 0.5) * 4.0;
+        
                 for(int i=0; i<3; i++) {
                     float mOff = (i==0) ? uMRGB : (i==2) ? -uMRGB : 0.0;
                     vec2 uv = v - 0.5;
-                    float zM = 1.0 + (uv.x * uMTilt.x) + (uv.y * uMTilt.y);
-                    uv /= max(zM, 0.1);
-                    uv.x *= uA; uv.x += mOff;
-                    uv = (uv + uMT) * uMZ;
+                    
+                    // --- 1. ARCHITECTURE (COMMON) ---
+                    uv.x *= uA; 
+                    uv.x += mOff;
+                    uv = (uv + uMT) * uMZ; 
                     uv = vec2(uv.x * cosA1 - uv.y * sinA1, uv.x * sinA1 + uv.y * cosA1);
                     
                     if(uAx > 1.1) {
@@ -1146,12 +1249,51 @@ class MainActivity : AppCompatActivity() {
                         uv = vec2(cos(a), sin(a)) * r;
                     }
                     uv *= uLZ;
-                    uv = vec2(uv.x * cosA2 - uv.y * sinA2, uv.x * sinA2 + uv.y * cosA2);
-                    uv.x /= uA; 
-                    vec2 cameraUV = abs(mod(uv + 1.0, 2.0) - 1.0);
+        
+                    // --- 2. BRANCHING REALITIES ---
+                    
+                    // A. THE FLAT WORLD (Old School)
+                    // Simple 2D scaling. We keep it centered.
+                    vec2 flatUV = uv + 0.5; // Just recenter
+                    
+                    // B. THE 3D TUNNEL (New School)
+                    float rCircle = length(uv);
+                    float rBox = max(abs(uv.x), abs(uv.y));
+                    float dist = mix(rCircle, rBox, uSShape);
+                    
+                    float angle = atan(uv.y, uv.x);
+                    dist += sin(angle * 4.0 + dist * 10.0) * uFlux * dist;
+                    float safeDist = max(dist, 0.001);
+                    float z = (uSFov * 0.5 + 0.1) / safeDist;
+                    
+                    vec2 tunnelUV;
+                    float twistedAngle = angle + (1.0/safeDist) * uTwist;
+                    tunnelUV.x = twistedAngle / 3.14159; 
+                    tunnelUV.y = z + (uTime * flySpeed);
+                    
+                    if(abs(uCurve - 1.0) > 0.01) {
+                         float curveFactor = 1.0 + (uCurve - 1.0) * (1.0 - safeDist);
+                         tunnelUV *= curveFactor;
+                    }
+                    
+                    // --- 3. DIMENSION MORPH ---
+                    // Smoothly mix between the Flat Sheet and the Infinite Tunnel
+                    // We use smoothstep logic for a nicer transition curve
+                    float mixFactor = uMode * uMode * (3.0 - 2.0 * uMode);
+                    
+                    // We interpret the 'tunnelUV' as relative to center for mixing
+                    // The trick: Tunnel is polar-mapped, Flat is cartesian. 
+                    // Mixing them directly creates a "spiraling into existence" effect.
+                    vec2 mixedUV = mix(flatUV, tunnelUV, mixFactor);
+        
+                    // --- 4. SAMPLE ---
+                    vec2 cameraUV = abs(mod(mixedUV + 1.0, 2.0) - 1.0);
                     float sOff = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
                     vec3 smp = sampleCamera(cameraUV, sOff);
-                    if(i==0) finalColor.r = smp.r; else if(i==1) finalColor.g = smp.g; else finalColor.b = smp.b;
+                    
+                    if(i==0) finalColor.r = smp.r; 
+                    else if(i==1) finalColor.g = smp.g; 
+                    else finalColor.b = smp.b;
                 }
                 
                 if(uSol > 0.01) finalColor = mix(finalColor, abs(finalColor - uSol), step(0.1, uSol));
@@ -1170,8 +1312,25 @@ class MainActivity : AppCompatActivity() {
             """.trimIndent()
 
             kaleidoProgram = createProgram(vSrc, fSrc)
-            listOf("uMR", "uLR", "uCR", "uCZ", "uA", "uMZ", "uLZ", "uAx", "uC", "uS", "uHue", "uSol", "uBloom", "uRGB", "uMRGB", "uF", "uMT", "uCT", "uTex", "uWarp", "uMTilt", "uCTilt").forEach {
-                uLocs[it] = GLES20.glGetUniformLocation(kaleidoProgram, it)
+            val activeUniforms = IntArray(1)
+            GLES20.glGetProgramiv(kaleidoProgram, GLES20.GL_ACTIVE_UNIFORMS, activeUniforms, 0)
+            val lenBuf = IntArray(1)
+            val sizeBuf = IntArray(1)
+            val typeBuf = IntArray(1)
+            val nameBuf = ByteArray(256)
+
+            for (i in 0 until activeUniforms[0]) {
+                GLES20.glGetActiveUniform(
+                    kaleidoProgram, i, 256,
+                    lenBuf, 0, sizeBuf, 0, typeBuf, 0,
+                    nameBuf, 0
+                )
+                // Convert byte array to string, trimming nulls
+                val name = String(nameBuf, 0, lenBuf[0])
+                val loc = GLES20.glGetUniformLocation(kaleidoProgram, name)
+                if (loc != -1) {
+                    uLocs[name] = loc
+                }
             }
 
             // --- 2. COMPILE SIMPLE COPY SHADER ---
@@ -1226,6 +1385,13 @@ class MainActivity : AppCompatActivity() {
             val d = (now - lastTime) / 1e9
             lastTime = now
             val tpi = 2.0 * PI
+            val timeSeconds = (System.nanoTime() - startTime) / 1e9f
+
+            // 1. SAFETY CHECK: If the UI hasn't finished loading controls, SKIP the frame.
+            // This prevents the "Crash on Launch" Race Condition.
+            if (!ctx.controlsMap.containsKey("S_SHAPE") || !uLocs.containsKey("uSShape")) {
+                return
+            }
 
             try { surfaceTexture?.updateTexImage() } catch (e: Exception) { return }
 
@@ -1233,6 +1399,7 @@ class MainActivity : AppCompatActivity() {
 
             // --- CALCULATION LOGIC ---
             fun resolveModulation(id: String): Float {
+                // Use safe call '?' and elvis '?:' to prevent crashes if a key is missing
                 val c = ctx.controlsMap[id] ?: return 0f
                 val normValue = c.getNormalized()
                 if (!c.hasModulation || (c.modRate == 0 && c.modDepth == 0)) return normValue
@@ -1247,9 +1414,10 @@ class MainActivity : AppCompatActivity() {
                 return if (res > 1.0f) 2.0f - res else res
             }
 
-            val mRotCtrl = ctx.controlsMap["M_ROT"]!!
+            val mRotCtrl = ctx.controlsMap["M_ROT"] ?: return
             mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d
-            val cRotCtrl = ctx.controlsMap["C_ROT"]!!
+
+            val cRotCtrl = ctx.controlsMap["C_ROT"] ?: return
             cRotAccum += cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d
 
             val vMTiltX = resolveModulation("M_TILTX"); val vMTiltY = resolveModulation("M_TILTY")
@@ -1268,42 +1436,76 @@ class MainActivity : AppCompatActivity() {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glUseProgram(kaleidoProgram)
 
-            GLES20.glUniform2f(uLocs["uMTilt"]!!, (vMTiltX - 0.5f) * 1.6f, (vMTiltY - 0.5f) * 1.6f)
-            GLES20.glUniform2f(uLocs["uCTilt"]!!, (vCTiltX - 0.5f) * 1.6f, (vCTiltY - 0.5f) * 1.6f)
-            GLES20.glUniform1f(uLocs["uMR"]!!, (vMAngle * 360f + mRotAccum).toFloat() + 90f)
-            GLES20.glUniform1f(uLocs["uCR"]!!, (vCAngle * 360f + cRotAccum).toFloat())
-            GLES20.glUniform1f(uLocs["uLR"]!!, 0f)
-            GLES20.glUniform1f(uLocs["uA"]!!, fboWidth.toFloat() / fboHeight.toFloat())
+            // Helper to safely set uniform if it exists
+            fun safeUni(name: String, v: Float) { uLocs[name]?.let { GLES20.glUniform1f(it, v) } }
+            fun safeUni2(name: String, v1: Float, v2: Float) { uLocs[name]?.let { GLES20.glUniform2f(it, v1, v2) } }
+
+            safeUni2("uMTilt", (vMTiltX - 0.5f) * 1.6f, (vMTiltY - 0.5f) * 1.6f)
+            safeUni2("uCTilt", (vCTiltX - 0.5f) * 1.6f, (vCTiltY - 0.5f) * 1.6f)
+            safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f)
+            safeUni("uCR", (vCAngle * 360f + cRotAccum).toFloat())
+            safeUni("uLR", 0f)
+            safeUni("uA", fboWidth.toFloat() / fboHeight.toFloat())
 
             val mZoomBase = 0.1 + (vMZoom.toDouble().pow(2.0) * 9.9 * 2)
-            GLES20.glUniform1f(uLocs["uMZ"]!!, mZoomBase.toFloat())
+            safeUni("uMZ", mZoomBase.toFloat())
             val cZoomBase = 0.3f + (vCZoom * 1.8f)
-            GLES20.glUniform1f(uLocs["uCZ"]!!, cZoomBase)
-            GLES20.glUniform1f(uLocs["uWarp"]!!, vWarp)
-            GLES20.glUniform1f(uLocs["uLZ"]!!, 1.0f)
-            GLES20.glUniform1f(uLocs["uAx"]!!, axisCount)
+            safeUni("uCZ", cZoomBase)
+            safeUni("uWarp", vWarp)
+            safeUni("uLZ", 1.0f)
+            safeUni("uAx", axisCount)
 
             val effectiveFx = if (rot180) -flipX else flipX
             val effectiveFy = if (rot180) -flipY else flipY
-            GLES20.glUniform2f(uLocs["uF"]!!, effectiveFx, effectiveFy)
+            safeUni2("uF", effectiveFx, effectiveFy)
 
-            GLES20.glUniform1f(uLocs["uC"]!!, ctx.controlsMap["CONTRAST"]!!.getMapped(0f, 2f))
-            GLES20.glUniform1f(uLocs["uS"]!!, ctx.controlsMap["VIBRANCE"]!!.getMapped(0f, 2f))
-            GLES20.glUniform1f(uLocs["uHue"]!!, vHue)
-            GLES20.glUniform1f(uLocs["uSol"]!!, vNeg * 1.5f)
-            GLES20.glUniform1f(uLocs["uBloom"]!!, vGlow)
-            GLES20.glUniform1f(uLocs["uRGB"]!!, vRGB * 0.05f)
-            GLES20.glUniform1f(uLocs["uMRGB"]!!, vMRGB * 0.15f)
-            GLES20.glUniform2f(uLocs["uMT"]!!, -2f + (vMTx * 4f), -2f + (vMTy * 4f))
-            GLES20.glUniform2f(uLocs["uCT"]!!, -0.5f + vCTx, -0.5f + vCTy)
+            // Safe access for mapped controls
+            safeUni("uC", ctx.controlsMap["CONTRAST"]?.getMapped(0f, 2f) ?: 1f)
+            safeUni("uS", ctx.controlsMap["VIBRANCE"]?.getMapped(0f, 2f) ?: 1f)
+
+            safeUni("uHue", vHue)
+            safeUni("uSol", vNeg * 1.5f)
+            safeUni("uBloom", vGlow)
+            safeUni("uRGB", vRGB * 0.05f)
+            safeUni("uMRGB", vMRGB * 0.15f)
+            safeUni2("uMT", -2f + (vMTx * 4f), -2f + (vMTy * 4f))
+            safeUni2("uCT", -0.5f + vCTx, -0.5f + vCTy)
 
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId)
-            GLES20.glUniform1i(uLocs["uTex"]!!, 0)
+            uLocs["uTex"]?.let { GLES20.glUniform1i(it, 0) }
 
             bindCommonAttribs(kaleidoProgram)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+            // --- 3D Controls (Safely Accessed) ---
+            val sShape = ctx.controlsMap["S_SHAPE"]?.getNormalized() ?: 0f
+            safeUni("uSShape", sShape)
+
+            val vMode = ctx.controlsMap["3D_MIX"]?.getNormalized() ?: 1.0f
+            safeUni("uMode", vMode)
+
+            val sSpeed = ctx.controlsMap["S_SPEED"]?.getNormalized() ?: 0.5f
+            safeUni("uSSpeed", sSpeed)
+
+            val sFovRaw = ctx.controlsMap["S_FOV"]?.getNormalized() ?: 0.5f
+            safeUni("uSFov", 0.1f + (sFovRaw * 2.9f))
+
+            safeUni("uTime", timeSeconds)
+
+
+
+            // --- Morphing Controls ---
+            val cRaw = ctx.controlsMap["CURVE"]?.getMapped(0f, 1f) ?: 0.5f
+            val vCurve = if(cRaw > 0.5f) 1.0f + (cRaw - 0.5f) * 6.0f else 0.2f + (cRaw * 1.6f)
+            safeUni("uCurve", vCurve)
+
+            val vTwist = ctx.controlsMap["TWIST"]?.getMapped(-5.0f, 5.0f) ?: 0f
+            safeUni("uTwist", vTwist)
+
+            val vFlux = ctx.controlsMap["FLUX"]?.getMapped(0.0f, 0.5f) ?: 0f
+            safeUni("uFlux", vFlux)
 
             // --- PASS 2: DRAW TO PHONE SCREEN ---
             GLES20.glViewport(0, 0, viewWidth, viewHeight)
