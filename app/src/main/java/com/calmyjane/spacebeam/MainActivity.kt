@@ -886,12 +886,28 @@ class MainActivity : AppCompatActivity() {
     private fun toggleMenu() { isMenuExpanded = !isMenuExpanded; parameterPanel.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE; parameterToggleBtn.text = if (isMenuExpanded) "<" else ">" }
 
     inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
-        private var program = 0
-        private var texID = -1
+        // --- Programs ---
+        private var kaleidoProgram = 0
+        private var simpleProgram = 0 // New lightweight shader
+
+        // --- Textures & Buffers ---
+        private var cameraTexId = -1
         private var surfaceTexture: SurfaceTexture? = null
-        private lateinit var pBuf: FloatBuffer
-        private lateinit var tBuf: FloatBuffer
+
+        // FBO (Off-screen rendering)
+        private var fboId = 0
+        private var fboTexId = 0
+        private var fboWidth = 1920 // Fixed resolution for consistency/performance
+        private var fboHeight = 1080
+
+        private lateinit var pBuf: FloatBuffer // Position Buffer
+        private lateinit var tBuf: FloatBuffer // Texture Coordinate Buffer
+
+        // Uniform Locations
         private var uLocs = mutableMapOf<String, Int>()
+        private var simpleULocs = mutableMapOf<String, Int>()
+
+        // State
         private var viewWidth = 1
         private var viewHeight = 1
         private var lastTime = System.nanoTime()
@@ -901,11 +917,9 @@ class MainActivity : AppCompatActivity() {
         var flipX = 1.0f
         var flipY = -1.0f
         var rot180 = false
-
-        // Rotation Accumulators
-        var mRotAccum = 0.0 // Master Rotation
-        var cRotAccum = 0.0 // Camera Rotation (NEW)
-        var lRotAccum = 0.0 // Leftover from original code (L-System)
+        var mRotAccum = 0.0
+        var cRotAccum = 0.0
+        var lRotAccum = 0.0
 
         // Media / Capture
         private var captureRequested = false
@@ -918,16 +932,14 @@ class MainActivity : AppCompatActivity() {
         private var mSavedContext = EGL14.eglGetCurrentContext()
         private var mEglConfig: EGL14EGLConfig? = null
 
-        private var extSurfaceArgs: Triple<Surface, Int, Int>? = null // Holds the raw surface from helper
+        private var extSurfaceArgs: Triple<Surface, Int, Int>? = null
         private var extEglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
         private var extWidth = 0
         private var extHeight = 0
 
         fun resetPhases() {
             ctx.controls.forEach { it.lfoPhase = 0.0; it.lfoDrift = 0.0 }
-            mRotAccum = 0.0
-            cRotAccum = 0.0
-            lRotAccum = 0.0
+            mRotAccum = 0.0; cRotAccum = 0.0; lRotAccum = 0.0
         }
 
         fun capturePhoto() { captureRequested = true }
@@ -935,154 +947,111 @@ class MainActivity : AppCompatActivity() {
         fun stopRecording(callback: (File?) -> Unit) { onStopCallback = callback; isStopRequested = true }
 
         override fun onSurfaceCreated(gl: GL10?, config: GL10EGLConfig?) {
-            mSavedDisplay = EGL14.eglGetCurrentDisplay()
-            mSavedContext = EGL14.eglGetCurrentContext()
-            val currentConfigId = IntArray(1)
-            EGL14.eglQueryContext(mSavedDisplay, mSavedContext, EGL14.EGL_CONFIG_ID, currentConfigId, 0)
-            val configs = arrayOfNulls<EGL14EGLConfig>(1)
-            val numConfigs = IntArray(1)
-            EGL14.eglChooseConfig(mSavedDisplay, intArrayOf(EGL14.EGL_CONFIG_ID, currentConfigId[0], EGL14.EGL_NONE), 0, configs, 0, 1, numConfigs, 0)
-            mEglConfig = configs[0]
-            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            setupEGL() // Helper to save config for multi-window
 
+            // --- 1. COMPILE HEAVY KALEIDOSCOPE SHADER (Render to FBO) ---
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
 
+            // Reverted to single sample (original crisp shader)
             val fSrc = """
             #extension GL_OES_EGL_image_external : require
             precision highp float;
             varying vec2 v;
             uniform samplerExternalOES uTex;
-            
             uniform float uMR, uLR, uCR, uCZ, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB, uWarp;
-            uniform vec2 uMT, uCT, uF;
-            uniform vec2 uMTilt, uCTilt;
+            uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
             
             vec3 sampleCamera(vec2 uv, float rgbShift) {
-                // Keep centered logic within small range
                 vec2 centered = uv - 0.5;
-                
-                // --- PERSPECTIVE TILT (CAMERA) ---
                 float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y);
                 centered /= max(z, 0.1);
-                
                 centered *= uCZ;
-            
                 float aspectFactor = mix(uA, 1.0, uWarp);
                 centered.x *= aspectFactor;
-            
-                // Camera Rotation
                 float cr = uCR * 0.01745329; 
-                float c = cos(cr);
-                float s = sin(cr);
+                float c = cos(cr); float s = sin(cr);
                 centered = vec2(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
-                
                 centered.x /= aspectFactor;
-                centered += uCT; // Translation
-            
+                centered += uCT;
                 vec2 rotatedUV = centered + 0.5;
                 rotatedUV.x += rgbShift;
-                
-                // Flip Logic
                 rotatedUV = (rotatedUV - 0.5) * uF + 0.5;
-                
-                // Mirroring using fract and abs - handles tiling smoothly
                 vec2 mirroredUV = abs(mod(rotatedUV + 1.0, 2.0) - 1.0);
-                
                 return texture2D(uTex, mirroredUV).rgb;
             }
             
             void main() {
                 vec3 finalColor = vec3(0.0);
-                
-                // Pre-calculate constants for rotation to avoid repeated math
-                float a1 = -uMR * 0.01745329;
-                float cosA1 = cos(a1);
-                float sinA1 = sin(a1);
-                
-                float a2 = uLR * 0.01745329;
-                float cosA2 = cos(a2);
-                float sinA2 = sin(a2);
+                float a1 = -uMR * 0.01745329; float cosA1 = cos(a1); float sinA1 = sin(a1);
+                float a2 = uLR * 0.01745329; float cosA2 = cos(a2); float sinA2 = sin(a2);
             
                 for(int i=0; i<3; i++) {
                     float mOff = (i==0) ? uMRGB : (i==2) ? -uMRGB : 0.0;
                     vec2 uv = v - 0.5;
-                    
-                    // --- MASTER PERSPECTIVE ---
                     float zM = 1.0 + (uv.x * uMTilt.x) + (uv.y * uMTilt.y);
                     uv /= max(zM, 0.1);
-                    
-                    uv.x *= uA; 
-                    uv.x += mOff;
-                    
-                    // Apply Translation and Master Zoom
+                    uv.x *= uA; uv.x += mOff;
                     uv = (uv + uMT) * uMZ;
-                    
-                    // Master Rotation
                     uv = vec2(uv.x * cosA1 - uv.y * sinA1, uv.x * sinA1 + uv.y * cosA1);
                     
-                    // Kaleidoscope folding
                     if(uAx > 1.1) {
                         float r = length(uv);
                         float slice = 6.2831853 / uAx;
                         float angle = atan(uv.y, uv.x);
-                        // Use small local angle to maintain precision
                         float a = mod(angle, slice);
                         if(mod(uAx, 2.0) < 0.1) a = abs(a - slice * 0.5);
                         uv = vec2(cos(a), sin(a)) * r;
                     }
-                    
                     uv *= uLZ;
-                    
-                    // Secondary Rotation
                     uv = vec2(uv.x * cosA2 - uv.y * sinA2, uv.x * sinA2 + uv.y * cosA2);
-                    
                     uv.x /= uA; 
-                    
-                    // TILE PRECISION FIX: 
-                    // Instead of pure fract(uv), we use a mirrored repeat pattern 
-                    // that handles large numbers better.
                     vec2 cameraUV = abs(mod(uv + 1.0, 2.0) - 1.0);
-                    
                     float sOff = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
                     vec3 smp = sampleCamera(cameraUV, sOff);
-                    
-                    if(i==0) finalColor.r = smp.r;
-                    else if(i==1) finalColor.g = smp.g;
-                    else finalColor.b = smp.b;
+                    if(i==0) finalColor.r = smp.r; else if(i==1) finalColor.g = smp.g; else finalColor.b = smp.b;
                 }
                 
-                // --- POST PROCESSING ---
                 if(uSol > 0.01) finalColor = mix(finalColor, abs(finalColor - uSol), step(0.1, uSol));
-                
                 if(uHue > 0.001) {
                     const vec3 k = vec3(0.57735); 
                     float hueAngle = uHue * 6.2831853;
                     float ca = cos(hueAngle);
                     finalColor = finalColor * ca + cross(k, finalColor) * sin(hueAngle) + k * dot(k, finalColor) * (1.0 - ca);
                 }
-                
                 finalColor = (finalColor - 0.5) * uC + 0.5;
                 float l = dot(finalColor, vec3(0.299, 0.587, 0.114));
                 finalColor = mix(vec3(l), finalColor, uS);
-                
                 if(uBloom > 0.01) finalColor += smoothstep(0.5, 1.0, l) * finalColor * uBloom * 2.5;
-                
                 gl_FragColor = vec4(finalColor, 1.0);
             }
             """.trimIndent()
 
-            program = GLES20.glCreateProgram()
-            GLES20.glAttachShader(program, compile(GLES20.GL_VERTEX_SHADER, vSrc))
-            GLES20.glAttachShader(program, compile(GLES20.GL_FRAGMENT_SHADER, fSrc))
-            GLES20.glLinkProgram(program)
-
+            kaleidoProgram = createProgram(vSrc, fSrc)
             listOf("uMR", "uLR", "uCR", "uCZ", "uA", "uMZ", "uLZ", "uAx", "uC", "uS", "uHue", "uSol", "uBloom", "uRGB", "uMRGB", "uF", "uMT", "uCT", "uTex", "uWarp", "uMTilt", "uCTilt").forEach {
-                uLocs[it] = GLES20.glGetUniformLocation(program, it)
+                uLocs[it] = GLES20.glGetUniformLocation(kaleidoProgram, it)
             }
 
-            texID = createOESTex()
-            surfaceTexture = SurfaceTexture(texID)
+            // --- 2. COMPILE SIMPLE COPY SHADER (Render FBO to Screen) ---
+            // Just takes a standard texture and displays it. Near zero cost.
+            val fSrcSimple = """
+                precision mediump float;
+                varying vec2 v;
+                uniform sampler2D uTex; // Note: sampler2D, not samplerExternalOES
+                void main() {
+                    gl_FragColor = texture2D(uTex, v);
+                }
+            """.trimIndent()
 
+            simpleProgram = createProgram(vSrc, fSrcSimple)
+            simpleULocs["uTex"] = GLES20.glGetUniformLocation(simpleProgram, "uTex")
+
+            // --- 3. SETUP TEXTURES & FBO ---
+            cameraTexId = createOESTex()
+            surfaceTexture = SurfaceTexture(cameraTexId)
+
+            initFBO(fboWidth, fboHeight)
+
+            // Buffers
             pBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer()
                 .apply { put(floatArrayOf(-1f,-1f, 1f,-1f, -1f,1f, 1f,1f)).position(0) }
             tBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer()
@@ -1091,45 +1060,39 @@ class MainActivity : AppCompatActivity() {
             ctx.runOnUiThread { ctx.startCamera() }
         }
 
+        private fun initFBO(w: Int, h: Int) {
+            val fb = IntArray(1); val tx = IntArray(1)
+            GLES20.glGenFramebuffers(1, fb, 0)
+            GLES20.glGenTextures(1, tx, 0)
+            fboId = fb[0]; fboTexId = tx[0]
+
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, fboTexId, 0)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        }
+
         override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
-            viewWidth = w
-            viewHeight = h
-            GLES20.glViewport(0, 0, w, h)
+            viewWidth = w; viewHeight = h
+            // We do NOT resize the FBO here to avoid glitches, 1080p is enough for internal processing
         }
 
         override fun onDrawFrame(gl: GL10?) {
             val now = System.nanoTime()
-            val d = (now - lastTime) / 1e9 // Delta time in seconds
+            val d = (now - lastTime) / 1e9
             lastTime = now
             val tpi = 2.0 * PI
 
             try { surfaceTexture?.updateTexImage() } catch (e: Exception) { return }
 
-            // --- 1. SETUP SURFACES (Create EGL surfaces if needed) ---
+            // Manage EGL Surfaces
+            manageSurfaces()
 
-            // External Display (HDMI/QuickShare) Setup
-            if (extSurfaceArgs != null && extEglSurface == EGL14.EGL_NO_SURFACE) {
-                val (rawSurf, w, h) = extSurfaceArgs!!
-                extWidth = w; extHeight = h
-                // Use the same config as the phone screen
-                extEglSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, rawSurf, intArrayOf(EGL14.EGL_NONE), 0)
-            }
-            // External Display Cleanup
-            if (extSurfaceArgs == null && extEglSurface != EGL14.EGL_NO_SURFACE) {
-                EGL14.eglDestroySurface(mSavedDisplay, extEglSurface)
-                extEglSurface = EGL14.EGL_NO_SURFACE
-            }
-
-            // Recorder Setup
-            if (pendingRecordFile != null) {
-                videoRecorder = VideoRecorder(viewWidth, viewHeight, pendingRecordFile!!)
-                recordSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, videoRecorder!!.inputSurface, intArrayOf(EGL14.EGL_NONE), 0)
-                pendingRecordFile = null
-            }
-
-            // --- 2. PHYSICS & MATH CALCULATIONS ---
-
-            // ... (Keep your existing resolveModulation function here) ...
+            // --- CALCULATION LOGIC (Same as before) ---
             fun resolveModulation(id: String): Float {
                 val c = ctx.controlsMap[id] ?: return 0f
                 val normValue = c.getNormalized()
@@ -1139,47 +1102,46 @@ class MainActivity : AppCompatActivity() {
                 c.lfoDrift = drift
                 val modSignal = sin(drift).toFloat() * c.getModDepthNormalized()
                 var combined = normValue + modSignal
-                if (c.modMode == PropertyControl.ModMode.WRAP) {
-                    return combined - floor(combined)
-                } else {
-                    val t = combined % 2.0f
-                    val res = if (t < 0) t + 2.0f else t
-                    return if (res > 1.0f) 2.0f - res else res
-                }
+                if (c.modMode == PropertyControl.ModMode.WRAP) return combined - floor(combined)
+                val t = combined % 2.0f
+                val res = if (t < 0) t + 2.0f else t
+                return if (res > 1.0f) 2.0f - res else res
             }
 
-            // Calculate Rotations
+            // [Insert Rotation Calcs here - reusing your existing logic]
             val mRotCtrl = ctx.controlsMap["M_ROT"]!!
-            val mRotSpd = mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0)
-            mRotAccum += mRotSpd * 120.0 * d
-
+            mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d
             val cRotCtrl = ctx.controlsMap["C_ROT"]!!
-            val cRotSpd = cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0)
-            cRotAccum += cRotSpd * 120.0 * d
+            cRotAccum += cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d
 
-            // Resolve all values
             val vMTiltX = resolveModulation("M_TILTX"); val vMTiltY = resolveModulation("M_TILTY")
             val vCTiltX = resolveModulation("C_TILTX"); val vCTiltY = resolveModulation("C_TILTY")
             val vMAngle = resolveModulation("M_ANGLE"); val vCAngle = resolveModulation("C_ANGLE")
-            val vHue = resolveModulation("HUE")
-            val vMZoom = resolveModulation("M_ZOOM"); val vCZoom = resolveModulation("C_ZOOM")
-            val vMTx = resolveModulation("M_TX"); val vMTy = resolveModulation("M_TY")
-            val vCTx = resolveModulation("C_TX"); val vCTy = resolveModulation("C_TY")
-            val vMRGB = resolveModulation("M_RGB"); val vRGB = resolveModulation("RGB")
-            val vNeg = resolveModulation("NEG"); val vGlow = resolveModulation("GLOW")
-            val vWarp = ctx.controlsMap["WARP"]?.getNormalized() ?: 0f
+            val vHue = resolveModulation("HUE"); val vMZoom = resolveModulation("M_ZOOM")
+            val vCZoom = resolveModulation("C_ZOOM"); val vMTx = resolveModulation("M_TX")
+            val vMTy = resolveModulation("M_TY"); val vCTx = resolveModulation("C_TX")
+            val vCTy = resolveModulation("C_TY"); val vMRGB = resolveModulation("M_RGB")
+            val vRGB = resolveModulation("RGB"); val vNeg = resolveModulation("NEG")
+            val vGlow = resolveModulation("GLOW"); val vWarp = ctx.controlsMap["WARP"]?.getNormalized() ?: 0f
 
-            // --- 3. PREPARE GPU (Common State) ---
-            GLES20.glUseProgram(program)
 
-            // Pass Uniforms (This prepares the GPU with the math we just did)
+            // --- PASS 1: RENDER KALEIDOSCOPE TO FBO (OFFSCREEN) ---
+            // We only do the math ONCE here.
+
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+            GLES20.glViewport(0, 0, fboWidth, fboHeight) // Render at fixed internal resolution
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+            GLES20.glUseProgram(kaleidoProgram)
+
+            // Uniforms
             GLES20.glUniform2f(uLocs["uMTilt"]!!, (vMTiltX - 0.5f) * 1.6f, (vMTiltY - 0.5f) * 1.6f)
             GLES20.glUniform2f(uLocs["uCTilt"]!!, (vCTiltX - 0.5f) * 1.6f, (vCTiltY - 0.5f) * 1.6f)
             GLES20.glUniform1f(uLocs["uMR"]!!, (vMAngle * 360f + mRotAccum).toFloat() + 90f)
             GLES20.glUniform1f(uLocs["uCR"]!!, (vCAngle * 360f + cRotAccum).toFloat())
             GLES20.glUniform1f(uLocs["uLR"]!!, 0f)
-            // Note: We set Aspect Ratio for phone first
-            GLES20.glUniform1f(uLocs["uA"]!!, viewWidth.toFloat() / viewHeight.toFloat())
+            // Use FBO Aspect Ratio
+            GLES20.glUniform1f(uLocs["uA"]!!, fboWidth.toFloat() / fboHeight.toFloat())
 
             val mZoomBase = 0.1 + (vMZoom.toDouble().pow(2.0) * 9.9 * 2)
             GLES20.glUniform1f(uLocs["uMZ"]!!, mZoomBase.toFloat())
@@ -1203,81 +1165,135 @@ class MainActivity : AppCompatActivity() {
             GLES20.glUniform2f(uLocs["uMT"]!!, -2f + (vMTx * 4f), -2f + (vMTy * 4f))
             GLES20.glUniform2f(uLocs["uCT"]!!, -0.5f + vCTx, -0.5f + vCTy)
 
-            // Bind Texture
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texID)
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId)
             GLES20.glUniform1i(uLocs["uTex"]!!, 0)
 
-            // Bind Vertices
-            val pL = GLES20.glGetAttribLocation(program, "p")
-            val tL = GLES20.glGetAttribLocation(program, "t")
-            GLES20.glEnableVertexAttribArray(pL)
-            GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf)
-            GLES20.glEnableVertexAttribArray(tL)
-            GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
-
-            // --- 4. RENDER PASS 1: PHONE SCREEN ---
-            GLES20.glViewport(0, 0, viewWidth, viewHeight)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            bindCommonAttribs(kaleidoProgram)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-            // --- 5. RENDER PASS 2: EXTERNAL DISPLAY ---
+            // Unbind FBO - now we have our result in fboTexId
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+
+            // --- PASS 2: DRAW TO PHONE SCREEN (CHEAP) ---
+            GLES20.glViewport(0, 0, viewWidth, viewHeight)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            drawSimpleTexture(fboTexId)
+
+
+            // --- PASS 3: DRAW TO EXTERNAL DISPLAY (CHEAP) ---
             if (extEglSurface != EGL14.EGL_NO_SURFACE) {
                 val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
                 val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
 
                 if (EGL14.eglMakeCurrent(mSavedDisplay, extEglSurface, extEglSurface, mSavedContext)) {
-                    GLES20.glViewport(0, 0, extWidth, extHeight) // Use TV resolution
-
-                    // OPTIONAL: Update Aspect Ratio for TV so circles look round
-                    GLES20.glUniform1f(uLocs["uA"]!!, extWidth.toFloat() / extHeight.toFloat())
-
+                    GLES20.glViewport(0, 0, extWidth, extHeight)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                    drawSimpleTexture(fboTexId)
                     EGLExt.eglPresentationTimeANDROID(mSavedDisplay, extEglSurface!!, System.nanoTime())
                     EGL14.eglSwapBuffers(mSavedDisplay, extEglSurface)
                 }
-                // Restore Phone Context
                 EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
             }
 
-            // --- 6. RENDER PASS 3: RECORDER ---
+            // --- PASS 4: DRAW TO RECORDER (CHEAP) ---
             if (recordSurface != EGL14.EGL_NO_SURFACE && videoRecorder != null) {
                 val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
                 val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
                 if (EGL14.eglMakeCurrent(mSavedDisplay, recordSurface, recordSurface, mSavedContext)) {
                     GLES20.glViewport(0, 0, viewWidth, viewHeight)
-
-                    // Restore Aspect Ratio for Recorder/Phone (if we changed it for TV)
-                    GLES20.glUniform1f(uLocs["uA"]!!, viewWidth.toFloat() / viewHeight.toFloat())
-
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                    drawSimpleTexture(fboTexId)
                     EGLExt.eglPresentationTimeANDROID(mSavedDisplay, recordSurface!!, System.nanoTime())
                     EGL14.eglSwapBuffers(mSavedDisplay, recordSurface)
                     videoRecorder?.drain(false)
                 }
                 EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
-
-                if (isStopRequested) {
-                    videoRecorder?.drain(true)
-                    val out = videoRecorder?.file
-                    EGL14.eglDestroySurface(mSavedDisplay, recordSurface)
-                    recordSurface = EGL14.EGL_NO_SURFACE
-                    videoRecorder?.release()
-                    videoRecorder = null
-                    isStopRequested = false
-                    onStopCallback?.invoke(out)
-                }
+                handleStopRecording()
             }
 
-            // --- 7. CAPTURE PHOTO ---
+            handleCapture()
+        }
+
+        private fun drawSimpleTexture(texId: Int) {
+            GLES20.glUseProgram(simpleProgram)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId) // Standard 2D texture, not OES
+            GLES20.glUniform1i(simpleULocs["uTex"]!!, 0)
+            bindCommonAttribs(simpleProgram)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+
+        private fun bindCommonAttribs(prog: Int) {
+            val pL = GLES20.glGetAttribLocation(prog, "p")
+            val tL = GLES20.glGetAttribLocation(prog, "t")
+            GLES20.glEnableVertexAttribArray(pL)
+            GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf)
+            GLES20.glEnableVertexAttribArray(tL)
+            GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
+        }
+
+        // ... (Keep your existing provideSurface, createOESTex, compile, createProgram methods) ...
+        // ... (Keep your manageSurfaces / handleStopRecording logic or copy from previous version if needed) ...
+
+        // Helpers to keep the main draw loop clean
+        private fun createProgram(v: String, f: String): Int {
+            val p = GLES20.glCreateProgram()
+            GLES20.glAttachShader(p, compile(GLES20.GL_VERTEX_SHADER, v))
+            GLES20.glAttachShader(p, compile(GLES20.GL_FRAGMENT_SHADER, f))
+            GLES20.glLinkProgram(p)
+            return p
+        }
+        private fun compile(t: Int, s: String) = GLES20.glCreateShader(t).apply { GLES20.glShaderSource(this, s); GLES20.glCompileShader(this) }
+        private fun createOESTex(): Int { val t=IntArray(1); GLES20.glGenTextures(1,t,0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,t[0]); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MIN_FILTER,GLES20.GL_LINEAR); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MAG_FILTER,GLES20.GL_LINEAR); return t[0] }
+        fun provideSurface(req: SurfaceRequest) { glView.queueEvent { surfaceTexture?.let { st -> st.setDefaultBufferSize(req.resolution.width, req.resolution.height); val s = Surface(st); req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() } } } }
+        fun setExternalSurface(s: Surface, w: Int, h: Int) { extSurfaceArgs = Triple(s, w, h) }
+        fun removeExternalSurface() { extSurfaceArgs = null }
+
+        private fun setupEGL() {
+            mSavedDisplay = EGL14.eglGetCurrentDisplay()
+            mSavedContext = EGL14.eglGetCurrentContext()
+            val currentConfigId = IntArray(1)
+            EGL14.eglQueryContext(mSavedDisplay, mSavedContext, EGL14.EGL_CONFIG_ID, currentConfigId, 0)
+            val configs = arrayOfNulls<EGL14EGLConfig>(1); val num = IntArray(1)
+            EGL14.eglChooseConfig(mSavedDisplay, intArrayOf(EGL14.EGL_CONFIG_ID, currentConfigId[0], EGL14.EGL_NONE), 0, configs, 0, 1, num, 0)
+            mEglConfig = configs[0]
+        }
+
+        private fun manageSurfaces() {
+            if (extSurfaceArgs != null && extEglSurface == EGL14.EGL_NO_SURFACE) {
+                val (rawSurf, w, h) = extSurfaceArgs!!
+                extWidth = w; extHeight = h
+                extEglSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, rawSurf, intArrayOf(EGL14.EGL_NONE), 0)
+            }
+            if (extSurfaceArgs == null && extEglSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglDestroySurface(mSavedDisplay, extEglSurface); extEglSurface = EGL14.EGL_NO_SURFACE
+            }
+            if (pendingRecordFile != null) {
+                videoRecorder = VideoRecorder(viewWidth, viewHeight, pendingRecordFile!!)
+                recordSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, videoRecorder!!.inputSurface, intArrayOf(EGL14.EGL_NONE), 0)
+                pendingRecordFile = null
+            }
+        }
+
+        private fun handleStopRecording() {
+            if (isStopRequested) {
+                videoRecorder?.drain(true)
+                val out = videoRecorder?.file
+                if(recordSurface != EGL14.EGL_NO_SURFACE) { EGL14.eglDestroySurface(mSavedDisplay, recordSurface); recordSurface = EGL14.EGL_NO_SURFACE }
+                videoRecorder?.release(); videoRecorder = null
+                isStopRequested = false; onStopCallback?.invoke(out)
+            }
+        }
+
+        private fun handleCapture() {
             if (captureRequested) {
                 captureRequested = false
-                val b = ByteBuffer.allocate(viewWidth * viewHeight * 4)
-                GLES20.glReadPixels(0, 0, viewWidth, viewHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
+                val b = ByteBuffer.allocate(fboWidth * fboHeight * 4) // Capture from FBO logic or screen logic
+                GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
                 Thread {
-                    val bmp = Bitmap.createBitmap(viewWidth, viewHeight, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
+                    val bmp = Bitmap.createBitmap(fboWidth, fboHeight, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
                     val values = ContentValues().apply {
                         put(MediaStore.Images.Media.DISPLAY_NAME, "SB_${System.currentTimeMillis()}.jpg")
                         put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -1288,40 +1304,6 @@ class MainActivity : AppCompatActivity() {
                     }
                 }.start()
             }
-        }
-
-        fun provideSurface(req: SurfaceRequest) {
-            glView.queueEvent {
-                surfaceTexture?.let { st ->
-                    st.setDefaultBufferSize(req.resolution.width, req.resolution.height)
-                    val s = Surface(st)
-                    req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() }
-                }
-            }
-        }
-
-        private fun createOESTex(): Int {
-            val t = IntArray(1)
-            GLES20.glGenTextures(1, t, 0)
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, t[0])
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            return t[0]
-        }
-
-        private fun compile(t: Int, s: String): Int = GLES20.glCreateShader(t).apply {
-            GLES20.glShaderSource(this, s)
-            GLES20.glCompileShader(this)
-        }
-
-        fun setExternalSurface(surface: Surface, w: Int, h: Int) {
-            // We just store the args here. EGL creation must happen in onDrawFrame
-            extSurfaceArgs = Triple(surface, w, h)
-        }
-
-        fun removeExternalSurface() {
-            extSurfaceArgs = null
-            // We defer EGL destruction to onDrawFrame to stay on GL thread
         }
     }
 }
