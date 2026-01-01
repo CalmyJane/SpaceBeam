@@ -38,6 +38,12 @@ import android.app.Presentation
 import android.hardware.display.DisplayManager
 import android.os.Bundle
 import android.view.Display
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.rtsp.RtspMediaSource
+import androidx.media3.common.VideoSize
+import androidx.media3.common.Player
+import android.util.Log
 
 // Use type aliases to distinguish between the incompatible EGL classes
 import javax.microedition.khronos.egl.EGLConfig as GL10EGLConfig
@@ -368,6 +374,10 @@ class MainActivity : AppCompatActivity() {
     private var lastFingerFocusX = 0f
     private var lastFingerFocusY = 0f
 
+    private var exoPlayer: ExoPlayer? = null
+    private var isRtspMode = false
+    private var lastRtspUrl: String = "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4" // Example URL
+
     private data class Preset(
         val controlSnapshots: Map<String, PropertyControl.Snapshot>,
         val flipX: Float,
@@ -429,7 +439,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkAndRequestPermissions() {
-        val permissions = mutableListOf(Manifest.permission.CAMERA)
+        val permissions = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
@@ -437,21 +448,111 @@ class MainActivity : AppCompatActivity() {
             permissions.add(Manifest.permission.READ_MEDIA_VIDEO)
             permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
         }
+
         val missing = permissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-        if (missing.isNotEmpty()) ActivityCompat.requestPermissions(this, missing.toTypedArray(), 10) else startCamera()
+        if (missing.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, missing.toTypedArray(), 10)
+        } else {
+            startCamera()
+        }
     }
 
     fun startCamera() {
+        // 1. Stop RTSP if running
+        stopRtsp()
+        isRtspMode = false
+
+        // 2. Start CameraX
         val cpFuture = ProcessCameraProvider.getInstance(this)
         cpFuture.addListener({
             val provider = cpFuture.get()
-            val preview = Preview.Builder().setTargetAspectRatio(androidx.camera.core.AspectRatio.RATIO_16_9).build()
+            val preview = Preview.Builder()
+                .setTargetAspectRatio(androidx.camera.core.AspectRatio.RATIO_16_9)
+                .build()
+
+            // Connect camera to renderer
             preview.setSurfaceProvider { req -> renderer.provideSurface(req) }
+
             try {
                 provider.unbindAll()
                 provider.bindToLifecycle(this, currentSelector, preview)
+            } catch (e: Exception) {
+                android.util.Log.e("Camera", "Bind failed", e)
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun startRtsp(url: String) {
+        // 1. Unbind CameraX
+        val cpFuture = ProcessCameraProvider.getInstance(this)
+        cpFuture.addListener({
+            try {
+                cpFuture.get().unbindAll()
             } catch (e: Exception) { }
         }, ContextCompat.getMainExecutor(this))
+
+        // 2. Setup ExoPlayer
+        if (exoPlayer == null) {
+            exoPlayer = ExoPlayer.Builder(this).build()
+            // --- CHANGE: MUTE AUDIO ---
+            exoPlayer?.volume = 0f
+        }
+
+        // 3. Configure Renderer and Player
+        glView.queueEvent {
+            val surface = renderer.getPlayerSurface()
+
+            runOnUiThread {
+                if (surface != null) {
+                    exoPlayer?.setVideoSurface(surface)
+
+                    // Force RTSP over TCP
+                    val rtspSource = RtspMediaSource.Factory()
+                        .setForceUseRtpTcp(true)
+                        .setTimeoutMs(5000)
+                        .createMediaSource(MediaItem.fromUri(url))
+
+                    exoPlayer?.setMediaSource(rtspSource)
+
+                    // Handle Resolution Changes
+                    exoPlayer?.addListener(object : Player.Listener {
+                        override fun onVideoSizeChanged(videoSize: VideoSize) {
+                            super.onVideoSizeChanged(videoSize)
+                            if (videoSize.width > 0 && videoSize.height > 0) {
+                                renderer.updateTextureSize(videoSize.width, videoSize.height)
+                            }
+                        }
+
+                        override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                            Toast.makeText(this@MainActivity, "Stream Error: ${error.message}", Toast.LENGTH_LONG).show()
+                        }
+                    })
+
+                    exoPlayer?.prepare()
+                    exoPlayer?.play()
+
+                    isRtspMode = true
+                    lastRtspUrl = url
+                    Toast.makeText(this, "Connecting (TCP)...", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "Renderer not ready", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun stopRtsp() {
+        exoPlayer?.stop()
+        exoPlayer?.clearVideoSurface()
+        // We do NOT release the player here if we want to reuse it quickly,
+        // but for memory safety you could release.
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        exoPlayer?.release()
+        exoPlayer = null
+        displayHelper.stop() // Existing
     }
 
     private fun handleInteraction(event: MotionEvent) {
@@ -606,6 +707,18 @@ class MainActivity : AppCompatActivity() {
         rot180Btn = createSideBtn { renderer.rot180 = !renderer.rot180 }.apply { setImageResource(android.R.drawable.ic_menu_rotate) }
         cameraSettingsPanel.addView(flipXBtn); cameraSettingsPanel.addView(flipYBtn); cameraSettingsPanel.addView(rot180Btn)
 
+
+
+        // --- NEW RTSP BUTTON ---
+        cameraSettingsPanel.addView(createSideBtn {
+            showRtspDialog()
+        }.apply {
+            // Use a globe or wifi icon. Using standard generic icon for now.
+            setImageResource(android.R.drawable.ic_menu_compass)
+            // Or create a custom textToIcon("WEB")
+            // setImageDrawable(textToIcon("WEB", 30f))
+        })
+
         recordControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(20, 10, 20, 10)
             translationX = resources.displayMetrics.widthPixels * 0.2f
@@ -635,6 +748,31 @@ class MainActivity : AppCompatActivity() {
 
         overlayHUD.addView(flashOverlay); overlayHUD.addView(logoView); overlayHUD.addView(leftHUDContainer); overlayHUD.addView(recordControls, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30 }); overlayHUD.addView(cameraSettingsPanel, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.TOP or Gravity.END; topMargin = 40; rightMargin = 40 }); overlayHUD.addView(presetPanel, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 180 }); overlayHUD.addView(galleryBtn); overlayHUD.addView(readabilityBtn); overlayHUD.addView(resetBtn)
         addContentView(overlayHUD, ViewGroup.LayoutParams(-1, -1)); updateSidebarVisuals()
+    }
+
+    private fun showRtspDialog() {
+        val input = EditText(this).apply {
+            setText(lastRtspUrl)
+            setTextColor(Color.BLACK) // Ensure text is visible depending on theme
+            setPadding(40, 40, 40, 40)
+        }
+
+        val container = FrameLayout(this).apply {
+            setPadding(50, 20, 50, 0)
+            addView(input)
+        }
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Enter RTSP/Video URL")
+            .setView(container)
+            .setPositiveButton("Load") { _, _ ->
+                val url = input.text.toString()
+                if (url.isNotEmpty()) {
+                    startRtsp(url)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun applyReadabilityStyle() {
@@ -888,26 +1026,25 @@ class MainActivity : AppCompatActivity() {
     inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
         // --- Programs ---
         private var kaleidoProgram = 0
-        private var simpleProgram = 0 // New lightweight shader
+        private var simpleProgram = 0
 
         // --- Textures & Buffers ---
         private var cameraTexId = -1
         private var surfaceTexture: SurfaceTexture? = null
 
-        // FBO (Off-screen rendering)
+        // NEW: Surface wrapper for ExoPlayer
+        private var playerSurface: Surface? = null
+
+        // ... (Keep existing FBO, Buffers, Uniforms variables) ...
         private var fboId = 0
         private var fboTexId = 0
-        private var fboWidth = 1920 // Fixed resolution for consistency/performance
+        private var fboWidth = 1920
         private var fboHeight = 1080
 
-        private lateinit var pBuf: FloatBuffer // Position Buffer
-        private lateinit var tBuf: FloatBuffer // Texture Coordinate Buffer
-
-        // Uniform Locations
+        private lateinit var pBuf: FloatBuffer
+        private lateinit var tBuf: FloatBuffer
         private var uLocs = mutableMapOf<String, Int>()
         private var simpleULocs = mutableMapOf<String, Int>()
-
-        // State
         private var viewWidth = 1
         private var viewHeight = 1
         private var lastTime = System.nanoTime()
@@ -921,7 +1058,7 @@ class MainActivity : AppCompatActivity() {
         var cRotAccum = 0.0
         var lRotAccum = 0.0
 
-        // Media / Capture
+        // Media / Capture vars (Keep existing)
         private var captureRequested = false
         private var videoRecorder: VideoRecorder? = null
         private var recordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
@@ -931,7 +1068,6 @@ class MainActivity : AppCompatActivity() {
         private var mSavedDisplay = EGL14.EGL_NO_DISPLAY
         private var mSavedContext = EGL14.eglGetCurrentContext()
         private var mEglConfig: EGL14EGLConfig? = null
-
         private var extSurfaceArgs: Triple<Surface, Int, Int>? = null
         private var extEglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
         private var extWidth = 0
@@ -946,13 +1082,20 @@ class MainActivity : AppCompatActivity() {
         fun startRecording(file: File) { pendingRecordFile = file }
         fun stopRecording(callback: (File?) -> Unit) { onStopCallback = callback; isStopRequested = true }
 
+        // --- NEW METHOD FOR EXOPLAYER ---
+        fun getPlayerSurface(): Surface? {
+            if (surfaceTexture == null) return null
+            if (playerSurface == null) {
+                playerSurface = Surface(surfaceTexture)
+            }
+            return playerSurface
+        }
+
         override fun onSurfaceCreated(gl: GL10?, config: GL10EGLConfig?) {
-            setupEGL() // Helper to save config for multi-window
+            setupEGL()
 
-            // --- 1. COMPILE HEAVY KALEIDOSCOPE SHADER (Render to FBO) ---
+            // --- 1. COMPILE HEAVY KALEIDOSCOPE SHADER ---
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
-
-            // Reverted to single sample (original crisp shader)
             val fSrc = """
             #extension GL_OES_EGL_image_external : require
             precision highp float;
@@ -1031,12 +1174,11 @@ class MainActivity : AppCompatActivity() {
                 uLocs[it] = GLES20.glGetUniformLocation(kaleidoProgram, it)
             }
 
-            // --- 2. COMPILE SIMPLE COPY SHADER (Render FBO to Screen) ---
-            // Just takes a standard texture and displays it. Near zero cost.
+            // --- 2. COMPILE SIMPLE COPY SHADER ---
             val fSrcSimple = """
                 precision mediump float;
                 varying vec2 v;
-                uniform sampler2D uTex; // Note: sampler2D, not samplerExternalOES
+                uniform sampler2D uTex; 
                 void main() {
                     gl_FragColor = texture2D(uTex, v);
                 }
@@ -1051,7 +1193,6 @@ class MainActivity : AppCompatActivity() {
 
             initFBO(fboWidth, fboHeight)
 
-            // Buffers
             pBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer()
                 .apply { put(floatArrayOf(-1f,-1f, 1f,-1f, -1f,1f, 1f,1f)).position(0) }
             tBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer()
@@ -1078,7 +1219,6 @@ class MainActivity : AppCompatActivity() {
 
         override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
             viewWidth = w; viewHeight = h
-            // We do NOT resize the FBO here to avoid glitches, 1080p is enough for internal processing
         }
 
         override fun onDrawFrame(gl: GL10?) {
@@ -1089,10 +1229,9 @@ class MainActivity : AppCompatActivity() {
 
             try { surfaceTexture?.updateTexImage() } catch (e: Exception) { return }
 
-            // Manage EGL Surfaces
             manageSurfaces()
 
-            // --- CALCULATION LOGIC (Same as before) ---
+            // --- CALCULATION LOGIC ---
             fun resolveModulation(id: String): Float {
                 val c = ctx.controlsMap[id] ?: return 0f
                 val normValue = c.getNormalized()
@@ -1108,7 +1247,6 @@ class MainActivity : AppCompatActivity() {
                 return if (res > 1.0f) 2.0f - res else res
             }
 
-            // [Insert Rotation Calcs here - reusing your existing logic]
             val mRotCtrl = ctx.controlsMap["M_ROT"]!!
             mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d
             val cRotCtrl = ctx.controlsMap["C_ROT"]!!
@@ -1124,23 +1262,17 @@ class MainActivity : AppCompatActivity() {
             val vRGB = resolveModulation("RGB"); val vNeg = resolveModulation("NEG")
             val vGlow = resolveModulation("GLOW"); val vWarp = ctx.controlsMap["WARP"]?.getNormalized() ?: 0f
 
-
             // --- PASS 1: RENDER KALEIDOSCOPE TO FBO (OFFSCREEN) ---
-            // We only do the math ONCE here.
-
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-            GLES20.glViewport(0, 0, fboWidth, fboHeight) // Render at fixed internal resolution
+            GLES20.glViewport(0, 0, fboWidth, fboHeight)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-
             GLES20.glUseProgram(kaleidoProgram)
 
-            // Uniforms
             GLES20.glUniform2f(uLocs["uMTilt"]!!, (vMTiltX - 0.5f) * 1.6f, (vMTiltY - 0.5f) * 1.6f)
             GLES20.glUniform2f(uLocs["uCTilt"]!!, (vCTiltX - 0.5f) * 1.6f, (vCTiltY - 0.5f) * 1.6f)
             GLES20.glUniform1f(uLocs["uMR"]!!, (vMAngle * 360f + mRotAccum).toFloat() + 90f)
             GLES20.glUniform1f(uLocs["uCR"]!!, (vCAngle * 360f + cRotAccum).toFloat())
             GLES20.glUniform1f(uLocs["uLR"]!!, 0f)
-            // Use FBO Aspect Ratio
             GLES20.glUniform1f(uLocs["uA"]!!, fboWidth.toFloat() / fboHeight.toFloat())
 
             val mZoomBase = 0.1 + (vMZoom.toDouble().pow(2.0) * 9.9 * 2)
@@ -1171,18 +1303,14 @@ class MainActivity : AppCompatActivity() {
 
             bindCommonAttribs(kaleidoProgram)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
-            // Unbind FBO - now we have our result in fboTexId
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-
-            // --- PASS 2: DRAW TO PHONE SCREEN (CHEAP) ---
+            // --- PASS 2: DRAW TO PHONE SCREEN ---
             GLES20.glViewport(0, 0, viewWidth, viewHeight)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             drawSimpleTexture(fboTexId)
 
-
-            // --- PASS 3: DRAW TO EXTERNAL DISPLAY (CHEAP) ---
+            // --- PASS 3: DRAW TO EXTERNAL DISPLAY ---
             if (extEglSurface != EGL14.EGL_NO_SURFACE) {
                 val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
                 val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
@@ -1197,7 +1325,7 @@ class MainActivity : AppCompatActivity() {
                 EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
             }
 
-            // --- PASS 4: DRAW TO RECORDER (CHEAP) ---
+            // --- PASS 4: DRAW TO RECORDER ---
             if (recordSurface != EGL14.EGL_NO_SURFACE && videoRecorder != null) {
                 val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
                 val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
@@ -1219,7 +1347,7 @@ class MainActivity : AppCompatActivity() {
         private fun drawSimpleTexture(texId: Int) {
             GLES20.glUseProgram(simpleProgram)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId) // Standard 2D texture, not OES
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
             GLES20.glUniform1i(simpleULocs["uTex"]!!, 0)
             bindCommonAttribs(simpleProgram)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -1234,10 +1362,6 @@ class MainActivity : AppCompatActivity() {
             GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
         }
 
-        // ... (Keep your existing provideSurface, createOESTex, compile, createProgram methods) ...
-        // ... (Keep your manageSurfaces / handleStopRecording logic or copy from previous version if needed) ...
-
-        // Helpers to keep the main draw loop clean
         private fun createProgram(v: String, f: String): Int {
             val p = GLES20.glCreateProgram()
             GLES20.glAttachShader(p, compile(GLES20.GL_VERTEX_SHADER, v))
@@ -1277,6 +1401,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        fun updateTextureSize(width: Int, height: Int) {
+            glView.queueEvent {
+                surfaceTexture?.setDefaultBufferSize(width, height)
+            }
+        }
+
         private fun handleStopRecording() {
             if (isStopRequested) {
                 videoRecorder?.drain(true)
@@ -1290,7 +1420,7 @@ class MainActivity : AppCompatActivity() {
         private fun handleCapture() {
             if (captureRequested) {
                 captureRequested = false
-                val b = ByteBuffer.allocate(fboWidth * fboHeight * 4) // Capture from FBO logic or screen logic
+                val b = ByteBuffer.allocate(fboWidth * fboHeight * 4)
                 GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
                 Thread {
                     val bmp = Bitmap.createBitmap(fboWidth, fboHeight, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
@@ -1307,61 +1437,215 @@ class MainActivity : AppCompatActivity() {
         }
     }
 }
-
 class VideoRecorder(val width: Int, val height: Int, val file: File) {
-    private var encoder: MediaCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-    private var muxer: MediaMuxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-    val inputSurface: Surface
-    private var trackIndex = -1
-    private var muxerStarted = false
     private val bufferInfo = MediaCodec.BufferInfo()
+    private var muxer: MediaMuxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+    private var muxerStarted = false
+
+    // --- VIDEO VARIABLES ---
+    private var videoEncoder: MediaCodec
+    val inputSurface: Surface
+    private var videoTrackIndex = -1
+
+    // --- AUDIO VARIABLES ---
+    private var audioEncoder: MediaCodec? = null
+    private var audioRecord: AudioRecord? = null
+    private var audioTrackIndex = -1
+    private var audioThread: Thread? = null
+    private var isRecording = true
+
+    // Audio configuration
+    private val sampleRate = 44100
+    private val channelCount = 1
+    private val audioBitRate = 128000
+    private var prevAudioPresentationTimeUs: Long = 0
 
     init {
+        // 1. Setup Video Encoder
+        // Ensure even dimensions (required by some codecs)
         val w = if (width % 2 == 0) width else width - 1
         val h = if (height % 2 == 0) height else height - 1
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
+
+        val vFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, 6_000_000)
             setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         }
-        encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        inputSurface = encoder.createInputSurface()
-        encoder.start()
+
+        videoEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        videoEncoder.configure(vFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        inputSurface = videoEncoder.createInputSurface()
+        videoEncoder.start()
+
+        // 2. Setup Audio Encoder & Recorder
+        setupAudio()
     }
 
-    fun drain(endOfStream: Boolean) {
-        if (endOfStream) try { encoder.signalEndOfInputStream() } catch (e: Exception) { }
-        while (true) {
-            val idx = try { encoder.dequeueOutputBuffer(bufferInfo, 10000) } catch (e: Exception) { -1 }
-            if (idx == MediaCodec.INFO_TRY_AGAIN_LATER) { if (!endOfStream) break }
-            else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                trackIndex = muxer.addTrack(encoder.outputFormat)
-                try { muxer.start(); muxerStarted = true } catch (e: Exception) { }
+    private fun setupAudio() {
+        try {
+            val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            val bufferSize = minBufferSize * 4 // Use a larger buffer to prevent overruns
+
+            try {
+                // Use MIC instead of CAMCORDER for better compatibility
+                audioRecord = AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize)
+            } catch (e: SecurityException) {
+                Log.e("VideoRecorder", "Permission denied for AudioRecord")
+                audioRecord = null
+                return
             }
-            else if (idx >= 0) {
-                val data = encoder.getOutputBuffer(idx) ?: continue
-                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) bufferInfo.size = 0
-                if (bufferInfo.size != 0 && muxerStarted) {
-                    try {
-                        data.position(bufferInfo.offset)
-                        data.limit(bufferInfo.offset + bufferInfo.size)
-                        muxer.writeSampleData(trackIndex, data, bufferInfo)
-                    } catch (e: Exception) { }
+
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e("VideoRecorder", "AudioRecord failed to initialize")
+                audioRecord = null
+                return
+            }
+
+            val aFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channelCount).apply {
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                setInteger(MediaFormat.KEY_BIT_RATE, audioBitRate)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+            }
+
+            audioEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+            audioEncoder?.configure(aFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            audioEncoder?.start()
+
+            isRecording = true
+            audioRecord?.startRecording()
+
+            audioThread = Thread { audioLoop() }
+            audioThread?.start()
+
+        } catch (e: Exception) {
+            Log.e("VideoRecorder", "Audio setup crashed", e)
+            audioEncoder = null
+            audioRecord = null
+        }
+    }
+
+    // Called by Renderer to drain VIDEO frames
+    fun drain(endOfStream: Boolean) {
+        if (endOfStream) {
+            try { videoEncoder.signalEndOfInputStream() } catch (e: Exception) { }
+        }
+        drainEncoder(videoEncoder, isVideo = true)
+    }
+
+    private fun audioLoop() {
+        // Standard AAC frame size is usually 1024 samples
+        val buffer = ByteArray(2048)
+        var totalBytesRead = 0L
+
+        while (isRecording && audioEncoder != null && audioRecord != null) {
+            val readBytes = audioRecord!!.read(buffer, 0, buffer.size)
+            if (readBytes > 0) {
+                totalBytesRead += readBytes
+
+                try {
+                    val inputBufferIndex = audioEncoder!!.dequeueInputBuffer(10000)
+                    if (inputBufferIndex >= 0) {
+                        val inputBuffer = audioEncoder!!.getInputBuffer(inputBufferIndex)
+                        inputBuffer?.clear()
+                        inputBuffer?.put(buffer, 0, readBytes)
+
+                        // --- CRITICAL FIX: MATHEMATICAL TIMESTAMP ---
+                        // System.nanoTime() is unstable for audio.
+                        // Calculate time based on samples processed to ensure perfect sync.
+                        val pts = (totalBytesRead * 1_000_000L) / (sampleRate * 2) // *2 for 16-bit PCM
+
+                        audioEncoder!!.queueInputBuffer(inputBufferIndex, 0, readBytes, pts, 0)
+                    }
+                    drainEncoder(audioEncoder!!, isVideo = false)
+                } catch (e: Exception) {
+                    Log.e("VideoRecorder", "Audio encoding error", e)
+                }
+            }
+        }
+    }
+
+    private fun drainEncoder(encoder: MediaCodec, isVideo: Boolean) {
+        val timeoutUs = if (isVideo) 0L else 10000L
+
+        while (true) {
+            val idx = try { encoder.dequeueOutputBuffer(bufferInfo, timeoutUs) } catch (e: Exception) { -1 }
+
+            if (idx == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (!isVideo && !isRecording) break
+                break
+            } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                synchronized(this) {
+                    if (muxerStarted) return // Should not happen
+                    val newFormat = encoder.outputFormat
+                    if (isVideo) {
+                        videoTrackIndex = muxer.addTrack(newFormat)
+                    } else {
+                        audioTrackIndex = muxer.addTrack(newFormat)
+                    }
+                    startMuxerIfReady()
+                }
+            } else if (idx >= 0) {
+                val encodedData = encoder.getOutputBuffer(idx) ?: continue
+
+                if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                    // Config data is handled by the muxer on track add, just ignore here
+                    bufferInfo.size = 0
+                }
+
+                if (bufferInfo.size != 0) {
+                    synchronized(this) {
+                        if (muxerStarted) {
+                            val trackIndex = if (isVideo) videoTrackIndex else audioTrackIndex
+
+                            // Adjust timestamps to be monotonic relative to muxer start
+                            if (bufferInfo.presentationTimeUs < prevAudioPresentationTimeUs) {
+                                bufferInfo.presentationTimeUs = prevAudioPresentationTimeUs + 1
+                            }
+                            prevAudioPresentationTimeUs = bufferInfo.presentationTimeUs
+
+                            if (trackIndex >= 0) {
+                                encodedData.position(bufferInfo.offset)
+                                encodedData.limit(bufferInfo.offset + bufferInfo.size)
+                                muxer.writeSampleData(trackIndex, encodedData, bufferInfo)
+                            }
+                        }
+                    }
                 }
                 encoder.releaseOutputBuffer(idx, false)
-                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
-            } else if (idx < 0 && endOfStream) break
+                if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+            }
+        }
+    }
+
+    private fun startMuxerIfReady() {
+        val audioReady = (audioEncoder == null) || (audioTrackIndex >= 0)
+        val videoReady = (videoTrackIndex >= 0)
+
+        if (videoReady && audioReady && !muxerStarted) {
+            muxer.start()
+            muxerStarted = true
         }
     }
 
     fun release() {
+        isRecording = false
+        try { audioThread?.join(500) } catch (e: Exception) {}
+
         try {
             if (muxerStarted) muxer.stop()
             muxer.release()
-            encoder.stop()
-            encoder.release()
+
+            videoEncoder.stop()
+            videoEncoder.release()
             inputSurface.release()
-        } catch (e: Exception) { }
+
+            audioEncoder?.stop()
+            audioEncoder?.release()
+            audioRecord?.stop()
+            audioRecord?.release()
+        } catch (e: Exception) {
+            Log.e("VideoRecorder", "Cleanup failed", e)
+        }
     }
 }

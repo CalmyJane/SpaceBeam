@@ -51,4 +51,8 @@ dependencies {
     implementation("androidx.camera:camera-camera2:$camerax_version")
     implementation("androidx.camera:camera-lifecycle:$camerax_version")
     implementation ("androidx.camera:camera-camera2:1.3.0")
+    implementation ("androidx.media3:media3-exoplayer:1.2.0")
+    implementation("androidx.media3:media3-exoplayer-rtsp:1.2.0")
+    implementation("androidx.media3:media3-ui:1.2.0")
+    implementation("androidx.media3:media3-common:1.2.0")
 }
