@@ -30,12 +30,105 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.*
+import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.view.WindowManager
+import android.app.Presentation
+import android.hardware.display.DisplayManager
+import android.os.Bundle
+import android.view.Display
 
 // Use type aliases to distinguish between the incompatible EGL classes
 import javax.microedition.khronos.egl.EGLConfig as GL10EGLConfig
 import android.opengl.EGLConfig as EGL14EGLConfig
 
-// --- REFACTORED SLIDER OBJECT ---
+
+/**
+ * Manages external displays (HDMI, Miracast/QuickShare).
+ * When connected, it opens a clean SurfaceView on the external screen
+ * and passes the Surface to the renderer.
+ */
+class ExternalDisplayHelper(
+    private val context: Context,
+    private val renderer: MainActivity.KaleidoscopeRenderer
+) {
+    private var presentation: CleanFeedPresentation? = null
+    private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = updatePresentation()
+        override fun onDisplayChanged(displayId: Int) = updatePresentation()
+        override fun onDisplayRemoved(displayId: Int) = updatePresentation()
+    }
+
+    fun start() {
+        displayManager.registerDisplayListener(displayListener, null)
+        updatePresentation()
+    }
+
+    fun stop() {
+        displayManager.unregisterDisplayListener(displayListener)
+        presentation?.dismiss()
+        presentation = null
+    }
+
+    private fun updatePresentation() {
+        // Look for secondary displays (HDMI, Wireless Display)
+        val displays = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+
+        if (displays.isNotEmpty()) {
+            val externalDisplay = displays[0]
+            // If we are already showing on this display, do nothing
+            if (presentation?.display?.displayId == externalDisplay.displayId) return
+
+            // Dismiss old one if display changed
+            presentation?.dismiss()
+
+            // Create new Presentation
+            presentation = CleanFeedPresentation(context, externalDisplay, renderer).apply {
+                try { show() } catch (e: WindowManager.InvalidDisplayException) { dismiss() }
+            }
+        } else {
+            // No external display, clean up
+            presentation?.dismiss()
+            presentation = null
+            renderer.removeExternalSurface()
+        }
+    }
+
+    /**
+     * Inner class representing the Window on the secondary screen.
+     * It contains ONLY the SurfaceView (no UI buttons).
+     */
+    private class CleanFeedPresentation(
+        ctx: Context,
+        display: Display,
+        val renderer: MainActivity.KaleidoscopeRenderer
+    ) : Presentation(ctx, display) {
+
+        override fun onCreate(savedInstanceState: Bundle?) {
+            super.onCreate(savedInstanceState)
+            val surfaceView = SurfaceView(context)
+            setContentView(surfaceView)
+
+            surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    renderer.setExternalSurface(holder.surface, display.width, display.height)
+                }
+
+                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                    renderer.setExternalSurface(holder.surface, width, height)
+                }
+
+                override fun surfaceDestroyed(holder: SurfaceHolder) {
+                    renderer.removeExternalSurface()
+                }
+            })
+        }
+    }
+}
+
 
 class PropertyControl(
     private val context: Context,
@@ -241,6 +334,8 @@ class MainActivity : AppCompatActivity() {
     private var currentSelector = CameraSelector.DEFAULT_FRONT_CAMERA
     private lateinit var overlayHUD: FrameLayout
 
+    private lateinit var displayHelper: ExternalDisplayHelper
+
     // Added axisSb as a class property for access in globalReset and presets
     private lateinit var axisSb: SeekBar
 
@@ -290,7 +385,7 @@ class MainActivity : AppCompatActivity() {
     private var recordingSeconds = 0
     private val handler = Handler(Looper.getMainLooper())
     private var recordTicker: Runnable? = null
-    private var readabilityLevel = 0
+    private var readabilityLevel = 2
 
     private lateinit var parameterPanel: ScrollView
     private lateinit var cameraSettingsPanel: LinearLayout
@@ -328,7 +423,8 @@ class MainActivity : AppCompatActivity() {
             applyPreset(1)
             applyReadabilityStyle()
         }
-
+        displayHelper = ExternalDisplayHelper(this, renderer)
+        displayHelper.start()
         checkAndRequestPermissions()
     }
 
@@ -822,6 +918,11 @@ class MainActivity : AppCompatActivity() {
         private var mSavedContext = EGL14.eglGetCurrentContext()
         private var mEglConfig: EGL14EGLConfig? = null
 
+        private var extSurfaceArgs: Triple<Surface, Int, Int>? = null // Holds the raw surface from helper
+        private var extEglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
+        private var extWidth = 0
+        private var extHeight = 0
+
         fun resetPhases() {
             ctx.controls.forEach { it.lfoPhase = 0.0; it.lfoDrift = 0.0 }
             mRotAccum = 0.0
@@ -1004,49 +1105,50 @@ class MainActivity : AppCompatActivity() {
 
             try { surfaceTexture?.updateTexImage() } catch (e: Exception) { return }
 
-            // Start Recording setup if needed
+            // --- 1. SETUP SURFACES (Create EGL surfaces if needed) ---
+
+            // External Display (HDMI/QuickShare) Setup
+            if (extSurfaceArgs != null && extEglSurface == EGL14.EGL_NO_SURFACE) {
+                val (rawSurf, w, h) = extSurfaceArgs!!
+                extWidth = w; extHeight = h
+                // Use the same config as the phone screen
+                extEglSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, rawSurf, intArrayOf(EGL14.EGL_NONE), 0)
+            }
+            // External Display Cleanup
+            if (extSurfaceArgs == null && extEglSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglDestroySurface(mSavedDisplay, extEglSurface)
+                extEglSurface = EGL14.EGL_NO_SURFACE
+            }
+
+            // Recorder Setup
             if (pendingRecordFile != null) {
                 videoRecorder = VideoRecorder(viewWidth, viewHeight, pendingRecordFile!!)
                 recordSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, videoRecorder!!.inputSurface, intArrayOf(EGL14.EGL_NONE), 0)
                 pendingRecordFile = null
             }
 
-            // --- MODULATION LOGIC ---
+            // --- 2. PHYSICS & MATH CALCULATIONS ---
 
-            // This function handles the "Ping Pong" (Mirror) vs "Wrap" logic
+            // ... (Keep your existing resolveModulation function here) ...
             fun resolveModulation(id: String): Float {
                 val c = ctx.controlsMap[id] ?: return 0f
                 val normValue = c.getNormalized()
-
                 if (!c.hasModulation || (c.modRate == 0 && c.modDepth == 0)) return normValue
-
-                // Speed calculation: (0..1) -> nonlinear curve
                 val r = c.getModRateNormalized().toDouble()
-
-                // LFO Accumulator
                 val drift = c.lfoDrift + (r * 0.4) * d * tpi
                 c.lfoDrift = drift
-
-                // Sine Wave (-1 to 1) scaled by depth
                 val modSignal = sin(drift).toFloat() * c.getModDepthNormalized()
-
                 var combined = normValue + modSignal
-
-                // Determine Physics based on property type (ModMode)
                 if (c.modMode == PropertyControl.ModMode.WRAP) {
-                    // WRAP LOGIC: 1.1 becomes 0.1
                     return combined - floor(combined)
                 } else {
-                    // MIRROR LOGIC: 1.1 becomes 0.9 (Bounces back)
                     val t = combined % 2.0f
                     val res = if (t < 0) t + 2.0f else t
                     return if (res > 1.0f) 2.0f - res else res
                 }
             }
 
-            // --- CALCULATE VALUES ---
-
-            // 1. Continuous Rotations (Accumulators)
+            // Calculate Rotations
             val mRotCtrl = ctx.controlsMap["M_ROT"]!!
             val mRotSpd = mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0)
             mRotAccum += mRotSpd * 120.0 * d
@@ -1055,79 +1157,42 @@ class MainActivity : AppCompatActivity() {
             val cRotSpd = cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0)
             cRotAccum += cRotSpd * 120.0 * d
 
-            // Resolve Modulations
-            val vMTiltX = resolveModulation("M_TILTX")
-            val vMTiltY = resolveModulation("M_TILTY")
-            val vCTiltX = resolveModulation("C_TILTX")
-            val vCTiltY = resolveModulation("C_TILTY")
+            // Resolve all values
+            val vMTiltX = resolveModulation("M_TILTX"); val vMTiltY = resolveModulation("M_TILTY")
+            val vCTiltX = resolveModulation("C_TILTX"); val vCTiltY = resolveModulation("C_TILTY")
+            val vMAngle = resolveModulation("M_ANGLE"); val vCAngle = resolveModulation("C_ANGLE")
+            val vHue = resolveModulation("HUE")
+            val vMZoom = resolveModulation("M_ZOOM"); val vCZoom = resolveModulation("C_ZOOM")
+            val vMTx = resolveModulation("M_TX"); val vMTy = resolveModulation("M_TY")
+            val vCTx = resolveModulation("C_TX"); val vCTy = resolveModulation("C_TY")
+            val vMRGB = resolveModulation("M_RGB"); val vRGB = resolveModulation("RGB")
+            val vNeg = resolveModulation("NEG"); val vGlow = resolveModulation("GLOW")
+            val vWarp = ctx.controlsMap["WARP"]?.getNormalized() ?: 0f
 
-            // Pass Master Tilt (-0.8 to 0.8 range)
-            GLES20.glUniform2f(uLocs["uMTilt"]!!, (vMTiltX - 0.5f) * 1.6f, (vMTiltY - 0.5f) * 1.6f)
-
-            // Pass Camera Tilt
-            GLES20.glUniform2f(uLocs["uCTilt"]!!, (vCTiltX - 0.5f) * 1.6f, (vCTiltY - 0.5f) * 1.6f)
-
-            // 2. Resolve Modulated Values
-            // WRAP Controls (Angles)
-            val vMAngle = resolveModulation("M_ANGLE")
-            val vCAngle = resolveModulation("C_ANGLE")
-            val vHue    = resolveModulation("HUE")
-
-            // MIRROR Controls
-            val vMZoom  = resolveModulation("M_ZOOM")
-            val vMTx    = resolveModulation("M_TX")
-            val vMTy    = resolveModulation("M_TY")
-            val vMRGB   = resolveModulation("M_RGB")
-
-            // New Camera Controls
-            val vCZoom  = resolveModulation("C_ZOOM")
-            val vCTx    = resolveModulation("C_TX")
-            val vCTy    = resolveModulation("C_TY")
-
-            val vRGB    = resolveModulation("RGB")
-            val vNeg    = resolveModulation("NEG")
-            val vGlow   = resolveModulation("GLOW")
-
-            // --- RENDER ---
-
-            GLES20.glViewport(0, 0, viewWidth, viewHeight)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            // --- 3. PREPARE GPU (Common State) ---
             GLES20.glUseProgram(program)
 
-            // Pass Uniforms
-
-            // Master Angle
+            // Pass Uniforms (This prepares the GPU with the math we just did)
+            GLES20.glUniform2f(uLocs["uMTilt"]!!, (vMTiltX - 0.5f) * 1.6f, (vMTiltY - 0.5f) * 1.6f)
+            GLES20.glUniform2f(uLocs["uCTilt"]!!, (vCTiltX - 0.5f) * 1.6f, (vCTiltY - 0.5f) * 1.6f)
             GLES20.glUniform1f(uLocs["uMR"]!!, (vMAngle * 360f + mRotAccum).toFloat() + 90f)
-
-            // Camera Angle
             GLES20.glUniform1f(uLocs["uCR"]!!, (vCAngle * 360f + cRotAccum).toFloat())
             GLES20.glUniform1f(uLocs["uLR"]!!, 0f)
-
+            // Note: We set Aspect Ratio for phone first
             GLES20.glUniform1f(uLocs["uA"]!!, viewWidth.toFloat() / viewHeight.toFloat())
 
-            // Master ZOOM (Non-linear)
             val mZoomBase = 0.1 + (vMZoom.toDouble().pow(2.0) * 9.9 * 2)
             GLES20.glUniform1f(uLocs["uMZ"]!!, mZoomBase.toFloat())
-
-            // Camera ZOOM (Mapping for reasonable range)
-            // 0.3 (Zoomed In) to 2.0 (Zoomed Out)
             val cZoomBase = 0.3f + (vCZoom * 1.8f)
             GLES20.glUniform1f(uLocs["uCZ"]!!, cZoomBase)
-
-            val vWarp = ctx.controlsMap["WARP"]?.getNormalized() ?: 0f
             GLES20.glUniform1f(uLocs["uWarp"]!!, vWarp)
-
-            // Standard Layer Zoom (fixed at 1.0 for now)
             GLES20.glUniform1f(uLocs["uLZ"]!!, 1.0f)
-
             GLES20.glUniform1f(uLocs["uAx"]!!, axisCount)
 
-            // Flip Logic
             val effectiveFx = if (rot180) -flipX else flipX
             val effectiveFy = if (rot180) -flipY else flipY
             GLES20.glUniform2f(uLocs["uF"]!!, effectiveFx, effectiveFy)
 
-            // Color/Post-Fx
             GLES20.glUniform1f(uLocs["uC"]!!, ctx.controlsMap["CONTRAST"]!!.getMapped(0f, 2f))
             GLES20.glUniform1f(uLocs["uS"]!!, ctx.controlsMap["VIBRANCE"]!!.getMapped(0f, 2f))
             GLES20.glUniform1f(uLocs["uHue"]!!, vHue)
@@ -1135,36 +1200,57 @@ class MainActivity : AppCompatActivity() {
             GLES20.glUniform1f(uLocs["uBloom"]!!, vGlow)
             GLES20.glUniform1f(uLocs["uRGB"]!!, vRGB * 0.05f)
             GLES20.glUniform1f(uLocs["uMRGB"]!!, vMRGB * 0.15f)
+            GLES20.glUniform2f(uLocs["uMT"]!!, -2f + (vMTx * 4f), -2f + (vMTy * 4f))
+            GLES20.glUniform2f(uLocs["uCT"]!!, -0.5f + vCTx, -0.5f + vCTy)
 
-            // Master Translations
-            val mTxMapped = -2f + (vMTx * 4f)
-            val mTyMapped = -2f + (vMTy * 4f)
-            GLES20.glUniform2f(uLocs["uMT"]!!, mTxMapped, mTyMapped)
-
-            // Camera Translations
-            val cTxMapped = -0.5f + vCTx // Range -0.5 to 0.5
-            val cTyMapped = -0.5f + vCTy
-            GLES20.glUniform2f(uLocs["uCT"]!!, cTxMapped, cTyMapped)
-
-            // Draw
+            // Bind Texture
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texID)
             GLES20.glUniform1i(uLocs["uTex"]!!, 0)
 
+            // Bind Vertices
             val pL = GLES20.glGetAttribLocation(program, "p")
             val tL = GLES20.glGetAttribLocation(program, "t")
             GLES20.glEnableVertexAttribArray(pL)
             GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf)
             GLES20.glEnableVertexAttribArray(tL)
             GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
+
+            // --- 4. RENDER PASS 1: PHONE SCREEN ---
+            GLES20.glViewport(0, 0, viewWidth, viewHeight)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-            // Handle Recording Output
+            // --- 5. RENDER PASS 2: EXTERNAL DISPLAY ---
+            if (extEglSurface != EGL14.EGL_NO_SURFACE) {
+                val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
+                val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
+
+                if (EGL14.eglMakeCurrent(mSavedDisplay, extEglSurface, extEglSurface, mSavedContext)) {
+                    GLES20.glViewport(0, 0, extWidth, extHeight) // Use TV resolution
+
+                    // OPTIONAL: Update Aspect Ratio for TV so circles look round
+                    GLES20.glUniform1f(uLocs["uA"]!!, extWidth.toFloat() / extHeight.toFloat())
+
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                    EGLExt.eglPresentationTimeANDROID(mSavedDisplay, extEglSurface!!, System.nanoTime())
+                    EGL14.eglSwapBuffers(mSavedDisplay, extEglSurface)
+                }
+                // Restore Phone Context
+                EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
+            }
+
+            // --- 6. RENDER PASS 3: RECORDER ---
             if (recordSurface != EGL14.EGL_NO_SURFACE && videoRecorder != null) {
                 val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
                 val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
                 if (EGL14.eglMakeCurrent(mSavedDisplay, recordSurface, recordSurface, mSavedContext)) {
                     GLES20.glViewport(0, 0, viewWidth, viewHeight)
+
+                    // Restore Aspect Ratio for Recorder/Phone (if we changed it for TV)
+                    GLES20.glUniform1f(uLocs["uA"]!!, viewWidth.toFloat() / viewHeight.toFloat())
+
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                     GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
                     EGLExt.eglPresentationTimeANDROID(mSavedDisplay, recordSurface!!, System.nanoTime())
@@ -1185,7 +1271,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Handle Photo Capture
+            // --- 7. CAPTURE PHOTO ---
             if (captureRequested) {
                 captureRequested = false
                 val b = ByteBuffer.allocate(viewWidth * viewHeight * 4)
@@ -1226,6 +1312,16 @@ class MainActivity : AppCompatActivity() {
         private fun compile(t: Int, s: String): Int = GLES20.glCreateShader(t).apply {
             GLES20.glShaderSource(this, s)
             GLES20.glCompileShader(this)
+        }
+
+        fun setExternalSurface(surface: Surface, w: Int, h: Int) {
+            // We just store the args here. EGL creation must happen in onDrawFrame
+            extSurfaceArgs = Triple(surface, w, h)
+        }
+
+        fun removeExternalSurface() {
+            extSurfaceArgs = null
+            // We defer EGL destruction to onDrawFrame to stay on GL thread
         }
     }
 }
