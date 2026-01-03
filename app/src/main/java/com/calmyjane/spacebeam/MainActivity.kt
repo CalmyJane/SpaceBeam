@@ -1663,7 +1663,7 @@ class MainActivity : AppCompatActivity() {
                 this,
                 "M_ZOOM",
                 "ZOOM",
-                defaultValue = 300,
+                defaultValue = 160,
                 hasModulation = true,
                 modMode = PropertyControl.ModMode.MIRROR
             )
@@ -1746,7 +1746,7 @@ class MainActivity : AppCompatActivity() {
                 this,
                 "C_ZOOM",
                 "ZOOM",
-                defaultValue = 500,
+                defaultValue = 300,
                 hasModulation = true,
                 modMode = PropertyControl.ModMode.MIRROR
             )
@@ -2931,7 +2931,7 @@ class MainActivity : AppCompatActivity() {
         // --- Programs ---
         private var kaleidoProgram = 0
         private var simpleProgram = 0
-
+        var scrollAccum = 0.0f
         // --- Textures & Buffers ---
         private var cameraTexId = -1
         private var surfaceTexture: SurfaceTexture? = null
@@ -3013,116 +3013,104 @@ class MainActivity : AppCompatActivity() {
             // --- 1. COMPILE HEAVY KALEIDOSCOPE SHADER ---
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
             val fSrc = """#extension GL_OES_EGL_image_external : require
-            precision highp float;
-            varying vec2 v;
-            uniform samplerExternalOES uTex;
-            
-            // --- UNIFORMS ---
-            uniform float uMR, uLR, uCR, uCZ, uA, uMZ, uLZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB, uWarp;
-            uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
-            
-            // Spatial
-            uniform float uCurve, uTwist, uFlux;
-            uniform float uSShape, uSSpeed, uSFov, uTime, uMode;
-            
-            vec3 sampleCamera(vec2 uv, float rgbShift) {
-                vec2 centered = uv - 0.5;
-                float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y);
-                centered /= max(z, 0.1);
-                centered *= uCZ;
-                float aspectFactor = mix(uA, 1.0, uWarp);
-                centered.x *= aspectFactor;
-                float cr = uCR * 0.01745329; 
-                float c = cos(cr); float s = sin(cr);
-                centered = vec2(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
-                centered.x /= aspectFactor;
-                centered += uCT;
-                vec2 rotatedUV = centered + 0.5;
-                rotatedUV.x += rgbShift;
-                rotatedUV = (rotatedUV - 0.5) * uF + 0.5;
-                vec2 mirroredUV = abs(mod(rotatedUV + 1.0, 2.0) - 1.0);
-                return texture2D(uTex, mirroredUV).rgb;
-            }
-            
-            void main() {
-                const vec2 manualOffset = vec2(0.085, 0.085); 
-                const float tunnelZoom = 3.0; 
-                vec3 finalColor = vec3(0.0);
-                float a1 = -uMR * 0.01745329; float cosA1 = cos(a1); float sinA1 = sin(a1);
-                float a2 = uLR * 0.01745329; float cosA2 = cos(a2); float sinA2 = sin(a2);
-                float flySpeed = (uSSpeed - 0.5) * 1.0;
-                float modeBlend = smoothstep(0.0, 1.0, uMode);
-                vec2 effectiveTilt = mix(uMTilt, vec2(0.0), modeBlend);
-                vec2 effectiveTrans = uMT + mix(vec2(0.0), uMTilt * 2.0, modeBlend);
-            
-                for(int i=0; i<3; i++) {
-                    float mOff = (i==0) ? uMRGB : (i==2) ? -uMRGB : 0.0;
-                    vec2 uv = v - 0.5;
-                    float zM = 1.0 + (uv.x * effectiveTilt.x) + (uv.y * effectiveTilt.y);
-                    uv /= max(zM, 0.1);
-                    uv.x *= uA; 
-                    uv.x += mOff;
-                    uv = (uv + effectiveTrans) * uMZ * 2.6f;
-                    uv = vec2(uv.x * cosA1 - uv.y * sinA1, uv.x * sinA1 + uv.y * cosA1);
-                    
-                    if(uAx > 1.1) {
-                        float r = length(uv);
-                        float slice = 6.2831853 / uAx;
-                        float angle = atan(uv.y, uv.x);
-                        float a = mod(angle, slice);
-                        if(mod(uAx, 2.0) < 0.1) a = abs(a - slice * 0.5);
-                        uv = vec2(cos(a), sin(a)) * r;
-                    }
-                    uv *= uLZ;
+precision highp float;
+varying vec2 v;
+uniform samplerExternalOES uTex;
 
-                    vec2 flatUV = uv;
-                    flatUV = vec2(flatUV.x * cosA2 - flatUV.y * sinA2, flatUV.x * sinA2 + flatUV.y * cosA2);
-                    flatUV.x /= uA; 
-                    flatUV += manualOffset;
-                    
-                    float rCircle = length(uv);
-                    float rBox = max(abs(uv.x), abs(uv.y));
-                    float dist = mix(rCircle, rBox, uSShape);
-                    
-                    float angle = atan(uv.y, uv.x);
-                    dist += sin(angle * 4.0 + dist * 10.0) * uFlux * dist;
-                    float safeDist = max(dist, 0.001);
-                    float z = (uSFov * 0.5 + 0.1) / safeDist;
-                    
-                    vec2 tunnelUV;
-                    float twistedAngle = angle + (1.0/safeDist) * uTwist;
-                    tunnelUV.x = twistedAngle / 3.14159; 
-                    tunnelUV.y = z + (uTime * flySpeed);
-                    
-                    if(abs(uCurve - 1.0) > 0.01) {
-                         float curveFactor = 1.0 + (uCurve - 1.0) * (1.0 - safeDist);
-                         tunnelUV *= curveFactor;
-                    }
-                    tunnelUV *= tunnelZoom;
-                    float mixFactor = uMode * uMode * (3.0 - 2.0 * uMode);
-                    vec2 mixedUV = mix(flatUV, tunnelUV, mixFactor);
-                    vec2 cameraUV = abs(mod(mixedUV + 1.0, 2.0) - 1.0);
-                    float sOff = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
-                    vec3 smp = sampleCamera(cameraUV, sOff);
-                    if(i==0) finalColor.r = smp.r; 
-                    else if(i==1) finalColor.g = smp.g; 
-                    else finalColor.b = smp.b;
-                }
-                
-                if(uSol > 0.01) finalColor = mix(finalColor, abs(finalColor - uSol), step(0.1, uSol));
-                if(uHue > 0.001) {
-                    const vec3 k = vec3(0.57735); 
-                    float hueAngle = uHue * 6.2831853;
-                    float ca = cos(hueAngle);
-                    finalColor = finalColor * ca + cross(k, finalColor) * sin(hueAngle) + k * dot(k, finalColor) * (1.0 - ca);
-                }
-                finalColor = (finalColor - 0.5) * uC + 0.5;
-                float l = dot(finalColor, vec3(0.299, 0.587, 0.114));
-                finalColor = mix(vec3(l), finalColor, uS);
-                if(uBloom > 0.01) finalColor += smoothstep(0.5, 1.0, l) * finalColor * uBloom * 2.5;
-                gl_FragColor = vec4(finalColor, 1.0);
-            }
-            """.trimIndent()
+// --- UNIFORMS ---
+uniform float uMR, uCR, uCZ, uA, uMZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB, uWarp;
+uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
+uniform float uCurve, uTwist, uFlux;
+uniform float uSShape, uSFov, uScroll, uMode;
+
+vec3 sampleCamera(vec2 uv, float rgbShift) {
+    vec2 centered = uv - 0.5;
+    float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y);
+    centered /= max(z, 0.1);
+    centered *= uCZ;
+    float aspectFactor = mix(uA, 1.0, uWarp);
+    centered.x *= aspectFactor;
+    float cr = uCR * 0.01745329; 
+    float c = cos(cr); float s = sin(cr);
+    centered = vec2(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
+    centered.x /= aspectFactor;
+    centered += uCT;
+    vec2 rotatedUV = centered + 0.5;
+    rotatedUV.x += rgbShift;
+    rotatedUV = (rotatedUV - 0.5) * uF + 0.5;
+    vec2 mirroredUV = abs(mod(rotatedUV + 1.0, 2.0) - 1.0);
+    return texture2D(uTex, mirroredUV).rgb;
+}
+
+void main() {
+    vec3 finalColor = vec3(0.0);
+    float a1 = -uMR * 0.01745329; 
+    float cosA1 = cos(a1); float sinA1 = sin(a1);
+    
+    // Smooth blending for the 3D transition
+    float modeBlend = smoothstep(0.0, 1.0, uMode);
+    vec2 effectiveTilt = mix(uMTilt, vec2(0.0), modeBlend);
+    vec2 effectiveTrans = uMT + mix(vec2(0.0), uMTilt * 2.0, modeBlend);
+
+    for(int i=0; i<3; i++) {
+        float mOff = (i==0) ? uMRGB : (i==2) ? -uMRGB : 0.0;
+        vec2 uv = v - 0.5;
+        
+        float zM = 1.0 + (uv.x * effectiveTilt.x) + (uv.y * effectiveTilt.y);
+        uv /= max(zM, 0.1);
+        uv.x *= uA; 
+        uv.x += mOff;
+        
+        uv = (uv + effectiveTrans) * uMZ * 4.0;
+        uv = vec2(uv.x * cosA1 - uv.y * sinA1, uv.x * sinA1 + uv.y * cosA1);
+        
+        if(uAx > 1.1) {
+            float r = length(uv);
+            float slice = 6.2831853 / uAx;
+            float angle = atan(uv.y, uv.x);
+            float a = mod(angle, slice);
+            if(mod(uAx, 2.0) < 0.1) a = abs(a - slice * 0.5);
+            uv = vec2(cos(a), sin(a)) * r;
+        }
+
+        // --- 3D TUNNEL (FIXED ANCHOR) ---
+        float rCircle = length(uv);
+        float rBox = max(abs(uv.x), abs(uv.y));
+        float dist = mix(rCircle, rBox, uSShape);
+        float angle = atan(uv.y, uv.x);
+        dist += sin(angle * 4.0 + dist * 10.0) * uFlux * dist;
+        float safeDist = max(dist, 0.01);
+        
+        // Stabilized FOV math to prevent zooming-rush
+        float projection = (uSFov * 0.8 + 0.2) / safeDist;
+        
+        vec2 tunnelUV;
+        tunnelUV.x = (angle + (1.0/safeDist) * uTwist) / 3.14159; 
+        tunnelUV.y = projection + uScroll; 
+        
+        if(abs(uCurve - 1.0) > 0.01) tunnelUV *= 1.0 + (uCurve - 1.0) * (1.0 - safeDist);
+
+        vec2 flatUV = uv;
+        flatUV.x /= uA;
+        
+        // Stabilized blend: Reduced tunnel scale to match plane scale at transition point
+        vec2 mixedUV = mix(flatUV, tunnelUV * 0.8, modeBlend);
+        
+        vec2 cameraUV = abs(mod(mixedUV + 1.0, 2.0) - 1.0);
+        float sOff = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
+        vec3 smp = sampleCamera(cameraUV, sOff);
+        
+        if(i==0) finalColor.r = smp.r; 
+        else if(i==1) finalColor.g = smp.g; 
+        else finalColor.b = smp.b;
+    }
+    
+    finalColor = (finalColor - 0.5) * uC + 0.5;
+    float l = dot(finalColor, vec3(0.299, 0.587, 0.114));
+    finalColor = mix(vec3(l), finalColor, uS);
+    if(uBloom > 0.01) finalColor += smoothstep(0.4, 1.0, l) * finalColor * uBloom * 2.0;
+    gl_FragColor = vec4(finalColor, 1.0);
+}""".trimIndent()
 
             kaleidoProgram = createProgram(vSrc, fSrc)
             val activeUniforms = IntArray(1)
@@ -3176,49 +3164,83 @@ class MainActivity : AppCompatActivity() {
         override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
             viewWidth = w; viewHeight = h
         }
+// Ensure "var scrollAccum = 0.0f" exists at the top of KaleidoscopeRenderer
+
+        private var deltaTime = 0.0f // Add this line
 
         override fun onDrawFrame(gl: GL10?) {
             val now = System.nanoTime()
-            val d = (now - lastTime) / 1e9
+            // Update the class-level variable so all functions can see it
+            deltaTime = (now - lastTime) / 1e9f
             lastTime = now
-            val tpi = 2.0 * PI
-            val timeSeconds = (System.nanoTime() - startTime) / 1e9f
 
+            // Safety checks
             if (!ctx.controlsMap.containsKey("S_SHAPE") || !uLocs.containsKey("uSShape")) return
             try { surfaceTexture?.updateTexImage() } catch (e: Exception) { return }
             manageSurfaces()
 
-            fun resolveModulation(id: String): Float {
-                val c = ctx.controlsMap[id] ?: return 0f
-                val normValue = c.getNormalized()
-                if (!c.hasModulation || (c.modRate == 0 && c.modDepth == 0)) return normValue
-                val r = c.getModRateNormalized().toDouble()
-                val drift = c.lfoDrift + (r * 0.4) * d * tpi
-                c.lfoDrift = drift
-                val modSignal = sin(drift).toFloat() * c.getModDepthNormalized()
-                var combined = normValue + modSignal
-                if (c.modMode == PropertyControl.ModMode.WRAP) return combined - floor(combined)
+            // 1. Update Physics
+            updateMovementPhysics()
+
+            // 2. Render to Framebuffer (FBO)
+            renderToFBO()
+
+            // 3. Output to screens and recorder
+            renderToScreen()
+            renderToExternal()
+            renderToRecorder()
+
+            handleCapture()
+        }
+        private fun resolveModulation(id: String): Float {
+            val c = ctx.controlsMap[id] ?: return 0f
+            val normValue = c.getNormalized()
+
+            // Performance optimization
+            if (!c.hasModulation || (c.modRate == 0 && c.modDepth == 0)) return normValue
+
+            // Calculate LFO Drift
+            val r = c.getModRateNormalized().toDouble()
+            val tpi = 2.0 * PI
+            // Use 'this.deltaTime'
+            c.lfoDrift += (r * 0.4) * deltaTime.toDouble() * tpi
+
+            val modSignal = sin(c.lfoDrift).toFloat() * c.getModDepthNormalized()
+            val combined = normValue + modSignal
+
+            if (c.modMode == PropertyControl.ModMode.WRAP) {
+                return combined - floor(combined)
+            } else {
+                // Mirror Logic
                 val t = combined % 2.0f
                 val res = if (t < 0) t + 2.0f else t
                 return if (res > 1.0f) 2.0f - res else res
             }
+        }
 
-            val mRotCtrl = ctx.controlsMap["M_ROT"] ?: return
-            mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d
-            val cRotCtrl = ctx.controlsMap["C_ROT"] ?: return
-            cRotAccum += cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d
+        private fun updateMovementPhysics() {
+            // Flight Speed (Curved)
+            val speedCtrl = ctx.controlsMap["S_SPEED"]
+            if (speedCtrl != null) {
+                val rawVal = speedCtrl.getNormalized() - 0.5f
+                val sign = sign(rawVal)
+                val curvedSpeed = sign * (abs(rawVal) * 2.0f).pow(2.2f)
+                scrollAccum += curvedSpeed * deltaTime * 0.6f
+            }
 
-            val vMTiltX = resolveModulation("M_TILTX"); val vMTiltY = resolveModulation("M_TILTY")
-            val vCTiltX = resolveModulation("C_TILTX"); val vCTiltY = resolveModulation("C_TILTY")
-            val vMAngle = resolveModulation("M_ANGLE"); val vCAngle = resolveModulation("C_ANGLE")
-            val vHue = resolveModulation("HUE"); val vMZoom = resolveModulation("M_ZOOM")
-            val vCZoom = resolveModulation("C_ZOOM"); val vMTx = resolveModulation("M_TX")
-            val vMTy = resolveModulation("M_TY"); val vCTx = resolveModulation("C_TX")
-            val vCTy = resolveModulation("C_TY"); val vMRGB = resolveModulation("M_RGB")
-            val vRGB = resolveModulation("RGB"); val vNeg = resolveModulation("NEG")
-            val vGlow = resolveModulation("GLOW"); val vWarp = ctx.controlsMap["WARP"]?.getNormalized() ?: 0f
+            // Rotations (Explicit Float/Double casting to fix Ambiguity errors)
+            val mRotCtrl = ctx.controlsMap["M_ROT"]
+            if (mRotCtrl != null) {
+                mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * deltaTime.toDouble()
+            }
 
-            // --- PASS 1: RENDER KALEIDOSCOPE TO FBO (OFFSCREEN) ---
+            val cRotCtrl = ctx.controlsMap["C_ROT"]
+            if (cRotCtrl != null) {
+                cRotAccum += cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * deltaTime.toDouble()
+            }
+        }
+
+        private fun renderToFBO() {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
             GLES20.glViewport(0, 0, fboWidth, fboHeight)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -3227,67 +3249,86 @@ class MainActivity : AppCompatActivity() {
             fun safeUni(name: String, v: Float) { uLocs[name]?.let { GLES20.glUniform1f(it, v) } }
             fun safeUni2(name: String, v1: Float, v2: Float) { uLocs[name]?.let { GLES20.glUniform2f(it, v1, v2) } }
 
-            safeUni2("uMTilt", (vMTiltX - 0.5f) * 1.6f, (vMTiltY - 0.5f) * 1.6f)
-            safeUni2("uCTilt", (vCTiltX - 0.5f) * 1.6f, (vCTiltY - 0.5f) * 1.6f)
-            safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f)
-            safeUni("uCR", (vCAngle * 360f + cRotAccum).toFloat())
-            safeUni("uLR", 0f)
-            safeUni("uA", fboWidth.toFloat() / fboHeight.toFloat())
+            // Now allows access to 'resolveModulation'
+            val vMAngle = resolveModulation("M_ANGLE"); val vMZoom = resolveModulation("M_ZOOM")
+            val vMTx = resolveModulation("M_TX"); val vMTy = resolveModulation("M_TY")
+            val vMTiltX = resolveModulation("M_TILTX"); val vMTiltY = resolveModulation("M_TILTY")
+            val v3DMix = resolveModulation("3D_MIX")
 
-            val mZoomBase = if (vMZoom > 0.5f) 1.0 + (vMZoom - 0.5) * 4.0 else 0.1 + (vMZoom * 1.8)
-            safeUni("uMZ", mZoomBase.toFloat())
-            val cZoomBase = 0.3f + (vCZoom * 1.8f)
-            safeUni("uCZ", cZoomBase)
-            safeUni("uWarp", vWarp)
-            safeUni("uLZ", 1.0f)
             safeUni("uAx", axisCount)
+            safeUni("uA", fboWidth.toFloat() / fboHeight.toFloat())
+            safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f)
+            safeUni("uMZ", 0.1f + (vMZoom * 2.5f))
+            safeUni2("uMT", (vMTx - 0.5f) * 2f, (vMTy - 0.5f) * 2f)
+            safeUni2("uMTilt", (vMTiltX - 0.5f) * 1.5f, (vMTiltY - 0.5f) * 1.5f)
 
-            val effectiveFx = if (rot180) -flipX else flipX
-            val effectiveFy = if (rot180) -flipY else flipY
-            safeUni2("uF", effectiveFx, effectiveFy)
+            safeUni("uMode", v3DMix.pow(2.0f))
+            safeUni("uScroll", scrollAccum)
+            safeUni("uSShape", resolveModulation("S_SHAPE"))
+            safeUni("uSFov", resolveModulation("S_FOV"))
+
+            val cRaw = ctx.controlsMap["CURVE"]?.getMapped(0f, 1f) ?: 0.5f
+            safeUni("uCurve", if (cRaw > 0.5f) 1.0f + (cRaw - 0.5f) * 6.0f else 0.2f + (cRaw * 1.6f))
+            safeUni("uTwist", ctx.controlsMap["TWIST"]?.getMapped(-5.0f, 5.0f) ?: 0f)
+            safeUni("uFlux", resolveModulation("FLUX") * 0.2f)
+
+            val vCZoom = resolveModulation("C_ZOOM"); val vCAngle = resolveModulation("C_ANGLE")
+            val vCTx = resolveModulation("C_TX"); val vCTy = resolveModulation("C_TY")
+            val vCTiltX = resolveModulation("C_TILTX"); val vCTiltY = resolveModulation("C_TILTY")
+            safeUni("uCZ", 0.3f + (vCZoom * 2.0f))
+            safeUni("uCR", (vCAngle * 360f + cRotAccum).toFloat())
+            safeUni2("uCT", (vCTx - 0.5f), (vCTy - 0.5f))
+            safeUni2("uCTilt", (vCTiltX - 0.5f) * 1.2f, (vCTiltY - 0.5f) * 1.2f)
+            safeUni2("uF", if (rot180) -flipX else flipX, if (rot180) -flipY else flipY)
+            safeUni("uWarp", ctx.controlsMap["WARP"]?.getNormalized() ?: 0f)
 
             safeUni("uC", ctx.controlsMap["CONTRAST"]?.getMapped(0f, 2f) ?: 1f)
             safeUni("uS", ctx.controlsMap["VIBRANCE"]?.getMapped(0f, 2f) ?: 1f)
-            safeUni("uHue", vHue)
-            safeUni("uSol", vNeg * 1.5f)
-            safeUni("uBloom", vGlow)
-            safeUni("uRGB", vRGB * 0.05f)
-            safeUni("uMRGB", vMRGB * 0.15f)
-            safeUni2("uMT", -2f + (vMTx * 4f), -2f + (vMTy * 4f))
-            safeUni2("uCT", -0.5f + vCTx, -0.5f + vCTy)
+            safeUni("uHue", resolveModulation("HUE")); safeUni("uSol", resolveModulation("NEG"))
+            safeUni("uBloom", resolveModulation("GLOW")); safeUni("uRGB", resolveModulation("RGB") * 0.05f)
+            safeUni("uMRGB", resolveModulation("M_RGB") * 0.1f)
 
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId)
             uLocs["uTex"]?.let { GLES20.glUniform1i(it, 0) }
-
             bindCommonAttribs(kaleidoProgram)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        }
+        /**
+         * Updates physics with a Quadratic Curve to prevent speed rushing.
+         * Center stickiness makes 0.0 speed easier to hit.
+         */
+        private fun updateMovementPhysics(d: Float) {
+            val speedCtrl = ctx.controlsMap["S_SPEED"] ?: return
 
-            val sShape = ctx.controlsMap["S_SHAPE"]?.getNormalized() ?: 0f
-            safeUni("uSShape", sShape)
-            val vMode = ctx.controlsMap["3D_MIX"]?.getNormalized() ?: 1.0f
-            safeUni("uMode", vMode)
-            val sSpeed = ctx.controlsMap["S_SPEED"]?.getNormalized() ?: 0.5f
-            safeUni("uSSpeed", sSpeed)
-            val sFovRaw = ctx.controlsMap["S_FOV"]?.getNormalized() ?: 0.5f
-            safeUni("uSFov", 0.1f + (sFovRaw * 2.9f))
-            safeUni("uTime", timeSeconds)
+            // 1. Get raw -0.5 to 0.5 range
+            val rawVal = speedCtrl.getNormalized() - 0.5f
+            val sign = sign(rawVal)
 
-            val cRaw = ctx.controlsMap["CURVE"]?.getMapped(0f, 1f) ?: 0.5f
-            val vCurve = if (cRaw > 0.5f) 1.0f + (cRaw - 0.5f) * 6.0f else 0.2f + (cRaw * 1.6f)
-            safeUni("uCurve", vCurve)
-            val vTwist = ctx.controlsMap["TWIST"]?.getMapped(-5.0f, 5.0f) ?: 0f
-            safeUni("uTwist", vTwist)
-            val vFlux = ctx.controlsMap["FLUX"]?.getMapped(0.0f, 0.5f) ?: 0f
-            safeUni("uFlux", vFlux)
+            // 2. Apply Quadratic Curve (x^2)
+            // This makes small movements of the slider result in VERY small speed changes.
+            // Large movements still allow for high speed.
+            val curvedSpeed = sign * (abs(rawVal) * 2.0f).pow(2.2f)
 
-            // --- PASS 2: DRAW TO PHONE SCREEN ---
+            // 3. Accumulate
+            // Reduced multiplier (1.2) for more controlled flight
+            scrollAccum += curvedSpeed * d * 1.2f
+
+            // Rotation Physics
+            val mRotCtrl = ctx.controlsMap["M_ROT"] ?: return
+            mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
+            val cRotCtrl = ctx.controlsMap["C_ROT"] ?: return
+            cRotAccum += cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
+        }
+
+        private fun renderToScreen() {
             GLES20.glViewport(0, 0, viewWidth, viewHeight)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             drawSimpleTexture(fboTexId)
+        }
 
-            // --- PASS 3: DRAW TO EXTERNAL DISPLAY ---
+        private fun renderToExternal() {
             if (extEglSurface != EGL14.EGL_NO_SURFACE) {
                 val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
                 val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
@@ -3300,8 +3341,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
             }
+        }
 
-            // --- PASS 4: DRAW TO RECORDER ---
+        private fun renderToRecorder() {
             if (recordSurface != EGL14.EGL_NO_SURFACE && videoRecorder != null) {
                 val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
                 val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
@@ -3309,25 +3351,15 @@ class MainActivity : AppCompatActivity() {
                     GLES20.glViewport(0, 0, viewWidth, viewHeight)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                     drawSimpleTexture(fboTexId)
-
-                    // --- TIMESTAMP FIX ---
                     val timeNow = System.nanoTime()
-                    if (recordStartTimeNs == 0L) {
-                        recordStartTimeNs = timeNow
-                    }
-                    val timestampNs = timeNow - recordStartTimeNs
-                    EGLExt.eglPresentationTimeANDROID(mSavedDisplay, recordSurface!!, timestampNs)
-
+                    if (recordStartTimeNs == 0L) recordStartTimeNs = timeNow
+                    EGLExt.eglPresentationTimeANDROID(mSavedDisplay, recordSurface!!, timeNow - recordStartTimeNs)
                     EGL14.eglSwapBuffers(mSavedDisplay, recordSurface)
                     videoRecorder?.drain(false)
                 }
                 EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
-
-                // Check if we need to stop inside the GL thread context
                 handleStopRecording()
             }
-
-            handleCapture()
         }
 
         private fun drawSimpleTexture(texId: Int) {
