@@ -1725,7 +1725,118 @@ class MainActivity : AppCompatActivity() {
 
 
         createGroup("CAMERA TRANSFORM")
+        val orientationRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, 10, 0, 20)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120)
+        }
 
+        // Helper: Zeichnet die Icons live
+        fun createCustomIcon(type: Int): BitmapDrawable {
+            val size = 100
+            val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+            val c = Canvas(b)
+            val paint = Paint().apply {
+                color = Color.WHITE
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+                isAntiAlias = true
+            }
+
+            val center = size / 2f
+
+            when (type) {
+                0 -> { // FLIP X (Horizontal)
+                    paint.strokeWidth = 9f // Etwas feiner als vorher
+                    val range = 20f
+                    c.drawLine(center - range, center, center + range, center, paint)
+                    val p = Path().apply {
+                        moveTo(center - 8, center - 12); lineTo(center - range - 4, center); lineTo(center - 8, center + 12)
+                        moveTo(center + 8, center - 12); lineTo(center + range + 4, center); lineTo(center + 8, center + 12)
+                    }
+                    c.drawPath(p, paint)
+                }
+                1 -> { // FLIP Y (Vertical)
+                    paint.strokeWidth = 9f // Etwas feiner als vorher
+                    val range = 20f
+                    c.drawLine(center, center - range, center, center + range, paint)
+                    val p = Path().apply {
+                        moveTo(center - 12, center - 8); lineTo(center, center - range - 4); lineTo(center + 12, center - 8)
+                        moveTo(center - 12, center + 8); lineTo(center, center + range + 4); lineTo(center + 12, center + 8)
+                    }
+                    c.drawPath(p, paint)
+                }
+                2 -> { // ROTATE (Standard Sync/Cycle Icon Style)
+                    paint.strokeWidth = 9f // Gleiche Dicke wie Flip
+
+                    val r = 24f // Radius
+                    val box = RectF(center - r, center - r, center + r, center + r)
+
+                    // Wir zeichnen zwei saubere Halbkreise mit Lücken
+                    // Bogen 1 (Oben)
+                    c.drawArc(box, 180f + 20f, 140f, false, paint)
+                    // Bogen 2 (Unten)
+                    c.drawArc(box, 0f + 20f, 140f, false, paint)
+
+                    // Pfeilspitzen (Exakt positioniert am Ende der Bögen)
+                    val p = Path()
+
+                    // Pfeil oben rechts (Ende von Bogen 1)
+                    // Spitze zeigt nach rechts/unten
+                    val endX1 = center + (r * cos(Math.toRadians(340.0))).toFloat()
+                    val endY1 = center + (r * sin(Math.toRadians(340.0))).toFloat()
+                    p.moveTo(endX1 - 5f, endY1 - 15f); p.lineTo(endX1, endY1); p.lineTo(endX1 - 18f, endY1 - 2f)
+
+                    // Pfeil unten links (Ende von Bogen 2)
+                    // Spitze zeigt nach links/oben
+                    val endX2 = center + (r * cos(Math.toRadians(160.0))).toFloat()
+                    val endY2 = center + (r * sin(Math.toRadians(160.0))).toFloat()
+                    p.moveTo(endX2 + 5f, endY2 + 15f); p.lineTo(endX2, endY2); p.lineTo(endX2 + 18f, endY2 + 2f)
+
+                    paint.style = Paint.Style.STROKE
+                    c.drawPath(p, paint)
+                }
+            }
+            return BitmapDrawable(resources, b)
+        }
+
+        fun createParamBtn(icon: BitmapDrawable, action: () -> Unit): ImageButton {
+            return ImageButton(this).apply {
+                setImageDrawable(icon)
+                // Quadratischer Hintergrund (Header-Stil)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#22FFFFFF"))
+                    cornerRadius = 12f
+                }
+                // Margins für Abstand
+                val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+                lp.setMargins(6, 0, 6, 0)
+                layoutParams = lp
+
+                setOnClickListener { action(); updateSidebarVisuals() }
+            }
+        }
+
+        flipXBtn = createParamBtn(createCustomIcon(0)) {
+            renderer.flipX = if (renderer.flipX == 1f) -1f else 1f
+        }
+
+        flipYBtn = createParamBtn(createCustomIcon(1)) {
+            renderer.flipY = if (renderer.flipY == 1f) -1f else 1f
+        }
+
+        rot180Btn = createParamBtn(createCustomIcon(2)) {
+            renderer.rot180 = !renderer.rot180
+        }
+
+        orientationRow.addView(flipXBtn)
+        orientationRow.addView(flipYBtn)
+        orientationRow.addView(rot180Btn)
+
+        // Add the row to the collapsible content
+        currentGroupContent?.addView(orientationRow)
         addControl(
             PropertyControl(
                 this,
@@ -1872,35 +1983,12 @@ class MainActivity : AppCompatActivity() {
                 if (currentSelector == CameraSelector.DEFAULT_BACK_CAMERA) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA; startCamera()
         }.apply { setImageResource(android.R.drawable.ic_menu_camera) })
 
-        flipXBtn = createSideBtn {
-            renderer.flipX = if (renderer.flipX == 1f) -1f else 1f
-        }.apply { setImageDrawable(textToIcon("↔")) }
 
-        flipYBtn = createSideBtn {
-            renderer.flipY = if (renderer.flipY == 1f) -1f else 1f
-        }.apply { setImageDrawable(textToIcon("↕")) }
-
-        rot180Btn = createSideBtn {
-            renderer.rot180 = !renderer.rot180
-        }.apply { setImageResource(android.R.drawable.ic_menu_rotate) }
-
-        cameraSettingsPanel.addView(flipXBtn); cameraSettingsPanel.addView(flipYBtn); cameraSettingsPanel.addView(
-            rot180Btn
-        )
-
-
-// --- NEW RTSP BUTTON ---
 
         cameraSettingsPanel.addView(createSideBtn {
-
             showRtspDialog()
-
         }.apply {
-
-// Use a globe or wifi icon. Using standard generic icon for now.
-
             setImageResource(android.R.drawable.ic_menu_compass)
-
         })
 
 
@@ -2082,54 +2170,124 @@ class MainActivity : AppCompatActivity() {
 
     }
 
-
     private fun showRtspDialog() {
+        // 1. History laden (Max 20 Einträge)
+        val prefs = getSharedPreferences("SpaceBeam_RTSP", Context.MODE_PRIVATE)
+        val historyKey = "RTSP_HISTORY"
 
-        val input = EditText(this).apply {
+        // Wir laden das Set. Achtung: Sets sind unsortiert.
+        val rawSet = prefs.getStringSet(historyKey, null)
+        val historyList = rawSet?.toMutableList() ?: mutableListOf()
 
+        // Fallback
+        if (historyList.isEmpty()) {
+            historyList.add("rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4")
+        }
+
+        // Container für Input + Button
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(40, 20, 40, 0)
+        }
+
+        // 2. Das Textfeld
+        val input = AutoCompleteTextView(this).apply {
             setText(lastRtspUrl)
+            setTextColor(Color.BLACK)
+            textSize = 16f
+            setPadding(20, 30, 20, 30)
+            threshold = 1 // Zeige Vorschläge ab 1 Zeichen (oder via Button)
 
-            setTextColor(Color.BLACK) // Ensure text is visible depending on theme
+            // WICHTIG: Verhindert, dass die Tastatur den ganzen Screen einnimmt (Landscape Fix)
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE or
+                    android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI
 
-            setPadding(40, 40, 40, 40)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_VARIATION_URI
 
+            // Layout Gewichtung: Nimm den meisten Platz
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+
+            val adapter = ArrayAdapter(context, android.R.layout.simple_dropdown_item_1line, historyList)
+            setAdapter(adapter)
         }
 
+        // 3. Der "Dropdown" Pfeil Button
+        val arrowBtn = ImageButton(this).apply {
+            setImageResource(android.R.drawable.arrow_down_float)
+            setBackgroundColor(Color.LTGRAY) // Leichtes Grau als Hintergrund für Button
+            alpha = 0.7f
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
 
-        val container = FrameLayout(this).apply {
-
-            setPadding(50, 20, 50, 0)
-
-            addView(input)
-
-        }
-
-
-
-        androidx.appcompat.app.AlertDialog.Builder(this)
-
-            .setTitle("Enter RTSP/Video URL")
-
-            .setView(container)
-
-            .setPositiveButton("Load") { _, _ ->
-
-                val url = input.text.toString()
-
-                if (url.isNotEmpty()) {
-
-                    startRtsp(url)
-
-                }
-
+            layoutParams = LinearLayout.LayoutParams(120, 100).apply {
+                leftMargin = 10
             }
 
+            // Klick: Tastatur verstecken (falls offen) und Liste zeigen
+            setOnClickListener {
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                imm.hideSoftInputFromWindow(input.windowToken, 0)
+                input.showDropDown()
+            }
+        }
+
+        row.addView(input)
+        row.addView(arrowBtn)
+
+        // Dialog erstellen
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Enter RTSP/Video URL")
+            .setView(row) // Wir nutzen jetzt 'row' statt nur 'container'
+            .setPositiveButton("Load", null) // Listener wird unten überschrieben
             .setNegativeButton("Cancel", null)
+            .create()
 
-            .show()
+        fun performLoad() {
+            val url = input.text.toString().trim()
+            if (url.isNotEmpty()) {
+                // --- HISTORY LOGIC (Limit 20) ---
+                // 1. Wenn URL schon drin ist, entfernen (damit sie nach oben/neu kommt, je nach Sortierung)
+                if (historyList.contains(url)) {
+                    historyList.remove(url)
+                }
+                // 2. Neue URL hinzufügen
+                historyList.add(0, url) // Vorne anfügen (für Adapter-Logik im RAM)
 
+                // 3. Auf 20 beschränken
+                while (historyList.size > 20) {
+                    historyList.removeAt(historyList.lastIndex)
+                }
+
+                // 4. Speichern (Als Set konvertieren für SharedPreferences)
+                prefs.edit().putStringSet(historyKey, historyList.toHashSet()).apply()
+
+                startRtsp(url)
+                dialog.dismiss()
+            }
+        }
+
+        // Keyboard "Done" Handler
+        input.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                performLoad()
+                true
+            } else false
+        }
+
+        // Item Click Handler (Wenn man einen Vorschlag auswählt)
+        input.setOnItemClickListener { _, _, _, _ ->
+            // Optional: Direkt laden, wenn man draufklickt?
+            // Oder nur Text setzen (Standardverhalten). Lassen wir Standard.
+        }
+
+        dialog.show()
+
+        // Button Logik überschreiben
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            performLoad()
+        }
     }
-
 
     private fun applyReadabilityStyle() {
 
@@ -2426,7 +2584,6 @@ class MainActivity : AppCompatActivity() {
             (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION)
     }
 
-
     private fun applyPreset(idx: Int) {
         val p = presets[idx] ?: return
         activePreset = idx
@@ -2439,22 +2596,39 @@ class MainActivity : AppCompatActivity() {
             controlsMap["AXIS"]?.setProgress(p.axis - 1)
         }
 
+        // --- SNAPSHOT START VALUES ---
         val startValues = controls.associate { it.id to it.preciseValue }
         val startRates = controls.associate { it.id to it.preciseModRate }
         val startDepths = controls.associate { it.id to it.preciseModDepth }
 
+        // --- INTELLIGENTER ROTATION RESET ---
+        // 1. Startwerte holen
+        val startMRot = renderer.mRotAccum
+        val startCRot = renderer.cRotAccum
+
+        // 2. Ziel berechnen: Das nächste Vielfache von 360 Grad
+        // Wir runden den aktuellen Wert geteilt durch 360.
+        // Beispiel: Stehen wir bei 370°, runden wir auf 1 -> Ziel 360°. Weg: -10°.
+        // Beispiel: Stehen wir bei 350°, runden wir auf 1 -> Ziel 360°. Weg: +10°.
+        val targetMRot = round(startMRot / 360.0) * 360.0
+        val targetCRot = round(startCRot / 360.0) * 360.0
+
         currentAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = transitionMs
+            // Decelerate sieht bei Rotation natürlicher aus (bremst sanft ab)
+            interpolator = android.view.animation.DecelerateInterpolator()
+
             addUpdateListener { anim ->
                 val t = anim.animatedValue as Float
+
+                // 1. Slider Werte animieren
                 controls.forEach { control ->
                     if (control.id == "AXIS") return@forEach
                     val target = p.controlSnapshots[control.id]
                     if (target != null) {
-
                         val sVal = startValues[control.id] ?: 0f
                         val newVal = sVal + (target.value - sVal) * t
-                        control.setAnimatedValue(newVal) // Updates float internally
+                        control.setAnimatedValue(newVal)
 
                         if (control.hasModulation) {
                             val sRate = startRates[control.id] ?: 0f
@@ -2467,6 +2641,16 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
+
+                // 2. Rotation sanft zur nächsten geraden Position drehen
+                // Lerp Formel: start + (ziel - start) * t
+                renderer.mRotAccum = startMRot + (targetMRot - startMRot) * t.toDouble()
+                renderer.cRotAccum = startCRot + (targetCRot - startCRot) * t.toDouble()
+
+                // LFO Rotation setzen wir hart auf 0 zurück (Fade out wäre komplexer)
+                renderer.lRotAccum = renderer.lRotAccum * (1.0 - t.toDouble())
+
+                // 3. Flags setzen
                 renderer.flipX = p.flipX
                 renderer.flipY = p.flipY
                 renderer.rot180 = p.rot180
@@ -2703,7 +2887,6 @@ class MainActivity : AppCompatActivity() {
 
         override fun onSurfaceCreated(gl: GL10?, config: GL10EGLConfig?) {
             setupEGL()
-            // --- 1. COMPILE HEAVY KALEIDOSCOPE SHADER ---
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
             val fSrc = """#extension GL_OES_EGL_image_external : require
 precision highp float;
@@ -2715,6 +2898,13 @@ uniform float uMR, uCR, uCZ, uA, uMZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMR
 uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
 uniform float uCurve, uTwist, uFlux;
 uniform float uSShape, uSFov, uScroll, uMode;
+
+// Helper für Hue Rotation
+vec3 hueShift(vec3 color, float hue) {
+    const vec3 k = vec3(0.57735, 0.57735, 0.57735);
+    float cosAngle = cos(hue);
+    return vec3(color * cosAngle + cross(k, color) * sin(hue) + k * dot(k, color) * (1.0 - cosAngle));
+}
 
 vec3 sampleCamera(vec2 uv, float rgbShift) {
     vec2 centered = uv - 0.5;
@@ -2740,7 +2930,6 @@ void main() {
     float a1 = -uMR * 0.01745329; 
     float cosA1 = cos(a1); float sinA1 = sin(a1);
     
-    // Smooth blending for the 3D transition
     float modeBlend = smoothstep(0.0, 1.0, uMode);
     vec2 effectiveTilt = mix(uMTilt, vec2(0.0), modeBlend);
     vec2 effectiveTrans = uMT + mix(vec2(0.0), uMTilt * 2.0, modeBlend);
@@ -2766,7 +2955,6 @@ void main() {
             uv = vec2(cos(a), sin(a)) * r;
         }
 
-        // --- 3D TUNNEL (FIXED ANCHOR) ---
         float rCircle = length(uv);
         float rBox = max(abs(uv.x), abs(uv.y));
         float dist = mix(rCircle, rBox, uSShape);
@@ -2774,7 +2962,6 @@ void main() {
         dist += sin(angle * 4.0 + dist * 10.0) * uFlux * dist;
         float safeDist = max(dist, 0.01);
         
-        // Stabilized FOV math to prevent zooming-rush
         float projection = (uSFov * 0.8 + 0.2) / safeDist;
         
         vec2 tunnelUV;
@@ -2786,7 +2973,6 @@ void main() {
         vec2 flatUV = uv;
         flatUV.x /= uA;
         
-        // Stabilized blend: Reduced tunnel scale to match plane scale at transition point
         vec2 mixedUV = mix(flatUV, tunnelUV * 0.8, modeBlend);
         
         vec2 cameraUV = abs(mod(mixedUV + 1.0, 2.0) - 1.0);
@@ -2798,10 +2984,27 @@ void main() {
         else finalColor.b = smp.b;
     }
     
+    // --- COLOR GRADING SECTION (Fixed) ---
+    
+    // 1. Negative / Invert (uSol)
+    // Wenn uSol 0 ist -> keine Änderung. Wenn 1 -> Volles Invertieren.
+    finalColor = abs(finalColor - uSol);
+
+    // 2. Hue Shift (uHue)
+    if(uHue > 0.01) {
+        finalColor = hueShift(finalColor, uHue * 6.28318);
+    }
+
+    // 3. Contrast (uC)
     finalColor = (finalColor - 0.5) * uC + 0.5;
+    
+    // 4. Vibrance & BW (uS)
     float l = dot(finalColor, vec3(0.299, 0.587, 0.114));
     finalColor = mix(vec3(l), finalColor, uS);
+    
+    // 5. Glow / Bloom
     if(uBloom > 0.01) finalColor += smoothstep(0.4, 1.0, l) * finalColor * uBloom * 2.0;
+    
     gl_FragColor = vec4(finalColor, 1.0);
 }""".trimIndent()
 
