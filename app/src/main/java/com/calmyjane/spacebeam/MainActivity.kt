@@ -12,7 +12,7 @@ import android.content.Context
 import android.content.Intent
 
 import android.content.pm.PackageManager
-
+import org.json.JSONObject
 import android.graphics.*
 
 import android.graphics.drawable.BitmapDrawable
@@ -2357,39 +2357,39 @@ class MainActivity : AppCompatActivity() {
 
     }
 
-
     private fun globalReset() {
+        // 1. Kill any ongoing preset animations immediately
+        currentAnimator?.cancel()
 
-        currentAnimator?.cancel();
-
+        // 2. Reset the Renderer's continuous accumulators (Rotation & Flight)
+        // These are "physics" variables the sliders don't own directly
         renderer.mRotAccum = 0.0
-
         renderer.cRotAccum = 0.0
-
         renderer.lRotAccum = 0.0
+        renderer.scrollAccum = 0.0f
+        renderer.resetPhases() // Reset LFO/Modulation positions
 
-        renderer.resetPhases()
+        // 3. Reset Camera Flipping & Rotation
+        renderer.flipX = 1f
+        renderer.flipY = -1f
+        renderer.rot180 = false
 
-        renderer.flipX = 1f; renderer.flipY = -1f; renderer.rot180 = false; activePreset =
-            -1; updatePresetHighlights()
+        // 4. Reset UI State
+        activePreset = -1
+        updatePresetHighlights()
 
+        // 5. AUTOMATED RESET: Loop through all sliders and restore their defaultValues
+        // This handles Zoom, Warp, Colors, 3D Mix, etc. automatically
         controls.forEach { it.reset() }
 
-
-// Force Axis Reset
-
+        // 6. Specific Override: The AXIS slider
+        // We force this to 2 segments (Mirror mode) as the baseline
         renderer.axisCount = 2.0f
-
-        axisSb.progress = 1
-
+        axisSb.progress = 1 // Index 1 = Count 2
         controlsMap["AXIS"]?.setProgress(1)
 
-        renderer
-
-
-
+        // 7. Update sidebar button highlights (Alpha states)
         updateSidebarVisuals()
-
     }
 
 
@@ -2428,490 +2428,183 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun applyPreset(idx: Int) {
-
         val p = presets[idx] ?: return
-
         activePreset = idx
-
         updatePresetHighlights()
-
         currentAnimator?.cancel()
 
-
-
         if (!axisLocked) {
-
             renderer.axisCount = p.axis.toFloat()
-
             axisSb.progress = p.axis - 1
-
             controlsMap["AXIS"]?.setProgress(p.axis - 1)
-
         }
-
-
-// Snapshot current STATE as Floats (using preciseValue)
 
         val startValues = controls.associate { it.id to it.preciseValue }
-
         val startRates = controls.associate { it.id to it.preciseModRate }
-
         val startDepths = controls.associate { it.id to it.preciseModDepth }
 
-
-
         currentAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-
             duration = transitionMs
-
-// Use Linear Interpolator for pure calculation, or AccelerateDecelerate for feel
-
-// interpolator = android.view.animation.LinearInterpolator()
-
-
             addUpdateListener { anim ->
-
                 val t = anim.animatedValue as Float
-
                 controls.forEach { control ->
-
                     if (control.id == "AXIS") return@forEach
-
-
                     val target = p.controlSnapshots[control.id]
-
-
-
                     if (target != null) {
 
-// Calculate Float interpolation
-
                         val sVal = startValues[control.id] ?: 0f
-
                         val newVal = sVal + (target.value - sVal) * t
-
                         control.setAnimatedValue(newVal) // Updates float internally
 
-
                         if (control.hasModulation) {
-
                             val sRate = startRates[control.id] ?: 0f
-
                             val newRate = sRate + (target.rate - sRate) * t
-
                             control.setAnimatedModRate(newRate)
 
-
                             val sDepth = startDepths[control.id] ?: 0f
-
                             val newDepth = sDepth + (target.depth - sDepth) * t
-
                             control.setAnimatedModDepth(newDepth)
-
                         }
-
                     }
-
                 }
-
                 renderer.flipX = p.flipX
-
                 renderer.flipY = p.flipY
-
                 renderer.rot180 = p.rot180
-
                 updateSidebarVisuals()
-
             }
-
             start()
-
         }
-
     }
 
 
     private fun savePreset(idx: Int) {
-
+        // 1. Capture current state
         val snapshots = controls.filter { it.id != "AXIS" }.associate { it.id to it.getSnapshot() }
-
         val axisVal = controlsMap["AXIS"]?.value ?: 0
 
-        presets[idx] = Preset(
-
+        val newPreset = Preset(
             snapshots,
-
             renderer.flipX, renderer.flipY, renderer.rot180,
-
             axisVal + 1
-
         )
 
+        // 2. Update Memory
+        presets[idx] = newPreset
         activePreset = idx
-
-        val newPreset = presets[idx]!!
-
-        logPresetCode(idx, newPreset) // Add this line
-
         updatePresetHighlights()
 
-        Toast.makeText(this, "Preset Saved", Toast.LENGTH_SHORT).show()
+        // 3. SERIALIZE TO JSON & SAVE TO DISK
+        try {
+            val rootObj = JSONObject()
+            rootObj.put("axis", newPreset.axis)
+            rootObj.put("flipX", newPreset.flipX.toDouble())
+            rootObj.put("flipY", newPreset.flipY.toDouble())
+            rootObj.put("rot180", newPreset.rot180)
 
+            val controlsObj = JSONObject()
+            newPreset.controlSnapshots.forEach { (key, snap) ->
+                val snapObj = JSONObject()
+                snapObj.put("v", snap.value)
+                snapObj.put("r", snap.rate)
+                snapObj.put("d", snap.depth)
+                controlsObj.put(key, snapObj)
+            }
+            rootObj.put("controls", controlsObj)
+
+            val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
+            prefs.edit().putString("PRESET_$idx", rootObj.toString()).apply()
+
+            Toast.makeText(this, "Preset $idx Saved Permanently", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.e("PRESET", "Failed to save preset", e)
+            Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show()
+        }
     }
-
-
     private fun logPresetCode(idx: Int, p: Preset) {
-
         val sb = StringBuilder()
-
         sb.append("presets[$idx] = p(ax=${p.axis}, mRot=${p.controlSnapshots["M_ROT"]?.value ?: 500}")
 
-
-// Iterate through all modified controls
-
         p.controlSnapshots.forEach { (id, snap) ->
-
-// We skip M_ROT because we handled it above, and AXIS is separate
-
             if (id != "M_ROT" && id != "AXIS") {
-
-// Only log if it's not at default (optional, but keeps it clean)
-
                 if (snap.value != 500 || snap.rate != 0 || snap.depth != 0) {
-
                     sb.append(", \"$id\", ${snap.value}, ${snap.rate}, ${snap.depth}")
-
                 }
-
             }
-
         }
-
         sb.append(")")
-
         android.util.Log.d("PRESET_STUDIO", sb.toString())
-
     }
 
-
     private fun initDefaultPresets() {
-
-        fun p(
-
-            ax: Int = 1,
-
-            mRot: Int = 500,
-
-            vararg overrides: Any
-
-        ): Preset {
-
+        // --- PART 1: Hardcoded Defaults (Factory Settings) ---
+        fun p(ax: Int = 1, mRot: Int = 500, vararg overrides: Any): Preset {
             val baseSnapshots = controls.associate { it.id to it.getSnapshot() }.toMutableMap()
-
             baseSnapshots["M_ROT"] = PropertyControl.Snapshot(mRot, 0, 0)
-
-
             var i = 0
-
             while (i < overrides.size) {
-
                 val key = overrides[i] as String
-
                 val value = overrides[i + 1] as Int
-
                 if (i + 3 < overrides.size && overrides[i + 2] is Int && overrides[i + 3] is Int) {
-
                     val rate = overrides[i + 2] as Int
-
                     val depth = overrides[i + 3] as Int
-
                     baseSnapshots[key] = PropertyControl.Snapshot(value, rate, depth)
-
                     i += 4
-
                 } else {
-
                     baseSnapshots[key] = PropertyControl.Snapshot(value, 0, 0)
-
                     i += 2
-
                 }
-
             }
-
             return Preset(baseSnapshots, 1f, -1f, false, ax)
-
         }
 
-
-// --- PRESET STUDIO DATA ---
-
-
-// Preset 1: Gentle Master Zoom LFO
-
+        // Load Factory Defaults
         presets[1] = p(ax = 2, mRot = 500, "M_ZOOM", 300, 139, 307, "WARP", 1000, 0, 0)
-
-
-// Preset 2: Faster Rotation & High Intensity Zoom
-
         presets[2] = p(ax = 2, mRot = 615, "M_ZOOM", 248, 293, 383, "WARP", 1000, 0, 0)
+        presets[3] = p(ax = 2, mRot = 673, "M_ZOOM", 268, 293, 559, "M_TILTX", 553, 305, 880, "M_TILTY", 500, 353, 1000, "WARP", 1000, 0, 0)
+        presets[4] = p(ax = 2, mRot = 673, "M_ZOOM", 268, 293, 517, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 880, "M_TILTY", 500, 353, 1000, "WARP", 1000, 0, 0)
+        presets[5] = p(ax = 2, mRot = 673, "M_ZOOM", 359, 293, 517, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 577, "M_TILTY", 500, 353, 854, "C_ROT", 657, 0, 0, "WARP", 0, 0, 0)
+        presets[6] = p(ax = 2, mRot = 673, "M_ZOOM", 268, 293, 517, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 1000, "M_TILTY", 500, 353, 1000, "C_ROT", 657, 0, 0, "WARP", 0, 0, 0, "C_TX", 500, 389, 739, "C_TY", 500, 209, 763, "GLOW", 164, 395, 129)
+        presets[7] = p(ax = 2, mRot = 673, "M_ZOOM", 912, 293, 740, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 1000, "M_TILTY", 500, 353, 1000, "C_ROT", 657, 0, 0, "WARP", 0, 0, 0, "C_TX", 500, 389, 739, "C_TY", 500, 209, 763, "C_TILTX", 500, 287, 677, "C_TILTY", 500, 443, 557, "GLOW", 164, 395, 129)
+        presets[8] = p(ax = 2, mRot = 673, "M_ZOOM", 268, 293, 517, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 1000, "M_TILTY", 500, 353, 1000, "C_ROT", 657, 0, 0, "WARP", 0, 0, 0, "C_TX", 500, 389, 739, "C_TY", 500, 209, 763, "C_TILTX", 500, 287, 677, "C_TILTY", 500, 443, 557, "RGB", 957, 0, 0, "GLOW", 164, 395, 129)
 
+        // --- PART 2: Load Saved User Overrides from Disk ---
+        val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
 
-// Preset 3: Master Tilt Perspective Intro
+        for (i in 1..8) {
+            val jsonStr = prefs.getString("PRESET_$i", null)
+            if (jsonStr != null) {
+                try {
+                    val rootObj = JSONObject(jsonStr)
+                    val loadedAxis = rootObj.getInt("axis")
+                    val loadedFlipX = rootObj.getDouble("flipX").toFloat()
+                    val loadedFlipY = rootObj.getDouble("flipY").toFloat()
+                    val loadedRot180 = rootObj.getBoolean("rot180")
 
-        presets[3] = p(
-            ax = 2,
-            mRot = 673,
-            "M_ZOOM",
-            268,
-            293,
-            559,
-            "M_TILTX",
-            553,
-            305,
-            880,
-            "M_TILTY",
-            500,
-            353,
-            1000,
-            "WARP",
-            1000,
-            0,
-            0
-        )
+                    val controlsObj = rootObj.getJSONObject("controls")
+                    val loadedSnapshots = mutableMapOf<String, PropertyControl.Snapshot>()
 
+                    // Start with defaults to ensure missing keys don't crash
+                    loadedSnapshots.putAll(presets[i]?.controlSnapshots ?: emptyMap())
 
-// Preset 4: Tilt + Drifting Master Translation
+                    // --- FIX IS HERE: Use strict Iterator while-loop ---
+                    val keysIterator = controlsObj.keys()
+                    while (keysIterator.hasNext()) {
+                        val key = keysIterator.next()
+                        val snapObj = controlsObj.getJSONObject(key)
+                        loadedSnapshots[key] = PropertyControl.Snapshot(
+                            snapObj.getInt("v"),
+                            snapObj.optInt("r", 0),
+                            snapObj.optInt("d", 0)
+                        )
+                    }
 
-        presets[4] = p(
-            ax = 2,
-            mRot = 673,
-            "M_ZOOM",
-            268,
-            293,
-            517,
-            "M_TX",
-            500,
-            159,
-            624,
-            "M_TY",
-            500,
-            309,
-            753,
-            "M_TILTX",
-            553,
-            305,
-            880,
-            "M_TILTY",
-            500,
-            353,
-            1000,
-            "WARP",
-            1000,
-            0,
-            0
-        )
-
-
-// Preset 5: Camera Rotation + No Warp Distort
-
-        presets[5] = p(
-            ax = 2,
-            mRot = 673,
-            "M_ZOOM",
-            359,
-            293,
-            517,
-            "M_TX",
-            500,
-            159,
-            624,
-            "M_TY",
-            500,
-            309,
-            753,
-            "M_TILTX",
-            553,
-            305,
-            577,
-            "M_TILTY",
-            500,
-            353,
-            854,
-            "C_ROT",
-            657,
-            0,
-            0,
-            "WARP",
-            0,
-            0,
-            0
-        )
-
-
-// Preset 6: Drifting Camera Offset + Pulsing Glow
-
-        presets[6] = p(
-            ax = 2,
-            mRot = 673,
-            "M_ZOOM",
-            268,
-            293,
-            517,
-            "M_TX",
-            500,
-            159,
-            624,
-            "M_TY",
-            500,
-            309,
-            753,
-            "M_TILTX",
-            553,
-            305,
-            1000,
-            "M_TILTY",
-            500,
-            353,
-            1000,
-            "C_ROT",
-            657,
-            0,
-            0,
-            "WARP",
-            0,
-            0,
-            0,
-            "C_TX",
-            500,
-            389,
-            739,
-            "C_TY",
-            500,
-            209,
-            763,
-            "GLOW",
-            164,
-            395,
-            129
-        )
-
-
-// Preset 7: Full Dual-Tilt (Master & Camera)
-
-        presets[7] = p(
-            ax = 2,
-            mRot = 673,
-            "M_ZOOM",
-            912,
-            293,
-            740,
-            "M_TX",
-            500,
-            159,
-            624,
-            "M_TY",
-            500,
-            309,
-            753,
-            "M_TILTX",
-            553,
-            305,
-            1000,
-            "M_TILTY",
-            500,
-            353,
-            1000,
-            "C_ROT",
-            657,
-            0,
-            0,
-            "WARP",
-            0,
-            0,
-            0,
-            "C_TX",
-            500,
-            389,
-            739,
-            "C_TY",
-            500,
-            209,
-            763,
-            "C_TILTX",
-            500,
-            287,
-            677,
-            "C_TILTY",
-            500,
-            443,
-            557,
-            "GLOW",
-            164,
-            395,
-            129
-        )
-
-
-// Preset 8: Maximum Distortion & RGB Shift
-
-        presets[8] = p(
-            ax = 2,
-            mRot = 673,
-            "M_ZOOM",
-            268,
-            293,
-            517,
-            "M_TX",
-            500,
-            159,
-            624,
-            "M_TY",
-            500,
-            309,
-            753,
-            "M_TILTX",
-            553,
-            305,
-            1000,
-            "M_TILTY",
-            500,
-            353,
-            1000,
-            "C_ROT",
-            657,
-            0,
-            0,
-            "WARP",
-            0,
-            0,
-            0,
-            "C_TX",
-            500,
-            389,
-            739,
-            "C_TY",
-            500,
-            209,
-            763,
-            "C_TILTX",
-            500,
-            287,
-            677,
-            "C_TILTY",
-            500,
-            443,
-            557,
-            "RGB",
-            957,
-            0,
-            0,
-            "GLOW",
-            164,
-            395,
-            129
-        )
-
+                    presets[i] = Preset(loadedSnapshots, loadedFlipX, loadedFlipY, loadedRot180, loadedAxis)
+                    Log.d("PRESETS", "Successfully loaded user preset $i") // Log success
+                } catch (e: Exception) {
+                    Log.e("PRESET", "Error loading preset $i", e)
+                }
+            }
+        }
     }
 
 
