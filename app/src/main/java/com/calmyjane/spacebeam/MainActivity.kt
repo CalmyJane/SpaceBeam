@@ -943,6 +943,10 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl(this,"S_SHAPE","SHAPE",defaultValue = 0,hasModulation = true))
         addControl(PropertyControl(this,"S_SPEED","SPEED",defaultValue = 500,hasModulation = true))
         addControl(PropertyControl(this, "S_FOV", "FISHEYE", defaultValue = 500, hasModulation = true))
+        addControl(PropertyControl(this, "T_HUE_STR", "RAINBOW STR", defaultValue = 0))
+        addControl(PropertyControl(this, "T_HUE_POS", "RAINBOW POS", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl(this, "T_WAVE_STR", "WAVE STR", defaultValue = 0))
+        addControl(PropertyControl(this, "T_WAVE_POS", "WAVE POS", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
 
         createGroup("MORPHING")
         addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
@@ -1049,7 +1053,8 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl(this, "C_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
 
-        createGroup("COLOR GRADING")
+        createGroup("COLOR")
+        addControl(PropertyControl(this, "BRIT", "BRIGHTNESS", defaultValue = 500))
         addControl(PropertyControl(this, "HUE", "HUE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
         addControl(PropertyControl(this, "NEG", "NEGATIVE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
         addControl(PropertyControl(this, "GLOW", "GLOW", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
@@ -1839,11 +1844,11 @@ class MainActivity : AppCompatActivity() {
             
             // --- UNIFORMS ---
             uniform float uMR, uCR, uCZ, uA, uMZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB, uWarp;
+            uniform float uBrit, uTHueStr, uTHuePos, uTWaveStr, uTWavePos;
             uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
             uniform float uCurve, uTwist, uFlux;
             uniform float uSShape, uSFov, uScroll, uMode;
             
-            // Helper für Hue Rotation
             vec3 hueShift(vec3 color, float hue) {
                 const vec3 k = vec3(0.57735, 0.57735, 0.57735);
                 float cosAngle = cos(hue);
@@ -1922,33 +1927,54 @@ class MainActivity : AppCompatActivity() {
                     vec2 cameraUV = abs(mod(mixedUV + 1.0, 2.0) - 1.0);
                     float sOff = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
                     vec3 smp = sampleCamera(cameraUV, sOff);
-                    
+
+                    // --- 3D EFFECTS ---
+                    if (uMode > 0.01) {
+                        // 1. Rainbow Tunnel
+                        if (uTHueStr > 0.01) {
+                            float hueArg = (mixedUV.y * 0.5) + uTHuePos; 
+                            vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (hueArg + vec3(0.0, 0.33, 0.67)));
+                            smp = mix(smp, smp * rainbow * 2.0, uTHueStr * uMode);
+                        }
+
+                        // 2. Magical Wave (FIXED: Inverted, Softer, Lower Strength)
+                        if (uTWaveStr > 0.01) {
+                            // Calculate distance from the "Wave Center"
+                            float waveDomain = mixedUV.y - (uTWavePos * 10.0);
+                            float distFromWave = abs(fract(waveDomain) - 0.5); 
+                            
+                            // Width increases slightly with strength, but stays soft
+                            float width = 0.15 + (uTWaveStr * 0.2); 
+                            
+                            // 1.0 at center, 0.0 at edges (Bright Ring Logic)
+                            float wavePulse = smoothstep(width, 0.0, distFromWave);
+                            
+                            // Square it to make it "Glowy" (Softness)
+                            wavePulse = wavePulse * wavePulse;
+                            
+                            // Intensity Curve: Squared input for better slider control at low levels
+                            // 10% slider = 1% opacity. 100% slider = 80% opacity.
+                            float intensity = (uTWaveStr * uTWaveStr) * 0.8;
+                            
+                            vec3 waveColor = vec3(0.5, 0.8, 1.0) * wavePulse * intensity; 
+                            smp += waveColor;
+                        }
+                    }
+
                     if(i==0) finalColor.r = smp.r; 
                     else if(i==1) finalColor.g = smp.g; 
                     else finalColor.b = smp.b;
                 }
                 
-                // --- COLOR GRADING SECTION (Fixed) ---
-                
-                // 1. Negative / Invert (uSol)
-                // Wenn uSol 0 ist -> keine Änderung. Wenn 1 -> Volles Invertieren.
                 finalColor = abs(finalColor - uSol);
-            
-                // 2. Hue Shift (uHue)
-                if(uHue > 0.01) {
-                    finalColor = hueShift(finalColor, uHue * 6.28318);
-                }
-            
-                // 3. Contrast (uC)
+                if(uHue > 0.01) finalColor = hueShift(finalColor, uHue * 6.28318);
                 finalColor = (finalColor - 0.5) * uC + 0.5;
-                
-                // 4. Vibrance & BW (uS)
                 float l = dot(finalColor, vec3(0.299, 0.587, 0.114));
                 finalColor = mix(vec3(l), finalColor, uS);
-                
-                // 5. Glow / Bloom
                 if(uBloom > 0.01) finalColor += smoothstep(0.4, 1.0, l) * finalColor * uBloom * 2.0;
                 
+                finalColor *= uBrit; 
+
                 gl_FragColor = vec4(finalColor, 1.0);
             }""".trimIndent()
 
@@ -2089,7 +2115,6 @@ class MainActivity : AppCompatActivity() {
             fun safeUni(name: String, v: Float) { uLocs[name]?.let { GLES20.glUniform1f(it, v) } }
             fun safeUni2(name: String, v1: Float, v2: Float) { uLocs[name]?.let { GLES20.glUniform2f(it, v1, v2) } }
 
-            // Now allows access to 'resolveModulation'
             val vMAngle = resolveModulation("M_ANGLE"); val vMZoom = resolveModulation("M_ZOOM")
             val vMTx = resolveModulation("M_TX"); val vMTy = resolveModulation("M_TY")
             val vMTiltX = resolveModulation("M_TILTX"); val vMTiltY = resolveModulation("M_TILTY")
@@ -2106,6 +2131,12 @@ class MainActivity : AppCompatActivity() {
             safeUni("uScroll", scrollAccum)
             safeUni("uSShape", resolveModulation("S_SHAPE"))
             safeUni("uSFov", resolveModulation("S_FOV"))
+
+            // --- NEW TUNNEL CONTROLS ---
+            safeUni("uTHueStr", ctx.controlsMap["T_HUE_STR"]?.getNormalized() ?: 0f)
+            safeUni("uTHuePos", resolveModulation("T_HUE_POS")) // Modulatable
+            safeUni("uTWaveStr", ctx.controlsMap["T_WAVE_STR"]?.getNormalized() ?: 0f)
+            safeUni("uTWavePos", resolveModulation("T_WAVE_POS")) // Modulatable
 
             val cRaw = ctx.controlsMap["CURVE"]?.getMapped(0f, 1f) ?: 0.5f
             safeUni("uCurve", if (cRaw > 0.5f) 1.0f + (cRaw - 0.5f) * 6.0f else 0.2f + (cRaw * 1.6f))
@@ -2128,6 +2159,9 @@ class MainActivity : AppCompatActivity() {
             safeUni("uBloom", resolveModulation("GLOW")); safeUni("uRGB", resolveModulation("RGB") * 0.05f)
             safeUni("uMRGB", resolveModulation("M_RGB") * 0.1f)
 
+            // --- NEW BRIGHTNESS UNIFORM ---
+            safeUni("uBrit", ctx.controlsMap["BRIT"]?.getMapped(0.0f, 2.0f) ?: 1.0f)
+
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId)
             uLocs["uTex"]?.let { GLES20.glUniform1i(it, 0) }
@@ -2135,6 +2169,7 @@ class MainActivity : AppCompatActivity() {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         }
+
         /**
          * Updates physics with a Quadratic Curve to prevent speed rushing.
          * Center stickiness makes 0.0 speed easier to hit.
