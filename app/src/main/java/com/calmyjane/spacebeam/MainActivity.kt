@@ -340,8 +340,9 @@ class PropertyControl(
             max = this@PropertyControl.max
             progress = value
             thumb = GradientDrawable().apply {
-                setColor(Color.WHITE); setSize(18, 30); cornerRadius = 6f
-                setStroke(1, Color.argb(100, 0, 0, 0))
+                setColor(Color.WHITE)
+                setSize(30, 30)      // Size of the circle
+                cornerRadius = 15f   // Half of size = perfect circle
             }
             thumbOffset = 0
             splitTrack = false
@@ -1168,7 +1169,11 @@ class MainActivity : AppCompatActivity() {
             max = 25
             progress = 1
             layoutParams = LinearLayout.LayoutParams(0, 65, 1f)
-            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(16, 32) }
+            thumb = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setSize(30, 30)
+                cornerRadius = 15f
+            }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
                     renderer.axisCount = (p + 1).toFloat()
@@ -1312,7 +1317,11 @@ class MainActivity : AppCompatActivity() {
         val transSeekBar = SeekBar(this).apply {
             max = 1000; progress = 333
             layoutParams = LinearLayout.LayoutParams(500, 45)
-            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(12, 24) }
+            thumb = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setSize(30, 30)      // Size of the circle
+                cornerRadius = 15f   // Half of size = perfect circle
+            }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
                     transitionMs = ((p / 1000f).pow(3.0f) * 30000).toLong()
