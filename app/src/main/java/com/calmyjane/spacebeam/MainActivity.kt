@@ -556,6 +556,7 @@ class MainActivity : AppCompatActivity() {
     private val controls = mutableListOf<PropertyControl>()
     val controlsMap = mutableMapOf<String, PropertyControl>()
     private val presetButtons = mutableMapOf<Int, Button>()
+    private lateinit var menuBtn: Button
     private var currentAnimator: ValueAnimator? = null
     private var activePreset: Int = -1
     private lateinit var flipXBtn: ImageButton
@@ -1009,10 +1010,11 @@ class MainActivity : AppCompatActivity() {
         val logoView = createLogoView()
 
         // 3. Build UI Sections
-        setupLeftSidebar()           // Parameter menu and toggle button
+        setupLeftSidebar()
         val cameraPanel = createCameraSettingsPanel()
         val recordPanel = createRecordControls()
         val presetPanel = createPresetPanel()
+        val menuUtilBtn = createMenuUtilityButton()
         val readabilityBtn = createReadabilityButton()
         val resetBtn = createResetButton()
 
@@ -1031,6 +1033,7 @@ class MainActivity : AppCompatActivity() {
         overlayHUD.addView(presetPanel, FrameLayout.LayoutParams(-2, -2).apply {
             gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 180
         })
+        overlayHUD.addView(menuUtilBtn)
         overlayHUD.addView(readabilityBtn)
         overlayHUD.addView(resetBtn)
 
@@ -1040,7 +1043,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupLeftSidebar() {
-        // Container for Panel + Toggle Button
+        // Container for Panel only
         leftHUDContainer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = FrameLayout.LayoutParams(-2, -1).apply { gravity = Gravity.START }
@@ -1052,6 +1055,7 @@ class MainActivity : AppCompatActivity() {
             layoutDirection = View.LAYOUT_DIRECTION_RTL
             isVerticalScrollBarEnabled = true
             scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
+            visibility = View.VISIBLE // Default visibility
         }
 
         // The internal layout for items
@@ -1062,24 +1066,7 @@ class MainActivity : AppCompatActivity() {
             layoutTransition = LayoutTransition().apply { enableTransitionType(LayoutTransition.CHANGING) }
         }
         parameterPanel.addView(menuLayout)
-
-        // The Toggle Button ("<")
-        parameterToggleContainer = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(140, -1)
-            parameterToggleBtn = Button(this@MainActivity).apply {
-                text = "<"
-                setTextColor(Color.WHITE)
-                setBackgroundColor(Color.TRANSPARENT)
-                alpha = 0.8f
-                textSize = 32f
-                layoutParams = FrameLayout.LayoutParams(-1, 400, Gravity.CENTER_VERTICAL)
-                setOnClickListener { toggleMenu() }
-            }
-            addView(parameterToggleBtn)
-        }
-
         leftHUDContainer.addView(parameterPanel)
-        leftHUDContainer.addView(parameterToggleContainer)
 
         // Populate the actual menu items
         populateParameterGroups(menuLayout)
@@ -1240,7 +1227,7 @@ class MainActivity : AppCompatActivity() {
             setImageResource(resId)
             setColorFilter(Color.WHITE)
             setBackgroundColor(Color.TRANSPARENT)
-            alpha = 0.3f
+            alpha = 0.85f
             layoutParams = LinearLayout.LayoutParams(100, 100)
             setOnClickListener { action(); updateSidebarVisuals() }
         }
@@ -1391,11 +1378,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun createMenuUtilityButton() = Button(this).apply {
+        text = if (isMenuExpanded) "<" else ">"
+        textSize = 22f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(Color.WHITE)
+        stateListAnimator = null
+        background = null
+
+        // --- CENTERING FIX ---
+        gravity = Gravity.CENTER
+        // Adding bottom padding pushes the text physically UP relative to the center
+        setPadding(0, 0, 0, 12)
+
+        menuBtn = this // Assign to class property
+
+        layoutParams = FrameLayout.LayoutParams(120, 120).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            bottomMargin = 250
+            rightMargin = 35
+        }
+        setOnClickListener { toggleMenu() }
+    }
+
     private fun createReadabilityButton() = ImageButton(this).apply {
         setImageResource(android.R.drawable.ic_menu_view)
         setColorFilter(Color.WHITE)
-        alpha = 0.4f
-        readabilityBtn = this // Assign to class property
+
+        // Increased alpha
+        alpha = 0.85f
+
+        readabilityBtn = this
         layoutParams = FrameLayout.LayoutParams(120, 120).apply {
             gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 140; rightMargin = 35
         }
@@ -1405,15 +1418,16 @@ class MainActivity : AppCompatActivity() {
     private fun createResetButton() = ImageButton(this).apply {
         setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
         setColorFilter(Color.WHITE)
-        alpha = 0.4f
-        resetBtn = this // Assign to class property
+
+        alpha = 0.85f
+
+        resetBtn = this
         layoutParams = FrameLayout.LayoutParams(120, 120).apply {
             gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 30; rightMargin = 35
         }
         setOnClickListener { globalReset() }
     }
 
-    // Returns Pair(GroupContainer, ContentLayout)
     private fun createCollapsibleGroupView(title: String, startOpen: Boolean): Pair<LinearLayout, LinearLayout> {
         val groupContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1627,41 +1641,51 @@ class MainActivity : AppCompatActivity() {
     private fun applyReadabilityStyle() {
         val getBg = { alpha: Int ->
             GradientDrawable().apply {
-                setColor(Color.argb(alpha, 10, 10, 10)) // Slightly darker base
-                setStroke(2, Color.argb(120, 80, 80, 80)) // Thinner, crisper stroke
-                cornerRadius = 25f // Reduced radius for tighter look
+                setColor(Color.argb(alpha, 10, 10, 10))
+                setStroke(2, Color.argb(120, 80, 80, 80))
+                cornerRadius = 25f
                 shape = GradientDrawable.RECTANGLE
             }
         }
 
+        // Helper for circular buttons - uses EXACT same color/alpha logic as panels
+        val getCircleBg = { alpha: Int ->
+            getBg(alpha).apply { shape = GradientDrawable.OVAL }
+        }
+
         val panels = listOf(leftHUDContainer, cameraSettingsPanel, presetPanel, recordControls)
-        val utils = listOf(readabilityBtn, resetBtn)
+        val utils = listOf(readabilityBtn, resetBtn, menuBtn)
 
         // Reset state
         panels.forEach {
             it.background = null
-            // COMPACT PADDING: 15 instead of 30
             it.setPadding(15, 15, 15, 15)
             it.clipToOutline = true
         }
 
         when (readabilityLevel) {
             1 -> {
-                panels.forEach { it.background = getBg(180) } // Darker glass
-                utils.forEach { it.background = getBg(200).apply { shape = GradientDrawable.OVAL } }
+                // Darker glass
+                panels.forEach { it.background = getBg(180) }
+                // Match alpha (180) for buttons
+                utils.forEach { it.background = getCircleBg(180) }
                 applyRecursiveGlow(overlayHUD, false)
             }
             2 -> {
-                panels.forEach { it.background = getBg(120) } // Lighter glass
-                utils.forEach { it.background = getBg(180).apply { shape = GradientDrawable.OVAL } }
+                // Lighter glass
+                panels.forEach { it.background = getBg(120) }
+                // Match alpha (120) for buttons
+                utils.forEach { it.background = getCircleBg(120) }
                 applyRecursiveGlow(overlayHUD, true)
             }
             else -> {
                 panels.forEach { it.setPadding(0, 0, 0, 0); it.background = null }
+                utils.forEach { it.background = null }
                 applyRecursiveGlow(overlayHUD, false)
             }
         }
     }
+
     private fun applyRecursiveGlow(view: View, enabled: Boolean) {
         if (view is TextView) {
             if (enabled) view.setShadowLayer(50f, 0f, 0f, Color.BLACK) else view.setShadowLayer(
@@ -2045,9 +2069,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toggleMenu() {
-        isMenuExpanded = !isMenuExpanded; parameterPanel.visibility =
-            if (isMenuExpanded) View.VISIBLE else View.GONE; parameterToggleBtn.text =
-            if (isMenuExpanded) "<" else ">"
+        PropertyControl.closeActiveMenu()
+        isMenuExpanded = !isMenuExpanded
+        leftHUDContainer.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
+        menuBtn.text = if (isMenuExpanded) "<" else ">"
     }
 
 
