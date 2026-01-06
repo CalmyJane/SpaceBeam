@@ -621,24 +621,29 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recordControls: LinearLayout
     private lateinit var orientationBtn: ImageButton
     private var isOrientationLocked = false
+    private val expandedGroups = mutableSetOf<String>()
+    private var lastScrollY = 0
+    private var isRebuildingHUD = false
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
+        isRebuildingHUD = true // Start Rebuild
+
         val activeControlId = PropertyControl.activeControl?.id
         PropertyControl.closeActiveMenu()
 
         overlayHUD.removeAllViews()
         setupOverlayHUD()
 
-        // FIX: Apply the current visibility state to the newly built HUD
         overlayHUD.visibility = if (isHudVisible) View.VISIBLE else View.GONE
-
         applyReadabilityStyle()
         updateSidebarVisuals()
 
         if (activeControlId != null && controlsMap.containsKey(activeControlId)) {
             handler.postDelayed({ controlsMap[activeControlId]?.toggleMenu() }, 50)
         }
+
+        isRebuildingHUD = false // End Rebuild
     }
 
     private val mediaPickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -981,6 +986,16 @@ class MainActivity : AppCompatActivity() {
             // CHANGE: Move scrollbar style to outside to prevent it from expanding the view
             scrollBarStyle = View.SCROLLBARS_OUTSIDE_OVERLAY
             visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                setOnScrollChangeListener { _, _, scrollY, _, _ ->
+                    if (!isRebuildingHUD) lastScrollY = scrollY
+                }
+            }
+
+            // Restore scroll position
+            post {
+                scrollTo(0, lastScrollY)
+            }
         }
 
         val menuLayout = LinearLayout(this).apply {
@@ -1211,16 +1226,29 @@ class MainActivity : AppCompatActivity() {
     private fun createResetButton() = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_close_clear_cancel); setColorFilter(Color.WHITE); alpha = 0.85f; resetBtn = this; layoutParams = FrameLayout.LayoutParams(120, 120).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 30; rightMargin = 35 }; setOnClickListener { globalReset() } }
 
     private fun createCollapsibleGroupView(title: String, startOpen: Boolean): Pair<LinearLayout, LinearLayout> {
+        // Check if this group was previously expanded
+        val effectivelyOpen = if (expandedGroups.contains(title)) true else startOpen
+        if (effectivelyOpen) expandedGroups.add(title)
+
         val groupContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8 }; layoutTransition = LayoutTransition() }
         val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(15, 12, 15, 12); background = GradientDrawable().apply { setColor(Color.parseColor("#33FFFFFF")); cornerRadius = 8f; setStroke(1, Color.parseColor("#44FFFFFF")) } }
-        val arrow = TextView(this).apply { text = "▶"; textSize = 9f; setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(50, -2); rotation = if (startOpen) 90f else 0f }
+        val arrow = TextView(this).apply { text = "▶"; textSize = 9f; setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(50, -2); rotation = if (effectivelyOpen) 90f else 0f }
         val label = TextView(this).apply { text = title; textSize = 10f; setTypeface(null, Typeface.BOLD); setTextColor(Color.WHITE); letterSpacing = 0.15f }
         header.addView(arrow); header.addView(label)
-        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = if (startOpen) View.VISIBLE else View.GONE; setPadding(6, 6, 6, 6) }
+
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = if (effectivelyOpen) View.VISIBLE else View.GONE; setPadding(6, 6, 6, 6) }
+
         header.setOnClickListener {
             val isVisible = content.visibility == View.VISIBLE
-            if (isVisible) { content.visibility = View.GONE; arrow.animate().rotation(0f).setDuration(200).start() }
-            else { content.visibility = View.VISIBLE; arrow.animate().rotation(90f).setDuration(200).start() }
+            if (isVisible) {
+                content.visibility = View.GONE
+                arrow.animate().rotation(0f).setDuration(200).start()
+                expandedGroups.remove(title)
+            } else {
+                content.visibility = View.VISIBLE
+                arrow.animate().rotation(90f).setDuration(200).start()
+                expandedGroups.add(title)
+            }
         }
         groupContainer.addView(header); groupContainer.addView(content)
         return Pair(groupContainer, content)
