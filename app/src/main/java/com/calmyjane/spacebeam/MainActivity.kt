@@ -197,7 +197,7 @@ class PropertyControl(
     private var lastComputedModulation: Float = 0f
 
     // --- Snapshot Morphing Variables ---
-    private var modSnapshotValue: Float = 0f // The "captured" value from the old state
+    private var modSnapshotValue: Float = 0f
     private var modRateStart = 0f
     private var modRateTarget: Float? = null
     private var modDepthStart = 0f
@@ -211,6 +211,11 @@ class PropertyControl(
     private var modIndicator: View? = null
     private var mainRowLayout: LinearLayout? = null
     private var floatingPanel: LinearLayout? = null
+
+    // UI References for the open modulation menu
+    private var modPanelSpeedSeekBar: SeekBar? = null
+    private var modPanelDepthSeekBar: SeekBar? = null
+    private var modPanelShapeSpinner: Spinner? = null
 
     data class Snapshot(
         val value: Int,
@@ -230,7 +235,7 @@ class PropertyControl(
     }
 
     fun animateTo(target: Float, durationSec: Float, newShape: String? = null) {
-        // 1. CAPTURE SNAPSHOT: Grab the current modulation offset before we change anything
+        // Capture current state for blending
         modSnapshotValue = lastComputedModulation
 
         animTarget = target
@@ -240,7 +245,12 @@ class PropertyControl(
         isAnimating = true
 
         if (newShape != null) {
-            try { modShape = WaveShape.valueOf(newShape) } catch (e: Exception) {}
+            try {
+                val targetShape = WaveShape.valueOf(newShape)
+                modShape = targetShape
+                // Sync the spinner if the menu is open
+                modPanelShapeSpinner?.setSelection(targetShape.ordinal)
+            } catch (e: Exception) {}
         }
     }
 
@@ -271,9 +281,13 @@ class PropertyControl(
                 modRateTarget?.let { preciseModRate = modRateStart + (it - modRateStart) * ease }
                 modDepthTarget?.let { preciseModDepth = modDepthStart + (it - modDepthStart) * ease }
             }
+
+            // Sync the open modulation panel UI elements
+            modPanelSpeedSeekBar?.progress = preciseModRate.toInt()
+            modPanelDepthSeekBar?.progress = preciseModDepth.toInt()
         }
 
-        // 2. LFO Physics (Always calculate based on CURRENT shape)
+        // 2. LFO Physics
         if (!hasModulation || (preciseModRate == 0f && preciseModDepth == 0f && modDepthTarget == null)) {
             lastComputedModulation = 0f
             return
@@ -288,8 +302,8 @@ class PropertyControl(
             WaveShape.POLY_SINE -> (sin(lfoPhase) + sin(lfoPhase * 1.5)) * 0.5
             WaveShape.RAMP -> ((lfoPhase / (2.0 * Math.PI)) % 1.0 * 2.0 - 1.0)
             WaveShape.TRIANGLE -> {
-                val p = (lfoPhase / (2.0 * Math.PI)) % 1.0
-                if (p < 0.5) (p * 4.0 - 1.0) else (3.0 - p * 4.0)
+                val phase = (lfoPhase / (2.0 * Math.PI)) % 1.0
+                if (phase < 0.5) (phase * 4.0 - 1.0) else (3.0 - phase * 4.0)
             }
             WaveShape.SMOOTH_NOISE -> (sin(lfoPhase) + sin(lfoPhase * 2.3) * 0.5 + sin(lfoPhase * 4.7) * 0.25) / 1.75
             WaveShape.ROUGH_NOISE -> (Math.random() * 2.0 - 1.0)
@@ -298,7 +312,7 @@ class PropertyControl(
         val depthNorm = (preciseModDepth / 1000f).pow(3f)
         val newModValue = (currentWave * depthNorm).toFloat()
 
-        // 3. THE HANDOVER: Cross-fade from the snapshot of the OLD state to the moving NEW state
+        // 3. Blending Logic (Handover)
         lastComputedModulation = if (isAnimating) {
             (modSnapshotValue * (1.0f - ease)) + (newModValue * ease)
         } else {
@@ -497,7 +511,8 @@ class PropertyControl(
 
         val shapeRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 } }
         shapeRow.addView(TextView(context).apply { text="SHAPE"; textSize=10f; setTextColor(Color.LTGRAY); layoutParams=LinearLayout.LayoutParams(120, -2) })
-        shapeRow.addView(Spinner(context).apply {
+
+        modPanelShapeSpinner = Spinner(context).apply {
             adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, WaveShape.values())
             setSelection(modShape.ordinal)
             background.setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_ATOP)
@@ -506,18 +521,21 @@ class PropertyControl(
                 override fun onItemSelected(p0: AdapterView<*>?, p1: View?, pos: Int, p3: Long) { modShape = WaveShape.values()[pos]; (p0?.getChildAt(0) as? TextView)?.setTextColor(Color.WHITE) }
                 override fun onNothingSelected(p0: AdapterView<*>?) {}
             }
-        })
+        }
+        shapeRow.addView(modPanelShapeSpinner)
         floatingPanel?.addView(shapeRow)
-        addSliderToPanel("SPEED", modRate) { updateModRate(it) }
-        addSliderToPanel("DEPTH", modDepth) { updateModDepth(it); updateIndicatorVisuals() }
+
+        modPanelSpeedSeekBar = addSliderToPanel("SPEED", modRate) { updateModRate(it) }
+        modPanelDepthSeekBar = addSliderToPanel("DEPTH", modDepth) { updateModDepth(it); updateIndicatorVisuals() }
+
         rootLayout.addView(floatingPanel)
         activeControl = this
     }
 
-    private fun addSliderToPanel(name: String, current: Int, onChange: (Int) -> Unit) {
+    private fun addSliderToPanel(name: String, current: Int, onChange: (Int) -> Unit): SeekBar {
         val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 10, 0, 10) }
         row.addView(TextView(context).apply { text=name; textSize=10f; setTextColor(Color.LTGRAY); layoutParams=LinearLayout.LayoutParams(120, -2) })
-        row.addView(SeekBar(context).apply {
+        val sb = SeekBar(context).apply {
             max = 1000; progress = current; layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
             thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -525,16 +543,21 @@ class PropertyControl(
                 override fun onStartTrackingTouch(s: SeekBar?) {}
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
-        })
+        }
+        row.addView(sb)
         floatingPanel?.addView(row)
+        return sb
     }
 
-    fun stopAnimation() { isAnimating = false; animTarget = null }
+    fun stopAnimation() { isAnimating = false; animTarget = null; modRateTarget = null; modDepthTarget = null }
 
     fun closeMenu() {
         if (floatingPanel != null) {
             (context as? MainActivity)?.overlayHUD?.removeView(floatingPanel)
             floatingPanel = null
+            modPanelSpeedSeekBar = null
+            modPanelDepthSeekBar = null
+            modPanelShapeSpinner = null
         }
         if (activeControl == this) activeControl = null
     }
@@ -694,11 +717,13 @@ class MainActivity : AppCompatActivity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         glView.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_DOWN) PropertyControl.closeActiveMenu()
-            if (saveConfirmBtn.visibility == View.VISIBLE) {
+            // Clear save confirmation if user touches anywhere
+            if (event.action == MotionEvent.ACTION_DOWN && saveConfirmBtn.visibility == View.VISIBLE) {
                 saveConfirmBtn.visibility = View.GONE
                 pendingSaveIndex = null
             }
+
+            // Pass the event to our unified interaction handler
             handleInteraction(event)
             true
         }
@@ -814,7 +839,13 @@ class MainActivity : AppCompatActivity() {
             }
             lastFingerDist = dist; lastFingerAngle = angle; lastFingerFocusX = focusX; lastFingerFocusY = focusY
         } else if (event.action == MotionEvent.ACTION_UP) {
-            if (event.eventTime - event.downTime < 400) toggleHud()
+            if (PropertyControl.activeControl != null) {
+                // Action 1: If a menu is open, close it.
+                PropertyControl.closeActiveMenu()
+            } else {
+                // Action 2: If no menu is open, toggle the HUD.
+                toggleHud()
+            }
         }
     }
 
@@ -1857,13 +1888,35 @@ class MainActivity : AppCompatActivity() {
 
         private fun renderToRecorder() {
             if (recordSurface != EGL14.EGL_NO_SURFACE && videoRecorder != null) {
-                val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW); val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
+                val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
+                val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
+
                 if (EGL14.eglMakeCurrent(mSavedDisplay, recordSurface, recordSurface, mSavedContext)) {
-                    GLES20.glViewport(0, 0, videoRecorder!!.width, videoRecorder!!.height); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT); drawSimpleTexture(fboTexId)
-                    val timeNow = System.nanoTime(); if (recordStartTimeNs == 0L) recordStartTimeNs = timeNow
-                    EGLExt.eglPresentationTimeANDROID(mSavedDisplay, recordSurface!!, timeNow - recordStartTimeNs); EGL14.eglSwapBuffers(mSavedDisplay, recordSurface); videoRecorder?.drain(false)
+                    // The recorder is fixed at 1920x1080
+                    GLES20.glViewport(0, 0, videoRecorder!!.width, videoRecorder!!.height)
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+                    // Use identityMatrix to match the stable Projector/FBO view
+                    // This ignores the phone's physical tilt (Portrait/Landscape)
+                    GLES20.glUseProgram(simpleProgram)
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
+                    GLES20.glUniform1i(simpleULocs["uTex"] ?: -1, 0)
+
+                    // Critical: Use identityMatrix here, NOT a rotation matrix
+                    GLES20.glUniformMatrix4fv(simpleULocs["uMVPMatrix"] ?: -1, 1, false, identityMatrix, 0)
+
+                    bindCommonAttribs(simpleProgram)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+                    val timeNow = System.nanoTime()
+                    if (recordStartTimeNs == 0L) recordStartTimeNs = timeNow
+                    EGLExt.eglPresentationTimeANDROID(mSavedDisplay, recordSurface!!, timeNow - recordStartTimeNs)
+                    EGL14.eglSwapBuffers(mSavedDisplay, recordSurface)
+                    videoRecorder?.drain(false)
                 }
-                EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext); handleStopRecording()
+                EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
+                handleStopRecording()
             }
         }
 
@@ -1943,8 +1996,8 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
     init {
         // 1. Calculate Safe Dimensions (Multiple of 16)
         // We calculate this once and store it in the public properties
-        width = (rawWidth / 16) * 16
-        height = (rawHeight / 16) * 16
+        width = 1920
+        height = 1080
 
         // 2. Configure Format
         val vFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
