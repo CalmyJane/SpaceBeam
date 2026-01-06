@@ -167,40 +167,37 @@ class PropertyControl(
         private set
 
     // Modulation State
-    var isModActive: Boolean = false
-    var modRate: Int = 0         // 0-1000
+    // "Active" logic is now implicitly defined by modDepth > 0
+    var modRate: Int = 200         // 0-1000
     var modDepth: Int = 0        // 0-1000
     var modShape: WaveShape = WaveShape.SINE
 
     // Physics / Internal
-    var preciseModRate: Float = 0f
+    var preciseModRate: Float = 200f
     var preciseModDepth: Float = 0f
     var lfoPhase: Double = 0.0
     private var lastComputedModulation: Float = 0f
 
-    // The final value used by the renderer
     val computedValue: Float
         get() = applyModulation(getNormalized())
 
-    // --- UI Elements ---
     private var mainSeekBar: SeekBar? = null
     private var modIndicator: View? = null
 
     // --- Snapshot for Presets ---
     data class Snapshot(
         val value: Int,
-        val active: Boolean,
+        val active: Boolean, // Kept for JSON compatibility, logic relies on depth
         val rate: Int,
         val depth: Int,
         val shape: String
     )
 
-    fun getSnapshot(): Snapshot = Snapshot(value, isModActive, modRate, modDepth, modShape.name)
+    fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name)
 
     fun restore(s: Snapshot) {
         setProgress(s.value)
         if (hasModulation) {
-            isModActive = s.active
             updateModRate(s.rate)
             updateModDepth(s.depth)
             try { modShape = WaveShape.valueOf(s.shape) } catch (e: Exception) { modShape = WaveShape.SINE }
@@ -222,9 +219,11 @@ class PropertyControl(
 
     // --- Core Logic ---
     fun update(deltaTime: Float) {
-        if (!hasModulation || !isModActive || (modRate == 0 && modDepth == 0)) {
+        // If no modulation capability or depth is 0, no need to calc, but we reset modulation to 0
+        if (!hasModulation || (modRate == 0 && modDepth == 0)) {
             lastComputedModulation = 0f
-            if (modIndicator?.alpha != 0.4f) modIndicator?.postInvalidate()
+            // If the indicator is still showing "active" visual, redraw it to dim it
+            if (modIndicator?.alpha == 1.0f) modIndicator?.postInvalidate()
             return
         }
 
@@ -256,7 +255,7 @@ class PropertyControl(
     }
 
     private fun applyModulation(baseNorm: Float): Float {
-        if (!hasModulation || !isModActive) return baseNorm
+        if (!hasModulation || modDepth == 0) return baseNorm
         val combined = baseNorm + lastComputedModulation
         if (modMode == ModMode.WRAP) {
             return combined - floor(combined)
@@ -270,17 +269,11 @@ class PropertyControl(
     // --- Setters ---
     fun setProgress(v: Int) {
         val clamped = v.coerceIn(min, max)
-
-        // Always update the data model immediately
         value = clamped
         preciseValue = clamped.toFloat()
-
-        // Only push back to UI if the UI isn't already at this value
-        // This check prevents infinite loops between UI Listener -> setProgress -> UI Update
         if (mainSeekBar != null && mainSeekBar!!.progress != clamped) {
             mainSeekBar!!.progress = clamped
         }
-
         onValueChanged?.invoke(clamped)
     }
 
@@ -292,22 +285,19 @@ class PropertyControl(
     fun updateModDepth(v: Int) {
         modDepth = v.coerceIn(0, 1000)
         preciseModDepth = modDepth.toFloat()
+        updateIndicatorVisuals()
     }
 
     fun setAnimatedValue(v: Float) {
         preciseValue = v.coerceIn(min.toFloat(), max.toFloat())
         val intVal = preciseValue.toInt()
-        // Here we can optimize: only call setProgress (which triggers UI) if integer value changed
-        if (intVal != value) {
-            setProgress(intVal)
-        }
+        if (intVal != value) setProgress(intVal)
     }
 
     fun reset() {
         setProgress(defaultValue)
         if (hasModulation) {
-            isModActive = false
-            updateModRate(0)
+            updateModRate(200)
             updateModDepth(0)
             modShape = WaveShape.SINE
             updateIndicatorVisuals()
@@ -342,7 +332,6 @@ class PropertyControl(
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 55)
         }
 
-        // 1. Create the SeekBar
         val sb = SeekBar(context).apply {
             max = this@PropertyControl.max
             progress = value
@@ -354,30 +343,20 @@ class PropertyControl(
             splitTrack = false
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-
-        // 2. Assign to class property strictly
         this.mainSeekBar = sb
 
-        // 3. Robust Touch Listener (Fixes ScrollView conflict)
         sb.setOnTouchListener { v, event ->
             v.parent.requestDisallowInterceptTouchEvent(true)
             if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_UP) {
                 v.parent.requestDisallowInterceptTouchEvent(false)
             }
-            v.onTouchEvent(event) // Manually trigger standard logic
-            true // Consume the event so the ScrollView doesn't get it
+            v.onTouchEvent(event)
+            true
         }
 
-        // 4. Set Listener explicitly outside apply block
         sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                // Log everything to debug
-                // Log.d("PROP_CTRL_RAW", "$id -> $p (User: $fromUser)")
-
-                if (fromUser) {
-                    Log.d("PROP_CTRL", "$id -> $p")
-                    setProgress(p)
-                }
+                if (fromUser) setProgress(p)
             }
             override fun onStartTrackingTouch(s: SeekBar?) {}
             override fun onStopTrackingTouch(s: SeekBar?) {}
@@ -393,19 +372,24 @@ class PropertyControl(
                     val cy = height / 2f
                     val r = (Math.min(width, height) / 2f) - 2f
 
+                    val active = modDepth > 0
+
+                    // --- DRAW RING ---
                     paint.style = Paint.Style.STROKE
                     paint.strokeWidth = 3f
-                    paint.color = if (isModActive) Color.CYAN else Color.DKGRAY
-                    paint.alpha = if (isModActive) 255 else 100
+                    paint.color = Color.WHITE
+                    // Always fully visible ring
+                    paint.alpha = 255
                     canvas.drawCircle(cx, cy, r, paint)
 
+                    // --- DRAW DOT ---
                     paint.style = Paint.Style.FILL
-                    val dotColor = if (isModActive) Color.WHITE else Color.LTGRAY
-                    val dotAlpha = if (isModActive) 255 else 80
-                    paint.color = dotColor; paint.alpha = dotAlpha
+                    // White if active (Depth > 0), Gray if inactive
+                    paint.color = if (active) Color.WHITE else Color.LTGRAY
+                    paint.alpha = if (active) 255 else 100
 
                     var dotRadius = r * 0.3f
-                    if (isModActive && modDepth > 0) {
+                    if (active) {
                         val depthN = getModDepthNormalized().coerceAtLeast(0.001f)
                         val rawWave = lastComputedModulation / depthN
                         val sizeFactor = ((rawWave + 1.0) / 2.0) * 0.8 + 0.1
@@ -426,11 +410,14 @@ class PropertyControl(
     private fun updateIndicatorVisuals() { modIndicator?.invalidate() }
 
     private fun showModulationDialog() {
+        val displayMetrics = context.resources.displayMetrics
+        val dialogWidth = (displayMetrics.widthPixels * 0.50).toInt()
+
         val dialogView = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(40, 30, 40, 30)
             setBackgroundColor(Color.argb(240, 20, 20, 20))
-            layoutParams = ViewGroup.LayoutParams(600, ViewGroup.LayoutParams.WRAP_CONTENT)
+            layoutParams = ViewGroup.LayoutParams(dialogWidth, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
         val headerRow = LinearLayout(context).apply {
@@ -440,13 +427,12 @@ class PropertyControl(
         }
         val title = TextView(context).apply {
             text = "LFO: $label"; textSize = 18f; setTextColor(Color.WHITE); setTypeface(null, Typeface.BOLD)
-            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2)
+            gravity = Gravity.CENTER_HORIZONTAL
         }
-        val enableSwitch = Switch(context).apply {
-            isChecked = isModActive
-            setOnCheckedChangeListener { _, c -> isModActive = c; updateIndicatorVisuals() }
-        }
-        headerRow.addView(title); headerRow.addView(enableSwitch)
+
+        // Removed the Switch
+        headerRow.addView(title)
         dialogView.addView(headerRow)
 
         val shapeAdapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, WaveShape.values())
@@ -481,16 +467,36 @@ class PropertyControl(
         addSlider("DEPTH", 1000, modDepth) { updateModDepth(it); updateIndicatorVisuals() }
 
         val dialog = androidx.appcompat.app.AlertDialog.Builder(context).setView(dialogView).create()
+        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+
+        // --- IMMERSIVE MODE FIX START ---
+        dialog.window?.setFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+
+        dialog.show()
+
+        dialog.window?.decorView?.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        or View.SYSTEM_UI_FLAG_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                )
+
+        dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+        // --- IMMERSIVE MODE FIX END ---
+
+        // Force Resize logic
         dialog.window?.let { w ->
-            w.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+            w.setLayout(dialogWidth, ViewGroup.LayoutParams.WRAP_CONTENT)
             val params = w.attributes
-            params.gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
-            params.x = 200
+            params.gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            params.x = 100
             w.attributes = params
         }
-        dialog.show()
     }
 }
+
 
 
 // --- MAIN ACTIVITY ---
@@ -1458,27 +1464,26 @@ class MainActivity : AppCompatActivity() {
         // 1. History laden (Max 20 Einträge)
         val prefs = getSharedPreferences("SpaceBeam_RTSP", Context.MODE_PRIVATE)
         val historyKey = "RTSP_HISTORY"
-        // Wir laden das Set. Achtung: Sets sind unsortiert.
         val rawSet = prefs.getStringSet(historyKey, null)
         val historyList = rawSet?.toMutableList() ?: mutableListOf()
-        // Fallback
         if (historyList.isEmpty()) {
             historyList.add("rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4")
         }
+
         // Container für Input + Button
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(40, 20, 40, 0)
         }
+
         // 2. Das Textfeld
         val input = AutoCompleteTextView(this).apply {
             setText(lastRtspUrl)
             setTextColor(Color.BLACK)
             textSize = 16f
             setPadding(20, 30, 20, 30)
-            threshold = 1 // Zeige Vorschläge ab 1 Zeichen (oder via Button)
-            // Prevents keyboard from overlaying everything
+            threshold = 1
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE or
                     android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
@@ -1491,13 +1496,12 @@ class MainActivity : AppCompatActivity() {
         // 3. Der "Dropdown" Pfeil Button
         val arrowBtn = ImageButton(this).apply {
             setImageResource(android.R.drawable.arrow_down_float)
-            setBackgroundColor(Color.LTGRAY) // Leichtes Grau als Hintergrund für Button
+            setBackgroundColor(Color.LTGRAY)
             alpha = 0.7f
             scaleType = ImageView.ScaleType.CENTER_INSIDE
             layoutParams = LinearLayout.LayoutParams(120, 100).apply {
                 leftMargin = 10
             }
-            // Klick: Tastatur verstecken (falls offen) und Liste zeigen
             setOnClickListener {
                 val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
                 imm.hideSoftInputFromWindow(input.windowToken, 0)
@@ -1508,30 +1512,23 @@ class MainActivity : AppCompatActivity() {
         row.addView(input)
         row.addView(arrowBtn)
 
-        // Dialog erstellen
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Enter RTSP/Video URL")
-            .setView(row) // Wir nutzen jetzt 'row' statt nur 'container'
-            .setPositiveButton("Load", null) // Listener wird unten überschrieben
+            .setView(row)
+            .setPositiveButton("Load", null)
             .setNegativeButton("Cancel", null)
             .create()
 
         fun performLoad() {
             val url = input.text.toString().trim()
             if (url.isNotEmpty()) {
-                // --- HISTORY LOGIC (Limit 20) ---
-                // 1. Wenn URL schon drin ist, entfernen (damit sie nach oben/neu kommt, je nach Sortierung)
                 if (historyList.contains(url)) {
                     historyList.remove(url)
                 }
-                // 2. Neue URL hinzufügen
-                historyList.add(0, url) // Vorne anfügen (für Adapter-Logik im RAM)
-
-                // 3. Auf 20 beschränken
+                historyList.add(0, url)
                 while (historyList.size > 20) {
                     historyList.removeAt(historyList.lastIndex)
                 }
-                // 4. Speichern (Als Set konvertieren für SharedPreferences)
                 prefs.edit().putStringSet(historyKey, historyList.toHashSet()).apply()
 
                 startRtsp(url)
@@ -1539,7 +1536,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Keyboard "Done" Handler
         input.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
                 performLoad()
@@ -1547,15 +1543,23 @@ class MainActivity : AppCompatActivity() {
             } else false
         }
 
-        // Item Click Handler (Wenn man einen Vorschlag auswählt)
-        input.setOnItemClickListener { _, _, _, _ ->
-            // Optional: Direkt laden, wenn man draufklickt?
-            // Oder nur Text setzen (Standardverhalten). Lassen wir Standard.
-        }
+        // --- IMMERSIVE MODE FIX START ---
+        dialog.window?.setFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
 
         dialog.show()
 
-        // Button Logik überschreiben
+        dialog.window?.decorView?.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        or View.SYSTEM_UI_FLAG_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                )
+
+        dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+        // --- IMMERSIVE MODE FIX END ---
+
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             performLoad()
         }
