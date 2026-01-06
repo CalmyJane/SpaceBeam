@@ -90,9 +90,14 @@ class ExternalDisplayHelper(
         if (displays.isNotEmpty()) {
             val externalDisplay = displays[0]
             // If we are already showing on this display, do nothing
-            if (presentation?.display?.displayId == externalDisplay.displayId) return
+            if (presentation != null && presentation!!.display.displayId == externalDisplay.displayId) {
+                // Optional: You might want to update the renderer's surface size if the *external* display changed res
+                // but usually, we just return here to be safe.
+                return
+            }
             // Dismiss old one if display changed
-            presentation?.dismiss()
+            try { presentation?.dismiss() } catch(e: Exception) {}
+            presentation = null
             // Create new Presentation
             presentation = CleanFeedPresentation(context, externalDisplay, renderer).apply {
                 try {
@@ -103,7 +108,7 @@ class ExternalDisplayHelper(
             }
         } else {
         // No external display, clean up
-            presentation?.dismiss()
+            try { presentation?.dismiss() } catch(e: Exception) {}
             presentation = null
             renderer.removeExternalSurface()
         }
@@ -313,7 +318,15 @@ class PropertyControl(
     fun getModDepthNormalized(): Float = (preciseModDepth / 1000f).pow(3f)
 
     // --- UI Construction ---
+// Inside PropertyControl class
+
     fun attachTo(parent: ViewGroup) {
+        // 1. Clean up references to old UI elements (from previous orientation)
+        mainSeekBar = null
+        modIndicator = null
+        mainRowLayout = null
+
+        // 2. Create the container
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 2, 0, 6)
@@ -336,13 +349,14 @@ class PropertyControl(
         }
         this.mainRowLayout = row
 
+        // 3. Create NEW SeekBar, but initialize with EXISTING 'value'
         val sb = SeekBar(context).apply {
             max = this@PropertyControl.max
-            progress = value
+            progress = value // <--- CRITICAL: Use the stored value!
             thumb = GradientDrawable().apply {
                 setColor(Color.WHITE)
-                setSize(30, 30)      // Size of the circle
-                cornerRadius = 15f   // Half of size = perfect circle
+                setSize(30, 30)
+                cornerRadius = 15f
             }
             thumbOffset = 0
             splitTrack = false
@@ -350,7 +364,6 @@ class PropertyControl(
         }
         this.mainSeekBar = sb
 
-        // Slider Interaction Logic
         sb.setOnTouchListener { v, event ->
             v.parent.requestDisallowInterceptTouchEvent(true)
             if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_DOWN) {
@@ -375,6 +388,7 @@ class PropertyControl(
 
         row.addView(sb)
 
+        // 4. Re-create Modulation Indicator if needed
         if (hasModulation) {
             modIndicator = object : View(context) {
                 private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -558,7 +572,7 @@ class MainActivity : AppCompatActivity() {
     lateinit var overlayHUD: FrameLayout
     private lateinit var displayHelper: ExternalDisplayHelper
     private lateinit var axisSb: SeekBar
-    private val controls = mutableListOf<PropertyControl>()
+    private val controls = java.util.concurrent.CopyOnWriteArrayList<PropertyControl>()
     val controlsMap = mutableMapOf<String, PropertyControl>()
     private val presetButtons = mutableMapOf<Int, Button>()
     private lateinit var menuBtn: Button
@@ -607,6 +621,31 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cameraSettingsPanel: LinearLayout
     private lateinit var presetPanel: LinearLayout
     private lateinit var recordControls: LinearLayout
+
+    // Inside MainActivity class
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+
+        // 1. Save State
+        val activeControlId = PropertyControl.activeControl?.id
+        PropertyControl.closeActiveMenu() // Close old popup
+
+        // 2. Clear Views
+        overlayHUD.removeAllViews()
+
+        // 3. Rebuild UI (This now REUSES controls instead of resetting them)
+        setupOverlayHUD()
+        applyReadabilityStyle()
+        updateSidebarVisuals()
+
+        // 4. Restore Menu
+        if (activeControlId != null && controlsMap.containsKey(activeControlId)) {
+            // Slight delay to ensure layout passes are done
+            handler.postDelayed({
+                controlsMap[activeControlId]?.toggleMenu()
+            }, 50)
+        }
+    }
 
     private val mediaPickerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -782,39 +821,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
     fun startCamera() {
-        // 1. Cleanup Media Players
         stopRtsp()
         isRtspMode = false
 
-        // 2. Unbind CameraX
         val cpFuture = ProcessCameraProvider.getInstance(this)
         cpFuture.addListener({
             val provider = cpFuture.get()
             provider.unbindAll()
 
-            // 3. RESET TEXTURE ON GL THREAD [Critical Fix]
-            // We must delete the old texture (potentially locked by an image)
-            // and create a fresh one for the camera.
             glView.queueEvent {
                 renderer.resetVideoTexture()
-
-                // 4. Bind Camera on UI Thread
                 runOnUiThread {
+                    // CRITICAL FIX: Lock Target Rotation to Landscape (90 deg)
+                    // This prevents the camera stream from physically rotating when you turn the phone.
                     val preview = Preview.Builder()
+                        .setTargetRotation(Surface.ROTATION_90)
                         .build()
 
-                    // Connect camera to the FRESH renderer surface
                     preview.setSurfaceProvider { req -> renderer.provideSurface(req) }
 
                     try {
                         provider.bindToLifecycle(this, currentSelector, preview)
                     } catch (e: Exception) {
-                        android.util.Log.e("Camera", "Bind failed", e)
+                        Log.e("Camera", "Bind failed", e)
                     }
                 }
             }
         }, ContextCompat.getMainExecutor(this))
     }
+
     private fun startRtsp(url: String) {
         // 1. Unbind CameraX
         val cpFuture = ProcessCameraProvider.getInstance(this)
@@ -1171,11 +1206,18 @@ class MainActivity : AppCompatActivity() {
             currentGroupContent = content
         }
 
-        // Wrapper to add controls
         fun addControl(c: PropertyControl) {
-            controls.add(c)
-            controlsMap[c.id] = c
-            currentGroupContent?.let { c.attachTo(it) } ?: c.attachTo(menuLayout)
+            if (controlsMap.containsKey(c.id)) {
+                // CASE 1: Control exists (Rotation happened).
+                // Reuse the Logic Object, just attach new Views.
+                val existingControl = controlsMap[c.id]!!
+                currentGroupContent?.let { existingControl.attachTo(it) } ?: existingControl.attachTo(menuLayout)
+            } else {
+                // CASE 2: First boot. Create new.
+                controls.add(c)
+                controlsMap[c.id] = c
+                currentGroupContent?.let { c.attachTo(it) } ?: c.attachTo(menuLayout)
+            }
         }
 
         // --- 1. GEOMETRY ---
@@ -1236,13 +1278,24 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 10)
         }
 
-        val axisCtrl = PropertyControl(this, "AXIS", "COUNT", min = 0, max = 15, defaultValue = 1)
-        controls.add(axisCtrl)
-        controlsMap["AXIS"] = axisCtrl
+        // REUSE LOGIC for Axis Control
+        val axisId = "AXIS"
+        val axisCtrl: PropertyControl
+
+        if (controlsMap.containsKey(axisId)) {
+            axisCtrl = controlsMap[axisId]!!
+            // Re-attach UI for consistency, though Axis uses a custom SeekBar below
+            // We usually don't call attachTo for AXIS because it has custom UI,
+            // but we need the object reference.
+        } else {
+            axisCtrl = PropertyControl(this, axisId, "COUNT", min = 0, max = 15, defaultValue = 1)
+            controls.add(axisCtrl)
+            controlsMap[axisId] = axisCtrl
+        }
 
         axisSb = SeekBar(this).apply {
             max = 25
-            progress = 1
+            progress = axisCtrl.value // Restore value from object
             layoutParams = LinearLayout.LayoutParams(0, 65, 1f)
             thumb = GradientDrawable().apply {
                 setColor(Color.WHITE)
@@ -1268,6 +1321,9 @@ class MainActivity : AppCompatActivity() {
                 alpha = if (axisLocked) 1.0f else 0.4f
             }
         }
+
+        // Ensure renderer matches current state immediately
+        renderer.axisCount = (axisCtrl.value + 1).toFloat()
 
         axisContainer.addView(TextView(this).apply {
             text = "COUNT"; setTextColor(Color.WHITE); textSize = 8f; minWidth = 100; alpha = 0.8f
@@ -2178,7 +2234,9 @@ class MainActivity : AppCompatActivity() {
         // --- Programs ---
         private var kaleidoProgram = 0
         private var simpleProgram = 0
-
+        @Volatile private var isSurfaceReady = false
+        private val mvpMatrix = FloatArray(16)
+        private val identityMatrix = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
         // --- Render State Variables (Restored) ---
         var scrollAccum = 0.0f
         var mRotAccum = 0.0
@@ -2227,6 +2285,9 @@ class MainActivity : AppCompatActivity() {
         private var simpleULocs = mutableMapOf<String, Int>()
         private var viewWidth = 1
         private var viewHeight = 1
+
+        private val FIXED_WIDTH = 1920
+        private val FIXED_HEIGHT = 1080
 
         fun resetPhases() {
             ctx.controls.forEach { it.lfoPhase = 0.0 }
@@ -2287,6 +2348,7 @@ class MainActivity : AppCompatActivity() {
 
         override fun onSurfaceCreated(gl: GL10?, config: GL10EGLConfig?) {
             setupEGL()
+            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
             val fSrc = """#extension GL_OES_EGL_image_external : require
             precision highp float;
@@ -2430,22 +2492,43 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Simple copy shader
-            val fSrcSimple = """
-            precision mediump float;
-            varying vec2 v;
-            uniform sampler2D uTex;
-            void main() { gl_FragColor = texture2D(uTex, v); }
-            """.trimIndent()
+            val vSrcSimple = """
+        attribute vec4 p;
+        attribute vec2 t;
+        varying vec2 v;
+        uniform mat4 uMVPMatrix; 
+        void main() { 
+            gl_Position = uMVPMatrix * p; 
+            v = t; 
+        }
+    """.trimIndent()
 
-            simpleProgram = createProgram(vSrc, fSrcSimple)
-            simpleULocs["uTex"] = GLES20.glGetUniformLocation(simpleProgram, "uTex")
+            val fSrcSimple = """
+        precision mediump float;
+        varying vec2 v;
+        uniform sampler2D uTex;
+        void main() { gl_FragColor = texture2D(uTex, v); }
+    """.trimIndent()
+
+            simpleProgram = createProgram(vSrcSimple, fSrcSimple)
+
+            if (simpleProgram != 0) {
+                simpleULocs["uTex"] = GLES20.glGetUniformLocation(simpleProgram, "uTex")
+                // Get the new Matrix location
+                simpleULocs["uMVPMatrix"] = GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix")
+            }
 
             // Setup Textures & FBO
             cameraTexId = createOESTex()
             surfaceTexture = SurfaceTexture(cameraTexId)
-            initFBO(fboWidth, fboHeight)
+            initFBO(FIXED_WIDTH, FIXED_HEIGHT)
+
+            // Init standard buffers
+            GLES20.glUseProgram(kaleidoProgram)
+            uLocs["uA"]?.let { GLES20.glUniform1f(it, FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat()) }
             pBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)).position(0) }
             tBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)).position(0) }
+
             ctx.runOnUiThread { ctx.startCamera() }
         }
 
@@ -2476,19 +2559,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
+            // Prevent 0 dimension errors
+            if (w == 0 || h == 0) return
+
             viewWidth = w
             viewHeight = h
-
-            // FIX: Re-initialize FBO to match the new screen dimensions/orientation
-            // This prevents the "squashed" look
-            initFBO(w, h)
-
-            // Update the aspect ratio uniform immediately
-            GLES20.glUseProgram(kaleidoProgram)
-            uLocs["uA"]?.let { GLES20.glUniform1f(it, w.toFloat() / h.toFloat()) }
+            isSurfaceReady = true
         }
 
         override fun onDrawFrame(gl: GL10?) {
+            if (!isSurfaceReady) return
             val now = System.nanoTime()
             deltaTime = (now - lastTime) / 1e9f
             lastTime = now
@@ -2497,8 +2577,11 @@ class MainActivity : AppCompatActivity() {
             ctx.controls.forEach { it.update(deltaTime) }
 
             // Safety checks
-            if (!ctx.controlsMap.containsKey("S_SHAPE") || !uLocs.containsKey("uSShape")) return
-            try { surfaceTexture?.updateTexImage() } catch (e: Exception) { return }
+            try {
+                surfaceTexture?.updateTexImage()
+            } catch (e: Exception) {
+                return
+            }
             manageSurfaces()
 
             updateMovementPhysics(deltaTime) // Global flight physics
@@ -2526,7 +2609,7 @@ class MainActivity : AppCompatActivity() {
 
         private fun renderToFBO() {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-            GLES20.glViewport(0, 0, fboWidth, fboHeight)
+            GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glUseProgram(kaleidoProgram)
 
@@ -2544,7 +2627,7 @@ class MainActivity : AppCompatActivity() {
             // 2. Calculate Camera Image Scaling (uCamScale)
             // This ensures the camera image fills the screen without stretching
             val camRatio = 1.777f // 16:9 Standard Camera
-            val screenRatio = widthF / heightF
+            val screenRatio = FIXED_WIDTH / FIXED_HEIGHT
 
             var scaleX = 1.0f
             var scaleY = 1.0f
@@ -2620,9 +2703,39 @@ class MainActivity : AppCompatActivity() {
         }
 
         private fun renderToScreen() {
+            if (simpleProgram == 0) return
+
             GLES20.glViewport(0, 0, viewWidth, viewHeight)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            drawSimpleTexture(fboTexId)
+
+            val isPortrait = viewWidth < viewHeight
+
+            // 1. Reset Matrix
+            android.opengl.Matrix.setIdentityM(mvpMatrix, 0)
+
+            if (isPortrait) {
+                // 2. Rotate -90 degrees to make landscape image stand upright
+                android.opengl.Matrix.rotateM(mvpMatrix, 0, -90f, 0f, 0f, 1f)
+
+                // 3. Scale correction (Fill Screen / Center Crop)
+                val imageAspect = FIXED_HEIGHT.toFloat() / FIXED_WIDTH.toFloat() // 1080/1920
+                val screenAspect = viewWidth.toFloat() / viewHeight.toFloat()
+
+                // This math ensures the image covers the screen without squeezing
+                val scaleX = imageAspect / screenAspect
+                android.opengl.Matrix.scaleM(mvpMatrix, 0, scaleX, 1f, 1f)
+            }
+
+            GLES20.glUseProgram(simpleProgram)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
+
+            // SAFE uniform calls (no '!!')
+            GLES20.glUniform1i(simpleULocs["uTex"] ?: -1, 0)
+            GLES20.glUniformMatrix4fv(simpleULocs["uMVPMatrix"] ?: -1, 1, false, mvpMatrix, 0)
+
+            bindCommonAttribs(simpleProgram)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
 
         private fun renderToExternal() {
@@ -2663,10 +2776,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         private fun drawSimpleTexture(texId: Int) {
+            if (simpleProgram == 0) return
+
             GLES20.glUseProgram(simpleProgram)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
-            GLES20.glUniform1i(simpleULocs["uTex"]!!, 0)
+
+            // SAFE uniform calls - Pass Identity Matrix (Normal orientation)
+            GLES20.glUniform1i(simpleULocs["uTex"] ?: -1, 0)
+            GLES20.glUniformMatrix4fv(simpleULocs["uMVPMatrix"] ?: -1, 1, false, identityMatrix, 0)
+
             bindCommonAttribs(simpleProgram)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -2680,14 +2799,40 @@ class MainActivity : AppCompatActivity() {
             GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
         }
 
-        private fun createProgram(v: String, f: String): Int {
-            val p = GLES20.glCreateProgram()
-            GLES20.glAttachShader(p, compile(GLES20.GL_VERTEX_SHADER, v))
-            GLES20.glAttachShader(p, compile(GLES20.GL_FRAGMENT_SHADER, f))
-            GLES20.glLinkProgram(p)
-            return p
+        private fun createProgram(vSrc: String, fSrc: String): Int {
+            val vShader = compile(GLES20.GL_VERTEX_SHADER, vSrc)
+            val fShader = compile(GLES20.GL_FRAGMENT_SHADER, fSrc)
+            if (vShader == 0 || fShader == 0) return 0 // Failed
+
+            val prog = GLES20.glCreateProgram()
+            GLES20.glAttachShader(prog, vShader)
+            GLES20.glAttachShader(prog, fShader)
+            GLES20.glLinkProgram(prog)
+
+            // Check Link Status
+            val linkStatus = IntArray(1)
+            GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, linkStatus, 0)
+            if (linkStatus[0] == 0) {
+                Log.e("GL", "Link Failed: " + GLES20.glGetProgramInfoLog(prog))
+                GLES20.glDeleteProgram(prog)
+                return 0
+            }
+            return prog
         }
-        private fun compile(t: Int, s: String) = GLES20.glCreateShader(t).apply { GLES20.glShaderSource(this, s); GLES20.glCompileShader(this) }
+
+        private fun compile(type: Int, src: String): Int {
+            val shader = GLES20.glCreateShader(type)
+            GLES20.glShaderSource(shader, src)
+            GLES20.glCompileShader(shader)
+            val compiled = IntArray(1)
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
+            if (compiled[0] == 0) {
+                Log.e("GL", "Compile Failed: " + GLES20.glGetShaderInfoLog(shader))
+                GLES20.glDeleteShader(shader)
+                return 0
+            }
+            return shader
+        }
         private fun createOESTex(): Int { val t=IntArray(1); GLES20.glGenTextures(1,t,0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,t[0]); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MIN_FILTER,GLES20.GL_LINEAR); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MAG_FILTER,GLES20.GL_LINEAR); return t[0] }
 
         private fun setupEGL() {
