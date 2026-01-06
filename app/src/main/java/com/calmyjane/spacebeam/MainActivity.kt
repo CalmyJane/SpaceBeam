@@ -776,183 +776,133 @@ class MainActivity : AppCompatActivity() {
         ); return BitmapDrawable(resources, b)
     }
 
-
     private fun setupOverlayHUD() {
-        overlayHUD = FrameLayout(this).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
-
-        flashOverlay = View(this).apply {
-            setBackgroundColor(Color.WHITE); alpha = 0f; layoutParams =
-            FrameLayout.LayoutParams(-1, -1)
+        // 1. Initialize Main Container
+        overlayHUD = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(-1, -1)
         }
 
-        val logoView = ImageView(this).apply {
-            setImageDrawable(createLogoDrawable()); alpha = 0.4f; layoutParams =
-            FrameLayout.LayoutParams(180, 180)
-                .apply { gravity = Gravity.TOP or Gravity.START; topMargin = 40; leftMargin = 40 }
-        }
+        // 2. Create Basic Layers
+        flashOverlay = createFlashView()
+        val logoView = createLogoView()
 
+        // 3. Build UI Sections
+        setupLeftSidebar()           // Parameter menu and toggle button
+        val cameraPanel = createCameraSettingsPanel()
+        val recordPanel = createRecordControls()
+        val presetPanel = createPresetPanel()
+        val readabilityBtn = createReadabilityButton()
+        val resetBtn = createResetButton()
+
+        // 4. Assemble the HUD
+        overlayHUD.addView(flashOverlay)
+        overlayHUD.addView(logoView)
+        overlayHUD.addView(leftHUDContainer) // Created in setupLeftSidebar()
+
+        // Add Top/Bottom controls with specific layout params
+        overlayHUD.addView(recordPanel, FrameLayout.LayoutParams(-2, -2).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30
+        })
+        overlayHUD.addView(cameraPanel, FrameLayout.LayoutParams(-2, -2).apply {
+            gravity = Gravity.TOP or Gravity.END; topMargin = 40; rightMargin = 40
+        })
+        overlayHUD.addView(presetPanel, FrameLayout.LayoutParams(-2, -2).apply {
+            gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 180
+        })
+        overlayHUD.addView(readabilityBtn)
+        overlayHUD.addView(resetBtn)
+
+        // 5. Finalize
+        addContentView(overlayHUD, ViewGroup.LayoutParams(-1, -1))
+        updateSidebarVisuals()
+    }
+
+    private fun setupLeftSidebar() {
+        // Container for Panel + Toggle Button
         leftHUDContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; layoutParams =
-            FrameLayout.LayoutParams(-2, -1).apply { gravity = Gravity.START }
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = FrameLayout.LayoutParams(-2, -1).apply { gravity = Gravity.START }
         }
 
+        // The ScrollView
         parameterPanel = ScrollView(this).apply {
-
-            layoutParams = LinearLayout.LayoutParams(850, -1); layoutDirection =
-            View.LAYOUT_DIRECTION_RTL; isVerticalScrollBarEnabled = true; scrollBarStyle =
-            View.SCROLLBARS_INSIDE_OVERLAY
+            layoutParams = LinearLayout.LayoutParams(850, -1)
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            isVerticalScrollBarEnabled = true
+            scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
         }
 
+        // The internal layout for items
         val menuLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(25, 20, 10, 240)
             layoutDirection = View.LAYOUT_DIRECTION_LTR
-            // Enable smooth animations when groups expand/collapse
-            layoutTransition =
-                LayoutTransition().apply { enableTransitionType(LayoutTransition.CHANGING) }
+            layoutTransition = LayoutTransition().apply { enableTransitionType(LayoutTransition.CHANGING) }
         }
         parameterPanel.addView(menuLayout)
 
+        // The Toggle Button ("<")
         parameterToggleContainer = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(140, -1)
             parameterToggleBtn = Button(this@MainActivity).apply {
-                text =
-                    "<"; setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha =
-                0.8f; textSize = 32f; layoutParams = FrameLayout.LayoutParams(
-                -1,
-                400,
-                Gravity.CENTER_VERTICAL
-            ); setOnClickListener { toggleMenu() }
+                text = "<"
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.TRANSPARENT)
+                alpha = 0.8f
+                textSize = 32f
+                layoutParams = FrameLayout.LayoutParams(-1, 400, Gravity.CENTER_VERTICAL)
+                setOnClickListener { toggleMenu() }
             }
             addView(parameterToggleBtn)
         }
-        leftHUDContainer.addView(parameterPanel); leftHUDContainer.addView(parameterToggleContainer)
+
+        leftHUDContainer.addView(parameterPanel)
+        leftHUDContainer.addView(parameterToggleContainer)
+
+        // Populate the actual menu items
+        populateParameterGroups(menuLayout)
+    }
+
+    private fun populateParameterGroups(menuLayout: LinearLayout) {
+        // Helper var to track where controls are added
         var currentGroupContent: LinearLayout? = null
-        // Helper to create a collapsible section
-// Helper to create a collapsible section
+
+        // Local Helper to create collapsible sections
         fun createGroup(title: String, startOpen: Boolean = false) {
-            val groupContainer = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                // Reduced bottom margin
-                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8 }
-                layoutTransition = LayoutTransition()
-            }
-
-            // The Header Bar - Thinner and cleaner
-            val header = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                // Tighter padding inside header
-                setPadding(15, 12, 15, 12)
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#33FFFFFF")) // Visible glass
-                    cornerRadius = 8f
-                    setStroke(1, Color.parseColor("#44FFFFFF"))
-                }
-            }
-
-            val arrow = TextView(this).apply {
-                text = "▶"
-                textSize = 9f
-                setTextColor(Color.LTGRAY)
-                layoutParams = LinearLayout.LayoutParams(50, -2)
-                rotation = if (startOpen) 90f else 0f
-            }
-
-            val label = TextView(this).apply {
-                text = title
-                textSize = 10f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(Color.WHITE)
-                letterSpacing = 0.15f
-            }
-            header.addView(arrow)
-            header.addView(label)
-
-            // The Content Area
-            val content = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                visibility = if (startOpen) View.VISIBLE else View.GONE
-                // Tighter padding for content area
-                setPadding(6, 6, 6, 6)
-            }
-
-            // --- RESTORED CLICK LISTENER ---
-            header.setOnClickListener {
-                val isVisible = content.visibility == View.VISIBLE
-                if (isVisible) {
-                    content.visibility = View.GONE
-                    arrow.animate().rotation(0f).setDuration(200).start()
-                } else {
-                    content.visibility = View.VISIBLE
-                    arrow.animate().rotation(90f).setDuration(200).start()
-                }
-            }
-
-            groupContainer.addView(header)
-            groupContainer.addView(content)
-            menuLayout.addView(groupContainer)
+            val (container, content) = createCollapsibleGroupView(title, startOpen)
+            menuLayout.addView(container)
             currentGroupContent = content
         }
-        // --- 1. GEOMETRY GROUP (Includes Axis) ---
-        createGroup("GEOMETRY", startOpen = true)
-        val axisContainer =
-            LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 10) }
-        val axisCtrl =
-            PropertyControl(this, "AXIS", "COUNT", min = 0, max = 15, defaultValue = 1).apply {
-            }
-        controls.add(axisCtrl); controlsMap["AXIS"] = axisCtrl
-        axisSb = SeekBar(this).apply {
-            max = 25; progress = 1; layoutParams = LinearLayout.LayoutParams(0, 65, 1f); thumb =
-            GradientDrawable().apply { setColor(Color.WHITE); setSize(16, 32) }
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
-                    renderer.axisCount = (p + 1).toFloat()
-                    axisCtrl.setProgress(p)
-                }
-                override fun onStartTrackingTouch(s: SeekBar?) {};
-                override fun onStopTrackingTouch(s: SeekBar?) {}
-            })
-        }
-        lockBtn = Button(this).apply {
-            background = createLockDrawable(axisLocked); layoutParams =
-            LinearLayout.LayoutParams(80, 80).apply { leftMargin = 20 }
-            setOnClickListener {
-                axisLocked = !axisLocked; background = createLockDrawable(axisLocked); alpha =
-                if (axisLocked) 1.0f else 0.4f
-            }
-            alpha = if (axisLocked) 1.0f else 0.4f
-        }
-        axisContainer.addView(TextView(this).apply {
-            text = "COUNT"; setTextColor(Color.WHITE); textSize = 8f; minWidth = 100; alpha = 0.8f
-        }); axisContainer.addView(axisSb); axisContainer.addView(lockBtn)
-        // Add Axis to the first group
-        currentGroupContent?.addView(axisContainer)
 
-        // Wrapper to add to the current collapsible group
+        // Wrapper to add controls
         fun addControl(c: PropertyControl) {
             controls.add(c)
             controlsMap[c.id] = c
-            // Attach to the currently active collapsible content view
             currentGroupContent?.let { c.attachTo(it) } ?: c.attachTo(menuLayout)
         }
 
-        // 2. 3D Controls
+        // --- 1. GEOMETRY ---
+        createGroup("GEOMETRY", startOpen = true)
+        setupGeometrySpecifics(currentGroupContent!!) // Extracted logic for Axis/Lock
+
+        // --- 2. 3D ---
         createGroup("3D")
-        addControl(PropertyControl(this,"3D_MIX","STRENGTH",defaultValue = 0,hasModulation = true))
-        addControl(PropertyControl(this,"S_SHAPE","SHAPE",defaultValue = 0,hasModulation = true))
-        addControl(PropertyControl(this,"S_SPEED","SPEED",defaultValue = 500,hasModulation = true))
+        addControl(PropertyControl(this, "3D_MIX", "STRENGTH", defaultValue = 0, hasModulation = true))
+        addControl(PropertyControl(this, "S_SHAPE", "SHAPE", defaultValue = 0, hasModulation = true))
+        addControl(PropertyControl(this, "S_SPEED", "SPEED", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "S_FOV", "FISHEYE", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "T_HUE_STR", "RAINBOW STR", defaultValue = 0))
         addControl(PropertyControl(this, "T_HUE_POS", "RAINBOW POS", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
         addControl(PropertyControl(this, "T_WAVE_STR", "WAVE STR", defaultValue = 0))
         addControl(PropertyControl(this, "T_WAVE_POS", "WAVE POS", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
 
+        // --- 3. MORPHING ---
         createGroup("MORPHING")
         addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
         addControl(PropertyControl(this, "TWIST", "VORTEX", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
         addControl(PropertyControl(this, "FLUX", "FLUX", defaultValue = 0, hasModulation = true))
 
+        // --- 4. MASTER TRANSFORM ---
         createGroup("MASTER TRANSFORM")
         addControl(PropertyControl(this, "M_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
         addControl(PropertyControl(this, "M_ROT", "ROTATION", defaultValue = 500))
@@ -963,66 +913,77 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl(this, "M_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "M_RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
 
+        // --- 5. CAMERA TRANSFORM ---
         createGroup("CAMERA TRANSFORM")
+        setupCameraOrientationControls(currentGroupContent!!) // Flip/Rotate Icons
+        addControl(PropertyControl(this, "C_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl(this, "C_ROT", "ROTATION", defaultValue = 500))
+        addControl(PropertyControl(this, "WARP", "WARP DISTORT", defaultValue = 0))
+        addControl(PropertyControl(this, "C_ZOOM", "ZOOM", defaultValue = 300, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "C_TX", "MOVE X", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "C_TY", "MOVE Y", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "C_TILTX", "TILT X", defaultValue = 500, hasModulation = true))
+        addControl(PropertyControl(this, "C_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
+        addControl(PropertyControl(this, "RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+
+        // --- 6. COLOR ---
+        createGroup("COLOR")
+        addControl(PropertyControl(this, "BRIT", "BRIGHTNESS", defaultValue = 500))
+        addControl(PropertyControl(this, "HUE", "HUE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl(this, "NEG", "NEGATIVE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "GLOW", "GLOW", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "CONTRAST", "CONTRAST", defaultValue = 500))
+        addControl(PropertyControl(this, "VIBRANCE", "SATURATION", defaultValue = 500))
+    }
+
+    private fun setupGeometrySpecifics(parent: LinearLayout) {
+        val axisContainer = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 10)
+        }
+
+        val axisCtrl = PropertyControl(this, "AXIS", "COUNT", min = 0, max = 15, defaultValue = 1)
+        controls.add(axisCtrl)
+        controlsMap["AXIS"] = axisCtrl
+
+        axisSb = SeekBar(this).apply {
+            max = 25
+            progress = 1
+            layoutParams = LinearLayout.LayoutParams(0, 65, 1f)
+            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(16, 32) }
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
+                    renderer.axisCount = (p + 1).toFloat()
+                    axisCtrl.setProgress(p)
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+
+        lockBtn = Button(this).apply {
+            background = createLockDrawable(axisLocked)
+            layoutParams = LinearLayout.LayoutParams(80, 80).apply { leftMargin = 20 }
+            alpha = if (axisLocked) 1.0f else 0.4f
+            setOnClickListener {
+                axisLocked = !axisLocked
+                background = createLockDrawable(axisLocked)
+                alpha = if (axisLocked) 1.0f else 0.4f
+            }
+        }
+
+        axisContainer.addView(TextView(this).apply {
+            text = "COUNT"; setTextColor(Color.WHITE); textSize = 8f; minWidth = 100; alpha = 0.8f
+        })
+        axisContainer.addView(axisSb)
+        axisContainer.addView(lockBtn)
+        parent.addView(axisContainer)
+    }
+
+    private fun setupCameraOrientationControls(parent: LinearLayout) {
         val orientationRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding(0, 10, 0, 20)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120)
-        }
-
-        // Helper: Zeichnet die Icons live
-        fun createCustomIcon(type: Int): BitmapDrawable {
-            val size = 100
-            val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-            val c = Canvas(b)
-            val paint = Paint().apply {
-                color = Color.WHITE
-                style = Paint.Style.STROKE
-                strokeCap = Paint.Cap.ROUND
-                strokeJoin = Paint.Join.ROUND
-                isAntiAlias = true
-            }
-            val center = size / 2f
-            when (type) {
-                0 -> { // FLIP X (Horizontal)
-                    paint.strokeWidth = 9f
-                    val range = 20f
-                    c.drawLine(center - range, center, center + range, center, paint)
-                    val p = Path().apply {
-                        moveTo(center - 8, center - 12); lineTo(center - range - 4, center); lineTo(center - 8, center + 12)
-                        moveTo(center + 8, center - 12); lineTo(center + range + 4, center); lineTo(center + 8, center + 12)
-                    }
-                    c.drawPath(p, paint)
-                }
-                1 -> { // FLIP Y (Vertical)
-                    paint.strokeWidth = 9f
-                    val range = 20f
-                    c.drawLine(center, center - range, center, center + range, paint)
-                    val p = Path().apply {
-                        moveTo(center - 12, center - 8); lineTo(center, center - range - 4); lineTo(center + 12, center - 8)
-                        moveTo(center - 12, center + 8); lineTo(center, center + range + 4); lineTo(center + 12, center + 8)
-                    }
-                    c.drawPath(p, paint)
-                }
-                2 -> { // ROTATE
-                    paint.strokeWidth = 9f
-                    val r = 24f
-                    val box = RectF(center - r, center - r, center + r, center + r)
-                    c.drawArc(box, 180f + 20f, 140f, false, paint)
-                    c.drawArc(box, 0f + 20f, 140f, false, paint)
-                    val p = Path()
-                    val endX1 = center + (r * cos(Math.toRadians(340.0))).toFloat()
-                    val endY1 = center + (r * sin(Math.toRadians(340.0))).toFloat()
-                    p.moveTo(endX1 - 5f, endY1 - 15f); p.lineTo(endX1, endY1); p.lineTo(endX1 - 18f, endY1 - 2f)
-                    val endX2 = center + (r * cos(Math.toRadians(160.0))).toFloat()
-                    val endY2 = center + (r * sin(Math.toRadians(160.0))).toFloat()
-                    p.moveTo(endX2 + 5f, endY2 + 15f); p.lineTo(endX2, endY2); p.lineTo(endX2 + 18f, endY2 + 2f)
-                    paint.style = Paint.Style.STROKE
-                    c.drawPath(p, paint)
-                }
-            }
-            return BitmapDrawable(resources, b)
         }
 
         fun createParamBtn(icon: BitmapDrawable, action: () -> Unit): ImageButton {
@@ -1041,34 +1002,18 @@ class MainActivity : AppCompatActivity() {
         orientationRow.addView(flipXBtn)
         orientationRow.addView(flipYBtn)
         orientationRow.addView(rot180Btn)
-        currentGroupContent?.addView(orientationRow)
+        parent.addView(orientationRow)
+    }
 
-        addControl(PropertyControl(this, "C_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "C_ROT", "ROTATION", defaultValue = 500))
-        addControl(PropertyControl(this, "WARP", "WARP DISTORT", defaultValue = 0))
-        addControl(PropertyControl(this, "C_ZOOM", "ZOOM", defaultValue = 300, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-        addControl(PropertyControl(this, "C_TX", "MOVE X", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-        addControl(PropertyControl(this, "C_TY", "MOVE Y", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-        addControl(PropertyControl(this, "C_TILTX", "TILT X", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "C_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-
-        createGroup("COLOR")
-        addControl(PropertyControl(this, "BRIT", "BRIGHTNESS", defaultValue = 500))
-        addControl(PropertyControl(this, "HUE", "HUE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "NEG", "NEGATIVE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-        addControl(PropertyControl(this, "GLOW", "GLOW", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-        addControl(PropertyControl(this, "CONTRAST", "CONTRAST", defaultValue = 500))
-        addControl(PropertyControl(this, "VIBRANCE", "SATURATION", defaultValue = 500))
-
-// --- UI BUTTONS & LAYOUTS ---
+    private fun createCameraSettingsPanel(): LinearLayout {
         cameraSettingsPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(10, 20, 10, 20)
         }
 
-        fun createSideBtn(action: () -> Unit) = ImageButton(this).apply {
+        fun createSideBtn(resId: Int, action: () -> Unit) = ImageButton(this).apply {
+            setImageResource(resId)
             setColorFilter(Color.WHITE)
             setBackgroundColor(Color.TRANSPARENT)
             alpha = 0.3f
@@ -1076,25 +1021,29 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { action(); updateSidebarVisuals() }
         }
 
-        cameraSettingsPanel.addView(createSideBtn {
+        // Switch Camera
+        cameraSettingsPanel.addView(createSideBtn(android.R.drawable.ic_menu_camera) {
             currentSelector = if (currentSelector == CameraSelector.DEFAULT_BACK_CAMERA) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
             startCamera()
-        }.apply { setImageResource(android.R.drawable.ic_menu_camera) })
+        })
 
-        cameraSettingsPanel.addView(createSideBtn {
-            // Open System File Picker for Images and Videos
+        // Gallery / File Picker
+        cameraSettingsPanel.addView(createSideBtn(android.R.drawable.ic_menu_gallery) {
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
                 type = "*/*"
                 putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
             }
             mediaPickerLauncher.launch(intent)
-        }.apply {
-            setImageResource(android.R.drawable.ic_menu_gallery)
         })
 
-        cameraSettingsPanel.addView(createSideBtn { showRtspDialog() }.apply { setImageResource(android.R.drawable.ic_menu_compass) })
+        // RTSP Dialog
+        cameraSettingsPanel.addView(createSideBtn(android.R.drawable.ic_menu_compass) { showRtspDialog() })
 
+        return cameraSettingsPanel
+    }
+
+    private fun createRecordControls(): LinearLayout {
         recordControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -1120,29 +1069,27 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(150, 150).apply { leftMargin = 40 }
             setOnClickListener { toggleRecording() }
         }
-        recordControls.addView(photoBtn); recordControls.addView(recordBtn)
 
+        recordControls.addView(photoBtn)
+        recordControls.addView(recordBtn)
+        return recordControls
+    }
+
+    private fun createPresetPanel(): LinearLayout {
         presetPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(15, 10, 15, 30)
         }
 
+        // Transition Time Slider
         val transContainer = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(10, 0, 10, 10)
         }
-
-        val clockIcon = ImageView(this).apply {
-            setImageDrawable(createClockDrawable())
-            alpha = 0.5f
-            layoutParams = LinearLayout.LayoutParams(45, 45).apply { rightMargin = 10 }
-        }
-
         val timeLabel = TextView(this).apply {
             text = "1.0s"; setTextColor(Color.WHITE); textSize = 9f; setPadding(4, 0, 8, 0)
         }
-
         val transSeekBar = SeekBar(this).apply {
             max = 1000; progress = 333
             layoutParams = LinearLayout.LayoutParams(500, 45)
@@ -1156,55 +1103,192 @@ class MainActivity : AppCompatActivity() {
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
         }
-        transContainer.addView(clockIcon); transContainer.addView(timeLabel); transContainer.addView(transSeekBar)
+        transContainer.addView(ImageView(this).apply {
+            setImageDrawable(createClockDrawable()); alpha = 0.5f
+            layoutParams = LinearLayout.LayoutParams(45, 45).apply { rightMargin = 10 }
+        })
+        transContainer.addView(timeLabel)
+        transContainer.addView(transSeekBar)
 
+        // Preset Buttons
         val presetRow = FrameLayout(this)
         val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
 
-        fun createPresetBtn(idx: Int) = Button(this).apply {
-            text = idx.toString(); setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.8f
-            textSize = 16f; layoutParams = LinearLayout.LayoutParams(80, 140)
-            setPadding(0, 0, 0, 20)
-            setOnClickListener { applyPreset(idx) }
-            setOnLongClickListener { pendingSaveIndex = idx; saveConfirmBtn.visibility = View.VISIBLE; saveConfirmBtn.text = "SAVE $idx?"; true }
+        (8 downTo 1).forEach { idx ->
+            val b = Button(this).apply {
+                text = idx.toString()
+                setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.8f
+                textSize = 16f; layoutParams = LinearLayout.LayoutParams(80, 140)
+                setPadding(0, 0, 0, 20)
+                setOnClickListener { applyPreset(idx) }
+                setOnLongClickListener {
+                    pendingSaveIndex = idx
+                    saveConfirmBtn.visibility = View.VISIBLE
+                    saveConfirmBtn.text = "SAVE $idx?"
+                    true
+                }
+            }
+            presetButtons[idx] = b
+            btnRow.addView(b)
         }
 
-        (8 downTo 1).forEach { val b = createPresetBtn(it); presetButtons[it] = b; btnRow.addView(b) }
-
         saveConfirmBtn = Button(this).apply {
-            visibility = View.GONE; setTextColor(Color.BLACK); textSize = 12f; setTypeface(null, Typeface.BOLD)
+            visibility = View.GONE
+            setTextColor(Color.BLACK); textSize = 12f; setTypeface(null, Typeface.BOLD)
             background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = 8f }
             layoutParams = FrameLayout.LayoutParams(250, 100, Gravity.CENTER)
             setOnClickListener { pendingSaveIndex?.let { savePreset(it) }; visibility = View.GONE }
         }
 
-        presetRow.addView(btnRow); presetRow.addView(saveConfirmBtn)
-        presetPanel.addView(transContainer); presetPanel.addView(presetRow)
+        presetRow.addView(btnRow)
+        presetRow.addView(saveConfirmBtn)
+        presetPanel.addView(transContainer)
+        presetPanel.addView(presetRow)
 
-        readabilityBtn = ImageButton(this).apply {
-            setImageResource(android.R.drawable.ic_menu_view); setColorFilter(Color.WHITE); alpha = 0.4f
-            layoutParams = FrameLayout.LayoutParams(120, 120).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 140; rightMargin = 35 }
-            setOnClickListener { toggleReadability() }
-        }
-
-        resetBtn = ImageButton(this).apply {
-            setImageResource(android.R.drawable.ic_menu_close_clear_cancel); setColorFilter(Color.WHITE); alpha = 0.4f
-            layoutParams = FrameLayout.LayoutParams(120, 120).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 30; rightMargin = 35 }
-            setOnClickListener { globalReset() }
-        }
-
-        overlayHUD.addView(flashOverlay)
-        overlayHUD.addView(logoView)
-        overlayHUD.addView(leftHUDContainer)
-        overlayHUD.addView(recordControls, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30 })
-        overlayHUD.addView(cameraSettingsPanel, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.TOP or Gravity.END; topMargin = 40; rightMargin = 40 })
-        overlayHUD.addView(presetPanel, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 180 })
-        overlayHUD.addView(readabilityBtn)
-        overlayHUD.addView(resetBtn)
-
-        addContentView(overlayHUD, ViewGroup.LayoutParams(-1, -1))
-        updateSidebarVisuals()
+        return presetPanel
     }
+
+    private fun createFlashView() = View(this).apply {
+        setBackgroundColor(Color.WHITE)
+        alpha = 0f
+        layoutParams = FrameLayout.LayoutParams(-1, -1)
+    }
+
+    private fun createLogoView() = ImageView(this).apply {
+        setImageDrawable(createLogoDrawable())
+        alpha = 0.4f
+        layoutParams = FrameLayout.LayoutParams(180, 180).apply {
+            gravity = Gravity.TOP or Gravity.START; topMargin = 40; leftMargin = 40
+        }
+    }
+
+    private fun createReadabilityButton() = ImageButton(this).apply {
+        setImageResource(android.R.drawable.ic_menu_view)
+        setColorFilter(Color.WHITE)
+        alpha = 0.4f
+        readabilityBtn = this // Assign to class property
+        layoutParams = FrameLayout.LayoutParams(120, 120).apply {
+            gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 140; rightMargin = 35
+        }
+        setOnClickListener { toggleReadability() }
+    }
+
+    private fun createResetButton() = ImageButton(this).apply {
+        setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+        setColorFilter(Color.WHITE)
+        alpha = 0.4f
+        resetBtn = this // Assign to class property
+        layoutParams = FrameLayout.LayoutParams(120, 120).apply {
+            gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 30; rightMargin = 35
+        }
+        setOnClickListener { globalReset() }
+    }
+
+    // Returns Pair(GroupContainer, ContentLayout)
+    private fun createCollapsibleGroupView(title: String, startOpen: Boolean): Pair<LinearLayout, LinearLayout> {
+        val groupContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8 }
+            layoutTransition = LayoutTransition()
+        }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(15, 12, 15, 12)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#33FFFFFF"))
+                cornerRadius = 8f
+                setStroke(1, Color.parseColor("#44FFFFFF"))
+            }
+        }
+
+        val arrow = TextView(this).apply {
+            text = "▶"; textSize = 9f; setTextColor(Color.LTGRAY)
+            layoutParams = LinearLayout.LayoutParams(50, -2)
+            rotation = if (startOpen) 90f else 0f
+        }
+
+        val label = TextView(this).apply {
+            text = title; textSize = 10f; setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE); letterSpacing = 0.15f
+        }
+        header.addView(arrow); header.addView(label)
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (startOpen) View.VISIBLE else View.GONE
+            setPadding(6, 6, 6, 6)
+        }
+
+        header.setOnClickListener {
+            val isVisible = content.visibility == View.VISIBLE
+            if (isVisible) {
+                content.visibility = View.GONE
+                arrow.animate().rotation(0f).setDuration(200).start()
+            } else {
+                content.visibility = View.VISIBLE
+                arrow.animate().rotation(90f).setDuration(200).start()
+            }
+        }
+
+        groupContainer.addView(header)
+        groupContainer.addView(content)
+        return Pair(groupContainer, content)
+    }
+
+    // Custom drawing logic for Camera Transform icons
+    private fun createCustomIcon(type: Int): BitmapDrawable {
+        val size = 100
+        val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(b)
+        val paint = Paint().apply {
+            color = Color.WHITE; style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; isAntiAlias = true
+        }
+        val center = size / 2f
+        when (type) {
+            0 -> { // FLIP X
+                paint.strokeWidth = 9f
+                val range = 20f
+                c.drawLine(center - range, center, center + range, center, paint)
+                val p = Path().apply {
+                    moveTo(center - 8, center - 12); lineTo(center - range - 4, center); lineTo(center - 8, center + 12)
+                    moveTo(center + 8, center - 12); lineTo(center + range + 4, center); lineTo(center + 8, center + 12)
+                }
+                c.drawPath(p, paint)
+            }
+            1 -> { // FLIP Y
+                paint.strokeWidth = 9f
+                val range = 20f
+                c.drawLine(center, center - range, center, center + range, paint)
+                val p = Path().apply {
+                    moveTo(center - 12, center - 8); lineTo(center, center - range - 4); lineTo(center + 12, center - 8)
+                    moveTo(center - 12, center + 8); lineTo(center, center + range + 4); lineTo(center + 12, center + 8)
+                }
+                c.drawPath(p, paint)
+            }
+            2 -> { // ROTATE
+                paint.strokeWidth = 9f
+                val r = 24f
+                val box = RectF(center - r, center - r, center + r, center + r)
+                c.drawArc(box, 180f + 20f, 140f, false, paint)
+                c.drawArc(box, 0f + 20f, 140f, false, paint)
+                val p = Path()
+                // Simplified arrow drawing for brevity
+                val endX1 = center + (r * cos(Math.toRadians(340.0))).toFloat()
+                val endY1 = center + (r * sin(Math.toRadians(340.0))).toFloat()
+                p.moveTo(endX1 - 5f, endY1 - 15f); p.lineTo(endX1, endY1); p.lineTo(endX1 - 18f, endY1 - 2f)
+                val endX2 = center + (r * cos(Math.toRadians(160.0))).toFloat()
+                val endY2 = center + (r * sin(Math.toRadians(160.0))).toFloat()
+                p.moveTo(endX2 + 5f, endY2 + 15f); p.lineTo(endX2, endY2); p.lineTo(endX2 + 18f, endY2 + 2f)
+                paint.style = Paint.Style.STROKE
+                c.drawPath(p, paint)
+            }
+        }
+        return BitmapDrawable(resources, b)
+    }
+
 
     private fun showRtspDialog() {
         // 1. History laden (Max 20 Einträge)
