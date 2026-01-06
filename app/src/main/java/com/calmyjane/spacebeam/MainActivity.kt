@@ -427,56 +427,61 @@ class PropertyControl(
     }
 
     private fun openMenu() {
-        // 1. Get the Main Activity Root View
         val activity = context as? MainActivity ?: return
         val rootLayout = activity.overlayHUD
 
-        // 2. Calculate Position
-        // We get the absolute screen position of the row (Slider + Dot)
-        // Then we position the popup to the right of the sidebar width (850px)
-        // and at the same Y coordinate as the row.
-        val location = IntArray(2)
-        mainRowLayout?.getLocationOnScreen(location)
-        val rowY = location[1] // Absolute Y position on screen
-
-        // Note: The sidebar width is 850 in MainActivity. We start slightly after that.
-        val sidebarWidth = 850
-        val popupX = sidebarWidth + 20
+        val res = context.resources
+        val isPortrait = res.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+        val dm = res.displayMetrics
 
         // 3. Create the Panel
         floatingPanel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(20, 20, 20, 20)
             background = GradientDrawable().apply {
-                setColor(Color.argb(150, 30, 30, 30)) // Opaque dark background
-                cornerRadius = 12f
+                setColor(Color.argb(240, 20, 20, 20)) // High opacity dark bg
+                cornerRadius = 20f
                 setStroke(2, Color.GRAY)
             }
-            // Add elevation for shadow
-            elevation = 20f
-
-            // LayoutParams for the FrameLayout (Main HUD)
-            layoutParams = FrameLayout.LayoutParams(600, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                leftMargin = popupX
-                topMargin = rowY - 20 // Shift up slightly to center-align vertically with row
-                gravity = Gravity.TOP or Gravity.START
-            }
-
-            // Prevent clicks from passing through to the GLView behind the popup
+            elevation = 30f
             isClickable = true
+
+            // 4. Layout Params - STATIC POSITIONS
+            layoutParams = if (isPortrait) {
+                // PORTRAIT:
+                // The Parameter Menu takes up the top 40% of the screen (defined in setupParameterMenu).
+                // We place this popup immediately below that area.
+                val menuHeight = (dm.heightPixels * 0.40).toInt()
+
+                FrameLayout.LayoutParams(700, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                    topMargin = menuHeight + 20 // 20px padding below the menu area
+                }
+            } else {
+                // LANDSCAPE:
+                // The Sidebar is 850px wide. We place this popup to the right of it.
+                // We Center it Vertically regardless of which slider was clicked.
+                val sidebarWidth = 850
+
+                FrameLayout.LayoutParams(600, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    gravity = Gravity.CENTER_VERTICAL or Gravity.START
+                    leftMargin = sidebarWidth + 30 // 30px padding to the right of sidebar
+                }
+            }
         }
 
-        // 4. Populate Panel (Title)
+        // 5. Populate Panel (Title)
         val titleText = TextView(context).apply {
             text = "$label MODULATION"
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER // Center title in the popup
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 15 }
         }
         floatingPanel?.addView(titleText)
 
-        // 5. Shape Spinner
+        // 6. Shape Spinner
         val shapeRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -501,11 +506,11 @@ class PropertyControl(
         shapeRow.addView(spinner)
         floatingPanel?.addView(shapeRow)
 
-        // 6. Speed & Depth Sliders
+        // 7. Speed & Depth Sliders
         addSliderToPanel("SPEED", modRate) { updateModRate(it) }
         addSliderToPanel("DEPTH", modDepth) { updateModDepth(it); updateIndicatorVisuals() }
 
-        // 7. Add to Root
+        // 8. Add to Root
         rootLayout.addView(floatingPanel)
         activeControl = this
     }
@@ -718,7 +723,7 @@ class MainActivity : AppCompatActivity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         hideSystemUI()
 
         renderer = KaleidoscopeRenderer(this)
@@ -796,7 +801,6 @@ class MainActivity : AppCompatActivity() {
                 // 4. Bind Camera on UI Thread
                 runOnUiThread {
                     val preview = Preview.Builder()
-                        .setTargetAspectRatio(androidx.camera.core.AspectRatio.RATIO_16_9)
                         .build()
 
                     // Connect camera to the FRESH renderer surface
@@ -1000,17 +1004,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupOverlayHUD() {
-        // 1. Initialize Main Container
+        val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+
         overlayHUD = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(-1, -1)
         }
 
-        // 2. Create Basic Layers
         flashOverlay = createFlashView()
         val logoView = createLogoView()
 
-        // 3. Build UI Sections
-        setupLeftSidebar()
+        setupParameterMenu()
         val cameraPanel = createCameraSettingsPanel()
         val recordPanel = createRecordControls()
         val presetPanel = createPresetPanel()
@@ -1018,57 +1021,142 @@ class MainActivity : AppCompatActivity() {
         val readabilityBtn = createReadabilityButton()
         val resetBtn = createResetButton()
 
-        // 4. Assemble the HUD
         overlayHUD.addView(flashOverlay)
         overlayHUD.addView(logoView)
-        overlayHUD.addView(leftHUDContainer) // Created in setupLeftSidebar()
+        overlayHUD.addView(leftHUDContainer)
 
-        // Add Top/Bottom controls with specific layout params
-        overlayHUD.addView(recordPanel, FrameLayout.LayoutParams(-2, -2).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30
-        })
-        overlayHUD.addView(cameraPanel, FrameLayout.LayoutParams(-2, -2).apply {
-            gravity = Gravity.TOP or Gravity.END; topMargin = 40; rightMargin = 40
-        })
-        overlayHUD.addView(presetPanel, FrameLayout.LayoutParams(-2, -2).apply {
-            gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 180
-        })
-        overlayHUD.addView(menuUtilBtn)
-        overlayHUD.addView(readabilityBtn)
+        // --- ADAPTIVE LAYOUT LOGIC ---
+
+        // 1. RECORD PANEL (Portrait: Bottom Left Vertical | Landscape: Top Center Horizontal)
+        val recordParams = FrameLayout.LayoutParams(-2, -2).apply {
+            if (isPortrait) {
+                recordPanel.orientation = LinearLayout.VERTICAL
+                gravity = Gravity.BOTTOM or Gravity.START
+                bottomMargin = 450
+                leftMargin = 30
+                // Adjust gap between buttons
+                (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 40; leftMargin = 0 }
+            } else {
+                recordPanel.orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                topMargin = 30
+                (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 40 }
+            }
+        }
+        overlayHUD.addView(recordPanel, recordParams)
+
+        // 2. PRESETS (Bottom Center)
+        val presetParams = FrameLayout.LayoutParams(-2, -2).apply {
+            if (isPortrait) {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                bottomMargin = 60
+                presetPanel.scaleX = 0.85f
+                presetPanel.scaleY = 0.85f
+            } else {
+                gravity = Gravity.BOTTOM or Gravity.END
+                bottomMargin = 15
+                rightMargin = 180
+                presetPanel.scaleX = 1.0f
+                presetPanel.scaleY = 1.0f
+            }
+        }
+        overlayHUD.addView(presetPanel, presetParams)
+
+        // 3. RIGHT SIDE STACK (Utility + Camera Inputs)
+        // We stack them from bottom-right up
+        val baseBottom = 30
+        val baseRight = 30
+
+        // A. Reset (Bottom Right)
+        resetBtn.layoutParams = (resetBtn.layoutParams as FrameLayout.LayoutParams).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            bottomMargin = baseBottom
+            rightMargin = baseRight
+        }
         overlayHUD.addView(resetBtn)
 
-        // 5. Finalize
+        // B. Readability (Above Reset)
+        readabilityBtn.layoutParams = (readabilityBtn.layoutParams as FrameLayout.LayoutParams).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            bottomMargin = baseBottom + 120
+            rightMargin = baseRight
+        }
+        overlayHUD.addView(readabilityBtn)
+
+        // C. Menu Toggle (Above Readability)
+        menuUtilBtn.layoutParams = (menuUtilBtn.layoutParams as FrameLayout.LayoutParams).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            bottomMargin = baseBottom + 240
+            rightMargin = baseRight
+        }
+        overlayHUD.addView(menuUtilBtn)
+
+        // D. Camera Inputs (Above Menu Toggle in Portrait, Top Right in Landscape)
+        val cameraParams = FrameLayout.LayoutParams(-2, -2).apply {
+            if (isPortrait) {
+                gravity = Gravity.BOTTOM or Gravity.END
+                bottomMargin = baseBottom + 450 // Clear the utility stack
+                rightMargin = 20
+            } else {
+                gravity = Gravity.TOP or Gravity.END
+                topMargin = 40
+                rightMargin = 40
+            }
+        }
+        overlayHUD.addView(cameraPanel, cameraParams)
+
         addContentView(overlayHUD, ViewGroup.LayoutParams(-1, -1))
         updateSidebarVisuals()
     }
 
-    private fun setupLeftSidebar() {
-        // Container for Panel only
+    private fun setupParameterMenu() {
+        val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+        val dm = resources.displayMetrics
+
+        // Container config
         leftHUDContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = FrameLayout.LayoutParams(-2, -1).apply { gravity = Gravity.START }
+            if (isPortrait) {
+                // PORTRAIT: Bottom Sheet style
+                orientation = LinearLayout.VERTICAL
+                layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, (dm.heightPixels * 0.40).toInt()).apply {
+                    gravity = Gravity.TOP
+                }
+            } else {
+                // LANDSCAPE: Left Sidebar style
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = FrameLayout.LayoutParams(-2, -1).apply {
+                    gravity = Gravity.START
+                }
+            }
         }
 
-        // The ScrollView
+        // ScrollView Config
         parameterPanel = ScrollView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(850, -1)
+            if (isPortrait) {
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            } else {
+                layoutParams = LinearLayout.LayoutParams(850, ViewGroup.LayoutParams.MATCH_PARENT)
+            }
             layoutDirection = View.LAYOUT_DIRECTION_RTL
             isVerticalScrollBarEnabled = true
             scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
-            visibility = View.VISIBLE // Default visibility
+            visibility = View.VISIBLE
         }
 
-        // The internal layout for items
+        // Internal Item Layout
         val menuLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(25, 20, 10, 240)
+            // Add extra padding at bottom in portrait to avoid navigation bar overlap
+            val bottomPad = if (isPortrait) 150 else 240
+            setPadding(25, 20, 10, bottomPad)
             layoutDirection = View.LAYOUT_DIRECTION_LTR
             layoutTransition = LayoutTransition().apply { enableTransitionType(LayoutTransition.CHANGING) }
         }
+
         parameterPanel.addView(menuLayout)
         leftHUDContainer.addView(parameterPanel)
 
-        // Populate the actual menu items
+        // Populate items
         populateParameterGroups(menuLayout)
     }
 
@@ -1255,11 +1343,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createRecordControls(): LinearLayout {
+        // Initialize with default params, orientation will be set in setupOverlayHUD
         recordControls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(20, 10, 20, 10)
-            translationX = resources.displayMetrics.widthPixels * 0.2f
+            gravity = Gravity.CENTER
+            setPadding(10, 10, 10, 10)
         }
 
         photoBtn = ImageButton(this).apply {
@@ -1277,7 +1364,7 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.TRANSPARENT)
             setColorFilter(Color.WHITE)
             alpha = 0.5f
-            layoutParams = LinearLayout.LayoutParams(150, 150).apply { leftMargin = 40 }
+            layoutParams = LinearLayout.LayoutParams(150, 150)
             setOnClickListener { toggleRecording() }
         }
 
@@ -1293,7 +1380,6 @@ class MainActivity : AppCompatActivity() {
             setPadding(15, 10, 15, 30)
         }
 
-        // Transition Time Slider
         val transContainer = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(10, 0, 10, 10)
@@ -1326,7 +1412,6 @@ class MainActivity : AppCompatActivity() {
         transContainer.addView(timeLabel)
         transContainer.addView(transSeekBar)
 
-        // Preset Buttons
         val presetRow = FrameLayout(this)
         val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
 
@@ -1379,25 +1464,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createMenuUtilityButton() = Button(this).apply {
-        text = if (isMenuExpanded) "<" else ">"
+        val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+
+        // Initial text
+        text = if (isPortrait) {
+            if (isMenuExpanded) "v" else "^"
+        } else {
+            if (isMenuExpanded) "<" else ">"
+        }
+
         textSize = 22f
         typeface = Typeface.DEFAULT_BOLD
         setTextColor(Color.WHITE)
         stateListAnimator = null
         background = null
+        alpha = 0.85f
 
-        // --- CENTERING FIX ---
         gravity = Gravity.CENTER
-        // Adding bottom padding pushes the text physically UP relative to the center
         setPadding(0, 0, 0, 12)
 
-        menuBtn = this // Assign to class property
+        menuBtn = this
 
-        layoutParams = FrameLayout.LayoutParams(120, 120).apply {
-            gravity = Gravity.BOTTOM or Gravity.END
-            bottomMargin = 250
-            rightMargin = 35
-        }
+        layoutParams = FrameLayout.LayoutParams(120, 120)
+
         setOnClickListener { toggleMenu() }
     }
 
@@ -2072,7 +2161,16 @@ class MainActivity : AppCompatActivity() {
         PropertyControl.closeActiveMenu()
         isMenuExpanded = !isMenuExpanded
         leftHUDContainer.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
-        menuBtn.text = if (isMenuExpanded) "<" else ">"
+
+        val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+
+        if (isPortrait) {
+            // Arrow Down (Open) vs Arrow Up (Closed)
+            menuBtn.text = if (isMenuExpanded) "v" else "^"
+        } else {
+            // Arrow Left (Open) vs Arrow Right (Closed)
+            menuBtn.text = if (isMenuExpanded) "<" else ">"
+        }
     }
 
 
@@ -2352,10 +2450,22 @@ class MainActivity : AppCompatActivity() {
         }
 
         private fun initFBO(w: Int, h: Int) {
+            // Clean up old FBO/Texture if they exist to avoid memory leaks
+            if (fboId != 0) {
+                val fb = IntArray(1) { fboId }
+                val tx = IntArray(1) { fboTexId }
+                GLES20.glDeleteFramebuffers(1, fb, 0)
+                GLES20.glDeleteTextures(1, tx, 0)
+            }
+
+            fboWidth = w
+            fboHeight = h
+
             val fb = IntArray(1); val tx = IntArray(1)
             GLES20.glGenFramebuffers(1, fb, 0)
             GLES20.glGenTextures(1, tx, 0)
             fboId = fb[0]; fboTexId = tx[0]
+
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
             GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -2366,7 +2476,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
-            viewWidth = w; viewHeight = h
+            viewWidth = w
+            viewHeight = h
+
+            // FIX: Re-initialize FBO to match the new screen dimensions/orientation
+            // This prevents the "squashed" look
+            initFBO(w, h)
+
+            // Update the aspect ratio uniform immediately
+            GLES20.glUseProgram(kaleidoProgram)
+            uLocs["uA"]?.let { GLES20.glUniform1f(it, w.toFloat() / h.toFloat()) }
         }
 
         override fun onDrawFrame(gl: GL10?) {
@@ -2403,6 +2522,8 @@ class MainActivity : AppCompatActivity() {
             cRotAccum += cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
         }
 
+// Inside KaleidoscopeRenderer class
+
         private fun renderToFBO() {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
             GLES20.glViewport(0, 0, fboWidth, fboHeight)
@@ -2412,7 +2533,34 @@ class MainActivity : AppCompatActivity() {
             fun safeUni(name: String, v: Float) { uLocs[name]?.let { GLES20.glUniform1f(it, v) } }
             fun safeUni2(name: String, v1: Float, v2: Float) { uLocs[name]?.let { GLES20.glUniform2f(it, v1, v2) } }
 
-            // DIRECT ACCESS TO COMPUTED VALUES
+            val widthF = fboWidth.toFloat()
+            val heightF = fboHeight.toFloat()
+
+            // 1. Calculate Geometry Aspect Ratio (uA)
+            // This ensures the kaleidoscope circles remain circular, not ovals
+            val aspect = widthF / heightF
+            safeUni("uA", aspect) // CRITICAL FIX: This prevents the Division by Zero crash
+
+            // 2. Calculate Camera Image Scaling (uCamScale)
+            // This ensures the camera image fills the screen without stretching
+            val camRatio = 1.777f // 16:9 Standard Camera
+            val screenRatio = widthF / heightF
+
+            var scaleX = 1.0f
+            var scaleY = 1.0f
+
+            if (screenRatio < camRatio) {
+                // Portrait (Tall): Zoom in on X to fill height
+                scaleX = screenRatio / camRatio
+                scaleY = 1.0f
+            } else {
+                // Landscape (Wide): Zoom in on Y to fill width
+                scaleX = 1.0f
+                scaleY = camRatio / screenRatio
+            }
+            safeUni2("uCamScale", scaleX, scaleY)
+
+            // --- Pass Control Values ---
             val vMAngle = ctx.controlsMap["M_ANGLE"]?.computedValue ?: 0f
             val vMZoom = ctx.controlsMap["M_ZOOM"]?.computedValue ?: 0f
             val vMTx = ctx.controlsMap["M_TX"]?.computedValue ?: 0.5f
@@ -2422,30 +2570,24 @@ class MainActivity : AppCompatActivity() {
             val v3DMix = ctx.controlsMap["3D_MIX"]?.computedValue ?: 0f
 
             safeUni("uAx", axisCount)
-            safeUni("uA", fboWidth.toFloat() / fboHeight.toFloat())
             safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f)
             safeUni("uMZ", 0.1f + (vMZoom * 2.5f))
             safeUni2("uMT", (vMTx - 0.5f) * 2f, (vMTy - 0.5f) * 2f)
             safeUni2("uMTilt", (vMTiltX - 0.5f) * 1.5f, (vMTiltY - 0.5f) * 1.5f)
-
             safeUni("uMode", v3DMix.pow(2.0f))
             safeUni("uScroll", scrollAccum)
             safeUni("uSShape", ctx.controlsMap["S_SHAPE"]?.computedValue ?: 0f)
             safeUni("uSFov", ctx.controlsMap["S_FOV"]?.computedValue ?: 0.5f)
-
-            // Tunnel Controls
             safeUni("uTHueStr", ctx.controlsMap["T_HUE_STR"]?.computedValue ?: 0f)
             safeUni("uTHuePos", ctx.controlsMap["T_HUE_POS"]?.computedValue ?: 0f)
             safeUni("uTWaveStr", ctx.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f)
             safeUni("uTWavePos", ctx.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
 
-            // Morphing
             val cRaw = ctx.controlsMap["CURVE"]?.computedValue ?: 0.5f
             safeUni("uCurve", if (cRaw > 0.5f) 1.0f + (cRaw - 0.5f) * 6.0f else 0.2f + (cRaw * 1.6f))
             safeUni("uTwist", ctx.controlsMap["TWIST"]?.getMapped(-5.0f, 5.0f) ?: 0f)
             safeUni("uFlux", (ctx.controlsMap["FLUX"]?.computedValue ?: 0f) * 0.2f)
 
-            // Camera Trans
             val vCZoom = ctx.controlsMap["C_ZOOM"]?.computedValue ?: 0f
             val vCAngle = ctx.controlsMap["C_ANGLE"]?.computedValue ?: 0f
             val vCTx = ctx.controlsMap["C_TX"]?.computedValue ?: 0.5f
@@ -2460,7 +2602,6 @@ class MainActivity : AppCompatActivity() {
             safeUni2("uF", if (rot180) -flipX else flipX, if (rot180) -flipY else flipY)
             safeUni("uWarp", ctx.controlsMap["WARP"]?.computedValue ?: 0f)
 
-            // Colors
             safeUni("uC", ctx.controlsMap["CONTRAST"]?.getMapped(0f, 2f) ?: 1f)
             safeUni("uS", ctx.controlsMap["VIBRANCE"]?.getMapped(0f, 2f) ?: 1f)
             safeUni("uHue", ctx.controlsMap["HUE"]?.computedValue ?: 0f)
