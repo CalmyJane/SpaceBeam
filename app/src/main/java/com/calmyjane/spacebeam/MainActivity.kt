@@ -178,7 +178,7 @@ class PropertyControl(
     @Volatile var preciseValue: Float = defaultValue.toFloat()
         private set
 
-    // --- Animation State (GL Thread) ---
+    // --- Animation State ---
     private var animTarget: Float? = null
     private var animStart: Float = 0f
     private var animDuration: Float = 0f
@@ -196,6 +196,13 @@ class PropertyControl(
     var lfoPhase: Double = 0.0
     private var lastComputedModulation: Float = 0f
 
+    // --- Snapshot Morphing Variables ---
+    private var modSnapshotValue: Float = 0f // The "captured" value from the old state
+    private var modRateStart = 0f
+    private var modRateTarget: Float? = null
+    private var modDepthStart = 0f
+    private var modDepthTarget: Float? = null
+
     val computedValue: Float
         get() = applyModulation(getNormalized())
 
@@ -205,7 +212,6 @@ class PropertyControl(
     private var mainRowLayout: LinearLayout? = null
     private var floatingPanel: LinearLayout? = null
 
-    // --- Snapshot for Presets ---
     data class Snapshot(
         val value: Int,
         val active: Boolean,
@@ -216,108 +222,100 @@ class PropertyControl(
 
     fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name)
 
-    fun restore(s: Snapshot) {
-        setProgress(s.value)
+    fun restore(s: Snapshot, durationSec: Float) {
+        animateTo(s.value.toFloat(), durationSec, s.shape)
         if (hasModulation) {
-            updateModRate(s.rate)
-            updateModDepth(s.depth)
-            try { modShape = WaveShape.valueOf(s.shape) } catch (e: Exception) { modShape = WaveShape.SINE }
-            updateIndicatorVisuals()
+            animateModulation(s.rate.toFloat(), s.depth.toFloat(), durationSec)
         }
     }
 
-    // --- Animation Support (Called from Main Thread, executed on GL Thread) ---
-    fun animateTo(target: Float, durationSec: Float) {
+    fun animateTo(target: Float, durationSec: Float, newShape: String? = null) {
+        // 1. CAPTURE SNAPSHOT: Grab the current modulation offset before we change anything
+        modSnapshotValue = lastComputedModulation
+
         animTarget = target
         animStart = preciseValue
         animDuration = durationSec
         animTime = 0f
         isAnimating = true
+
+        if (newShape != null) {
+            try { modShape = WaveShape.valueOf(newShape) } catch (e: Exception) {}
+        }
     }
 
-    fun stopAnimation() {
-        isAnimating = false
-        animTarget = null
+    fun animateModulation(targetRate: Float, targetDepth: Float, durationSec: Float) {
+        modRateStart = preciseModRate
+        modRateTarget = targetRate
+        modDepthStart = preciseModDepth
+        modDepthTarget = targetDepth
     }
 
-    fun setAnimatedModRate(v: Float) {
-        preciseModRate = v.coerceIn(0f, 1000f)
-        modRate = preciseModRate.toInt()
-    }
-
-    fun setAnimatedModDepth(v: Float) {
-        preciseModDepth = v.coerceIn(0f, 1000f)
-        modDepth = preciseModDepth.toInt()
-        updateIndicatorVisuals()
-    }
-
-    // --- Core Logic (Runs on GL Thread) ---
     fun update(deltaTime: Float) {
-        // 1. Handle Value Transition (Animation)
+        val t = if (isAnimating && animDuration > 0) (animTime / animDuration).coerceIn(0f, 1f) else 1f
+        val ease = 1f - (1f - t).pow(3f)
+
+        // 1. Handle Parameter Transitions
         if (isAnimating && animTarget != null) {
             animTime += deltaTime
             if (animTime >= animDuration) {
-                // Finish
                 preciseValue = animTarget!!
                 value = preciseValue.toInt()
+                modRateTarget?.let { preciseModRate = it; modRate = it.toInt() }
+                modDepthTarget?.let { preciseModDepth = it; modDepth = it.toInt() }
+                modRateTarget = null; modDepthTarget = null
                 isAnimating = false
-                // Sync UI (Post to main thread, low priority)
-                mainSeekBar?.post {
-                    if (mainSeekBar?.progress != value) mainSeekBar?.progress = value
-                }
+                mainSeekBar?.post { if (mainSeekBar?.progress != value) mainSeekBar?.progress = value }
             } else {
-                // Ease Out Cubic Interpolation
-                val t = (animTime / animDuration).coerceIn(0f, 1f)
-                val ease = 1f - (1f - t).pow(3f)
                 preciseValue = animStart + (animTarget!! - animStart) * ease
-                value = preciseValue.toInt()
+                modRateTarget?.let { preciseModRate = modRateStart + (it - modRateStart) * ease }
+                modDepthTarget?.let { preciseModDepth = modDepthStart + (it - modDepthStart) * ease }
             }
         }
 
-        // 2. Handle Modulation
-        if (!hasModulation || (modRate == 0 && modDepth == 0)) {
+        // 2. LFO Physics (Always calculate based on CURRENT shape)
+        if (!hasModulation || (preciseModRate == 0f && preciseModDepth == 0f && modDepthTarget == null)) {
             lastComputedModulation = 0f
-            if (modIndicator?.alpha == 1.0f) modIndicator?.postInvalidate()
             return
         }
 
         val baseSpeed = (preciseModRate / 1000f + 0.05f).pow(3f)
-        val phaseInc = baseSpeed * deltaTime * 2.0 * Math.PI
-        lfoPhase += phaseInc
+        lfoPhase += baseSpeed * deltaTime * 2.0 * Math.PI
 
-        val rawWave = when (modShape) {
+        val currentWave = when (modShape) {
             WaveShape.SINE -> sin(lfoPhase)
             WaveShape.WOBBLE_SINE -> sin(lfoPhase) * sin(lfoPhase * 0.5 + 0.5)
             WaveShape.POLY_SINE -> (sin(lfoPhase) + sin(lfoPhase * 1.5)) * 0.5
             WaveShape.RAMP -> ((lfoPhase / (2.0 * Math.PI)) % 1.0 * 2.0 - 1.0)
             WaveShape.TRIANGLE -> {
-                val t = (lfoPhase / (2.0 * Math.PI)) % 1.0
-                if (t < 0.5) (t * 4.0 - 1.0) else (3.0 - t * 4.0)
+                val p = (lfoPhase / (2.0 * Math.PI)) % 1.0
+                if (p < 0.5) (p * 4.0 - 1.0) else (3.0 - p * 4.0)
             }
             WaveShape.SMOOTH_NOISE -> (sin(lfoPhase) + sin(lfoPhase * 2.3) * 0.5 + sin(lfoPhase * 4.7) * 0.25) / 1.75
             WaveShape.ROUGH_NOISE -> (Math.random() * 2.0 - 1.0)
         }
 
-        val depthNorm = getModDepthNormalized()
-        lastComputedModulation = (rawWave * depthNorm).toFloat()
+        val depthNorm = (preciseModDepth / 1000f).pow(3f)
+        val newModValue = (currentWave * depthNorm).toFloat()
+
+        // 3. THE HANDOVER: Cross-fade from the snapshot of the OLD state to the moving NEW state
+        lastComputedModulation = if (isAnimating) {
+            (modSnapshotValue * (1.0f - ease)) + (newModValue * ease)
+        } else {
+            newModValue
+        }
+
         modIndicator?.postInvalidate()
     }
 
     private fun applyModulation(baseNorm: Float): Float {
-        if (!hasModulation || modDepth == 0) return baseNorm
-        val combined = baseNorm + lastComputedModulation
-        return combined.coerceIn(0f, 1f)
+        if (!hasModulation) return baseNorm
+        return (baseNorm + lastComputedModulation).coerceIn(0f, 1f)
     }
 
-    // --- Setters ---
     fun setProgress(v: Int) {
-        // Stop any active animation if user touches slider
         if (isAnimating) stopAnimation()
-
-        if (activeControl != null && activeControl != this) {
-            activeControl?.closeMenu()
-        }
-
+        if (activeControl != null && activeControl != this) closeActiveMenu()
         val clamped = v.coerceIn(min, max)
         value = clamped
         preciseValue = clamped.toFloat()
@@ -338,7 +336,6 @@ class PropertyControl(
         updateIndicatorVisuals()
     }
 
-    // Used by animation logic internally, or manual overrides
     fun setAnimatedValue(v: Float) {
         preciseValue = v.coerceIn(min.toFloat(), max.toFloat())
         val intVal = preciseValue.toInt()
@@ -359,12 +356,10 @@ class PropertyControl(
         }
     }
 
-    // --- Helpers ---
     fun getNormalized(): Float = preciseValue / max.toFloat()
     fun getMapped(outMin: Float, outMax: Float): Float = outMin + (computedValue * (outMax - outMin))
     fun getModDepthNormalized(): Float = (preciseModDepth / 1000f).pow(3f)
 
-    // --- UI Construction ---
     fun attachTo(parent: ViewGroup) {
         mainSeekBar = null
         modIndicator = null
@@ -409,7 +404,6 @@ class PropertyControl(
         sb.setOnTouchListener { v, event ->
             v.parent.requestDisallowInterceptTouchEvent(true)
             if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_DOWN) {
-                // User interaction stops animation
                 stopAnimation()
                 if (activeControl != null && activeControl != this@PropertyControl) {
                     closeActiveMenu()
@@ -440,17 +434,14 @@ class PropertyControl(
                     val cy = height / 2f
                     val r = (Math.min(width, height) / 2f) - 2f
                     val active = modDepth > 0
-
                     paint.style = Paint.Style.STROKE
                     paint.strokeWidth = 3f
                     paint.color = Color.WHITE
                     paint.alpha = 255
                     canvas.drawCircle(cx, cy, r, paint)
-
                     paint.style = Paint.Style.FILL
                     paint.color = if (active) Color.WHITE else Color.LTGRAY
                     paint.alpha = if (active) 255 else 100
-
                     var dotRadius = r * 0.3f
                     if (active) {
                         val depthN = getModDepthNormalized().coerceAtLeast(0.001f)
@@ -472,23 +463,15 @@ class PropertyControl(
 
     private fun updateIndicatorVisuals() { modIndicator?.invalidate() }
 
-    // --- POPUP / FLYOUT LOGIC ---
     fun toggleMenu() {
-        if (activeControl == this) {
-            closeMenu()
-        } else {
-            activeControl?.closeMenu()
-            openMenu()
-        }
+        if (activeControl == this) closeMenu() else { activeControl?.closeMenu(); openMenu() }
     }
 
     private fun openMenu() {
         val activity = context as? MainActivity ?: return
         val rootLayout = activity.overlayHUD
-
-        val res = context.resources
-        val isPortrait = res.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-        val dm = res.displayMetrics
+        val dm = context.resources.displayMetrics
+        val isPortrait = context.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
 
         floatingPanel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -500,74 +483,42 @@ class PropertyControl(
             }
             elevation = 30f
             isClickable = true
-
             layoutParams = if (isPortrait) {
                 val menuHeight = (dm.heightPixels * 0.40).toInt()
-                FrameLayout.LayoutParams(700, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                    topMargin = menuHeight + 20
-                }
+                FrameLayout.LayoutParams(700, -2).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = menuHeight + 20 }
             } else {
-                val sidebarWidth = 850
-                FrameLayout.LayoutParams(600, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    gravity = Gravity.CENTER_VERTICAL or Gravity.START
-                    leftMargin = sidebarWidth + 30
-                }
+                FrameLayout.LayoutParams(600, -2).apply { gravity = Gravity.CENTER_VERTICAL or Gravity.START; leftMargin = 880 }
             }
         }
 
-        val titleText = TextView(context).apply {
-            text = "$label MODULATION"
-            textSize = 12f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 15 }
-        }
-        floatingPanel?.addView(titleText)
+        floatingPanel?.addView(TextView(context).apply {
+            text = "$label MODULATION"; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.WHITE); gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 15 }
+        })
 
-        val shapeRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 }
-        }
+        val shapeRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 } }
         shapeRow.addView(TextView(context).apply { text="SHAPE"; textSize=10f; setTextColor(Color.LTGRAY); layoutParams=LinearLayout.LayoutParams(120, -2) })
-
-        val shapeAdapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, WaveShape.values())
-        val spinner = Spinner(context).apply {
-            adapter = shapeAdapter
+        shapeRow.addView(Spinner(context).apply {
+            adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, WaveShape.values())
             setSelection(modShape.ordinal)
             background.setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_ATOP)
             layoutParams = LinearLayout.LayoutParams(0, 70, 1f)
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(p0: AdapterView<*>?, p1: View?, pos: Int, p3: Long) {
-                    modShape = WaveShape.values()[pos]
-                    (p0?.getChildAt(0) as? TextView)?.setTextColor(Color.WHITE)
-                }
+                override fun onItemSelected(p0: AdapterView<*>?, p1: View?, pos: Int, p3: Long) { modShape = WaveShape.values()[pos]; (p0?.getChildAt(0) as? TextView)?.setTextColor(Color.WHITE) }
                 override fun onNothingSelected(p0: AdapterView<*>?) {}
             }
-        }
-        shapeRow.addView(spinner)
+        })
         floatingPanel?.addView(shapeRow)
-
         addSliderToPanel("SPEED", modRate) { updateModRate(it) }
         addSliderToPanel("DEPTH", modDepth) { updateModDepth(it); updateIndicatorVisuals() }
-
         rootLayout.addView(floatingPanel)
         activeControl = this
     }
 
     private fun addSliderToPanel(name: String, current: Int, onChange: (Int) -> Unit) {
-        val row = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 10, 0, 10)
-        }
+        val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 10, 0, 10) }
         row.addView(TextView(context).apply { text=name; textSize=10f; setTextColor(Color.LTGRAY); layoutParams=LinearLayout.LayoutParams(120, -2) })
         row.addView(SeekBar(context).apply {
-            max = 1000
-            progress = current
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            max = 1000; progress = current; layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
             thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) onChange(p) }
@@ -578,15 +529,14 @@ class PropertyControl(
         floatingPanel?.addView(row)
     }
 
+    fun stopAnimation() { isAnimating = false; animTarget = null }
+
     fun closeMenu() {
         if (floatingPanel != null) {
-            val activity = context as? MainActivity
-            activity?.overlayHUD?.removeView(floatingPanel)
+            (context as? MainActivity)?.overlayHUD?.removeView(floatingPanel)
             floatingPanel = null
         }
-        if (activeControl == this) {
-            activeControl = null
-        }
+        if (activeControl == this) activeControl = null
     }
 }
 
@@ -1429,13 +1379,13 @@ class MainActivity : AppCompatActivity() {
             if (control.id == "AXIS") return@forEach
             val snap = p.controlSnapshots[control.id]
             if (snap != null) {
-                control.animateTo(snap.value.toFloat(), durationSec)
+                // 1. Animate the main slider value AND the waveform shape
+                control.animateTo(snap.value.toFloat(), durationSec, snap.shape)
+
                 if (control.hasModulation) {
-                    control.updateModRate(snap.rate)
-                    control.updateModDepth(snap.depth)
-                    // Optional: Restore shape from snapshot if you wish,
-                    // though usually shape isn't interpolated, just switched.
-                    try { control.modShape = PropertyControl.WaveShape.valueOf(snap.shape) } catch(e: Exception){}
+                    // 2. FIX: Instead of calling updateModDepth instantly,
+                    // create new methods to animate these over time too.
+                    control.animateModulation(snap.rate.toFloat(), snap.depth.toFloat(), durationSec)
                 }
             }
         }
