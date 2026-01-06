@@ -948,11 +948,12 @@ class MainActivity : AppCompatActivity() {
     private fun setupParameterMenu() {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
         val dm = resources.displayMetrics
+        val menuHeight = (dm.heightPixels * 0.40).toInt()
 
-        // The root container remains transparent and doesn't clip
         leftHUDContainer = LinearLayout(this).apply {
             if (isPortrait) {
                 orientation = LinearLayout.VERTICAL
+                // FIXED: Explicitly cap the container height so the background matches the ScrollView
                 layoutParams = FrameLayout.LayoutParams(-1, -2).apply {
                     gravity = Gravity.TOP
                 }
@@ -966,25 +967,26 @@ class MainActivity : AppCompatActivity() {
             clipToPadding = false
         }
 
-        // Move the background logic here so it disappears when this panel is GONE
         parameterPanel = ScrollView(this).apply {
             if (isPortrait) {
-                layoutParams = LinearLayout.LayoutParams(-1, (dm.heightPixels * 0.40).toInt())
+                // Ensure the ScrollView doesn't request more space than its allotment
+                layoutParams = LinearLayout.LayoutParams(-1, menuHeight)
             } else {
                 layoutParams = LinearLayout.LayoutParams(850, -1)
             }
 
-            // This makes the background disappear with the menu
             id = View.generateViewId()
             layoutDirection = View.LAYOUT_DIRECTION_RTL
             isVerticalScrollBarEnabled = true
-            scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
+            // CHANGE: Move scrollbar style to outside to prevent it from expanding the view
+            scrollBarStyle = View.SCROLLBARS_OUTSIDE_OVERLAY
             visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
         }
 
         val menuLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(25, 20, 10, if (isPortrait) 20 else 240)
+            // Adjust bottom padding to ensure the last item isn't cut off by the rounded corners
+            setPadding(25, 20, 10, if (isPortrait) 60 else 240)
             layoutDirection = View.LAYOUT_DIRECTION_LTR
             layoutTransition = LayoutTransition().apply { enableTransitionType(LayoutTransition.CHANGING) }
         }
@@ -993,7 +995,6 @@ class MainActivity : AppCompatActivity() {
         val toggleBtn = createMenuUtilityButton()
 
         if (isPortrait) {
-            // Portrait: Menu on top, Button floating below it on the RIGHT
             leftHUDContainer.addView(parameterPanel)
             leftHUDContainer.addView(toggleBtn, LinearLayout.LayoutParams(120, 120).apply {
                 gravity = Gravity.END
@@ -1001,7 +1002,6 @@ class MainActivity : AppCompatActivity() {
                 rightMargin = 30
             })
         } else {
-            // Landscape: Menu on left, Button floating on the TOP RIGHT of it
             leftHUDContainer.addView(parameterPanel)
             leftHUDContainer.addView(toggleBtn, LinearLayout.LayoutParams(120, 120).apply {
                 gravity = Gravity.TOP
@@ -1012,6 +1012,7 @@ class MainActivity : AppCompatActivity() {
 
         populateParameterGroups(menuLayout)
     }
+
     private fun populateParameterGroups(menuLayout: LinearLayout) {
         var currentGroupContent: LinearLayout? = null
         fun createGroup(title: String, startOpen: Boolean = false) {
@@ -1283,17 +1284,17 @@ class MainActivity : AppCompatActivity() {
         parameterPanel.background = null // Clear parameter panel specifically
 
         when (readabilityLevel) {
-            1 -> {
-                panels.forEach { it.background = getBg(180) }
-                parameterPanel.background = getBg(180)
-                utils.forEach { it.background = getCircleBg(180) }
-                applyRecursiveGlow(overlayHUD, false)
-            }
-            2 -> {
-                panels.forEach { it.background = getBg(120) }
-                parameterPanel.background = getBg(120)
-                utils.forEach { it.background = getCircleBg(120) }
-                applyRecursiveGlow(overlayHUD, true)
+            1, 2 -> {
+                val alpha = if (readabilityLevel == 1) 180 else 120
+                panels.forEach { it.background = getBg(alpha) }
+
+                // Target the panel
+                parameterPanel.background = getBg(alpha)
+                // Ensure the internal content respects the rounded corners of the background
+                parameterPanel.clipToOutline = true
+
+                utils.forEach { it.background = getCircleBg(alpha) }
+                applyRecursiveGlow(overlayHUD, readabilityLevel == 2)
             }
             else -> {
                 panels.forEach { it.setPadding(0, 0, 0, 0); it.background = null }
