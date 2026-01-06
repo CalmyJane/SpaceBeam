@@ -626,10 +626,16 @@ class MainActivity : AppCompatActivity() {
         super.onConfigurationChanged(newConfig)
         val activeControlId = PropertyControl.activeControl?.id
         PropertyControl.closeActiveMenu()
+
         overlayHUD.removeAllViews()
         setupOverlayHUD()
+
+        // FIX: Apply the current visibility state to the newly built HUD
+        overlayHUD.visibility = if (isHudVisible) View.VISIBLE else View.GONE
+
         applyReadabilityStyle()
         updateSidebarVisuals()
+
         if (activeControlId != null && controlsMap.containsKey(activeControlId)) {
             handler.postDelayed({ controlsMap[activeControlId]?.toggleMenu() }, 50)
         }
