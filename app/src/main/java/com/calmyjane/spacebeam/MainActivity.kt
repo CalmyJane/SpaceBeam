@@ -158,178 +158,341 @@ class PropertyControl(
     private val onValueChanged: ((Int) -> Unit)? = null
 ) {
     enum class ModMode { WRAP, MIRROR }
-    var value: Int = defaultValue
+    enum class WaveShape { SINE, WOBBLE_SINE, POLY_SINE, RAMP, TRIANGLE, SMOOTH_NOISE, ROUGH_NOISE }
+
+    // --- State Variables ---
+    @Volatile var value: Int = defaultValue
         private set
-    var preciseValue: Float = defaultValue.toFloat()
+    @Volatile var preciseValue: Float = defaultValue.toFloat()
         private set
-    var modRate: Int = 0
-        private set
-    var modDepth: Int = 0
-        private set
+
+    // Modulation State
+    var isModActive: Boolean = false
+    var modRate: Int = 0         // 0-1000
+    var modDepth: Int = 0        // 0-1000
+    var modShape: WaveShape = WaveShape.SINE
+
+    // Physics / Internal
     var preciseModRate: Float = 0f
     var preciseModDepth: Float = 0f
     var lfoPhase: Double = 0.0
-    var lfoDrift: Double = 0.0
-    private var mainSeekBar: SeekBar? = null
-    private var rateSeekBar: SeekBar? = null
-    private var depthSeekBar: SeekBar? = null
-    data class Snapshot(val value: Int, val rate: Int, val depth: Int)
-    fun getSnapshot(): Snapshot = Snapshot(value, modRate, modDepth)
+    private var lastComputedModulation: Float = 0f
 
-    fun restore(snapshot: Snapshot) {
-        setProgress(snapshot.value)
+    // The final value used by the renderer
+    val computedValue: Float
+        get() = applyModulation(getNormalized())
+
+    // --- UI Elements ---
+    private var mainSeekBar: SeekBar? = null
+    private var modIndicator: View? = null
+
+    // --- Snapshot for Presets ---
+    data class Snapshot(
+        val value: Int,
+        val active: Boolean,
+        val rate: Int,
+        val depth: Int,
+        val shape: String
+    )
+
+    fun getSnapshot(): Snapshot = Snapshot(value, isModActive, modRate, modDepth, modShape.name)
+
+    fun restore(s: Snapshot) {
+        setProgress(s.value)
         if (hasModulation) {
-            setModRate(snapshot.rate)
-            setModDepth(snapshot.depth)
+            isModActive = s.active
+            updateModRate(s.rate)
+            updateModDepth(s.depth)
+            try { modShape = WaveShape.valueOf(s.shape) } catch (e: Exception) { modShape = WaveShape.SINE }
+            updateIndicatorVisuals()
         }
+    }
+
+    // --- Animation Support ---
+    fun setAnimatedModRate(v: Float) {
+        preciseModRate = v.coerceIn(0f, 1000f)
+        modRate = preciseModRate.toInt()
+    }
+
+    fun setAnimatedModDepth(v: Float) {
+        preciseModDepth = v.coerceIn(0f, 1000f)
+        modDepth = preciseModDepth.toInt()
+        updateIndicatorVisuals()
+    }
+
+    // --- Core Logic ---
+    fun update(deltaTime: Float) {
+        if (!hasModulation || !isModActive || (modRate == 0 && modDepth == 0)) {
+            lastComputedModulation = 0f
+            if (modIndicator?.alpha != 0.4f) modIndicator?.postInvalidate()
+            return
+        }
+
+        // 1. Update Phase
+        val baseSpeed = (preciseModRate / 1000f + 0.05f).pow(3f)
+        val phaseInc = baseSpeed * deltaTime * 2.0 * Math.PI
+        lfoPhase += phaseInc
+
+        // 2. Calculate Waveform (-1.0 to 1.0)
+        val rawWave = when (modShape) {
+            WaveShape.SINE -> sin(lfoPhase)
+            WaveShape.WOBBLE_SINE -> sin(lfoPhase) * sin(lfoPhase * 0.5 + 0.5)
+            WaveShape.POLY_SINE -> (sin(lfoPhase) + sin(lfoPhase * 1.5)) * 0.5
+            WaveShape.RAMP -> ((lfoPhase / (2.0 * Math.PI)) % 1.0 * 2.0 - 1.0)
+            WaveShape.TRIANGLE -> {
+                val t = (lfoPhase / (2.0 * Math.PI)) % 1.0
+                if (t < 0.5) (t * 4.0 - 1.0) else (3.0 - t * 4.0)
+            }
+            WaveShape.SMOOTH_NOISE -> (sin(lfoPhase) + sin(lfoPhase * 2.3) * 0.5 + sin(lfoPhase * 4.7) * 0.25) / 1.75
+            WaveShape.ROUGH_NOISE -> (Math.random() * 2.0 - 1.0)
+        }
+
+        // 3. Apply Depth
+        val depthNorm = getModDepthNormalized()
+        lastComputedModulation = (rawWave * depthNorm).toFloat()
+
+        // 4. Trigger UI Redraw
+        modIndicator?.postInvalidate()
+    }
+
+    private fun applyModulation(baseNorm: Float): Float {
+        if (!hasModulation || !isModActive) return baseNorm
+        val combined = baseNorm + lastComputedModulation
+        if (modMode == ModMode.WRAP) {
+            return combined - floor(combined)
+        } else {
+            val t = combined % 2.0f
+            val res = if (t < 0) t + 2.0f else t
+            return if (res > 1.0f) 2.0f - res else res
+        }
+    }
+
+    // --- Setters ---
+    fun setProgress(v: Int) {
+        val clamped = v.coerceIn(min, max)
+
+        // Always update the data model immediately
+        value = clamped
+        preciseValue = clamped.toFloat()
+
+        // Only push back to UI if the UI isn't already at this value
+        // This check prevents infinite loops between UI Listener -> setProgress -> UI Update
+        if (mainSeekBar != null && mainSeekBar!!.progress != clamped) {
+            mainSeekBar!!.progress = clamped
+        }
+
+        onValueChanged?.invoke(clamped)
+    }
+
+    fun updateModRate(v: Int) {
+        modRate = v.coerceIn(0, 1000)
+        preciseModRate = modRate.toFloat()
+    }
+
+    fun updateModDepth(v: Int) {
+        modDepth = v.coerceIn(0, 1000)
+        preciseModDepth = modDepth.toFloat()
     }
 
     fun setAnimatedValue(v: Float) {
         preciseValue = v.coerceIn(min.toFloat(), max.toFloat())
         val intVal = preciseValue.toInt()
+        // Here we can optimize: only call setProgress (which triggers UI) if integer value changed
         if (intVal != value) {
-            value = intVal
-            mainSeekBar?.progress = value
-            onValueChanged?.invoke(value)
+            setProgress(intVal)
         }
-    }
-
-    fun setAnimatedModRate(v: Float) {
-        preciseModRate = v.coerceIn(0f, 1000f)
-        val intVal = preciseModRate.toInt()
-        if (intVal != modRate) {
-            modRate = intVal
-            rateSeekBar?.progress = modRate
-        }
-    }
-
-    fun setAnimatedModDepth(v: Float) {
-        preciseModDepth = v.coerceIn(0f, 1000f)
-        val intVal = preciseModDepth.toInt()
-        if (intVal != modDepth) {
-            modDepth = intVal
-            depthSeekBar?.progress = modDepth
-        }
-    }
-
-    fun setProgress(v: Int) {
-        value = v.coerceIn(min, max)
-        preciseValue = value.toFloat()
-        mainSeekBar?.progress = value
-        onValueChanged?.invoke(value)
-    }
-
-    fun setModRate(v: Int) {
-        modRate = v.coerceIn(0, 1000)
-        preciseModRate = modRate.toFloat()
-        rateSeekBar?.progress = modRate
-    }
-
-    fun setModDepth(v: Int) {
-        modDepth = v.coerceIn(0, 1000)
-        preciseModDepth = modDepth.toFloat()
-        depthSeekBar?.progress = modDepth
     }
 
     fun reset() {
         setProgress(defaultValue)
         if (hasModulation) {
-            setModRate(0)
-            setModDepth(0)
+            isModActive = false
+            updateModRate(0)
+            updateModDepth(0)
+            modShape = WaveShape.SINE
+            updateIndicatorVisuals()
         }
     }
 
+    // --- Helpers ---
     fun getNormalized(): Float = preciseValue / max.toFloat()
-    fun getMapped(outMin: Float, outMax: Float): Float = outMin + (getNormalized() * (outMax - outMin))
-    fun getModRateNormalized(): Float = (preciseModRate / 1000f + 0.05f).pow(3f)
+    fun getMapped(outMin: Float, outMax: Float): Float = outMin + (computedValue * (outMax - outMin))
     fun getModDepthNormalized(): Float = (preciseModDepth / 1000f).pow(3f)
 
+    // --- UI Construction ---
     fun attachTo(parent: ViewGroup) {
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            // REDUCED PADDING: Tighter vertical spacing between controls
             setPadding(0, 2, 0, 6)
         }
 
         val labelView = TextView(context).apply {
             text = label
             setTextColor(Color.WHITE)
-            textSize = 10f // slightly cleaner font size
+            textSize = 10f
             setTypeface(null, Typeface.BOLD)
             alpha = 0.85f
             setOnClickListener { reset() }
         }
         container.addView(labelView)
 
-        mainSeekBar = createSeekBar(max, value) { p -> setProgress(p) }
-        // Keep height for touch target, but visual track is centered
-        mainSeekBar?.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 55)
-
-        container.addView(mainSeekBar)
-
-        if (hasModulation) {
-            val modContainer = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(15, 0, 0, 0) // Less indentation
-            }
-            modContainer.addView(createSubRow("SPD", modRate) { p -> setModRate(p) }.also { rateSeekBar = it.second }.first)
-            modContainer.addView(createSubRow("DEP", modDepth) { p -> setModDepth(p) }.also { depthSeekBar = it.second }.first)
-            container.addView(modContainer)
-        }
-        parent.addView(container)
-    }
-
-    private fun createSubRow(label: String, startVal: Int, onChange: (Int) -> Unit): Pair<LinearLayout, SeekBar> {
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            // Compact sub-rows
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 40)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 55)
         }
-        val lbl = TextView(context).apply {
-            text = label
-            setTextColor(Color.LTGRAY)
-            textSize = 8f
-            minWidth = 70 // Less width reserved for label
-        }
-        val sb = createSeekBar(1000, startVal, onChange).apply {
-            // Smaller thumb for sub-controls
-            thumb = GradientDrawable().apply {
-                setColor(Color.LTGRAY)
-                setSize(10, 20)
-                cornerRadius = 5f
-            }
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        row.addView(lbl)
-        row.addView(sb)
-        return Pair(row, sb)
-    }
 
-    private fun createSeekBar(maxVal: Int, startVal: Int, listener: (Int) -> Unit): SeekBar {
-        return SeekBar(context).apply {
-            max = maxVal
-            progress = startVal
-            // VISUAL TWEAK: A slightly wider thumb for easier grabbing,
-            // but sleek capsule shape to not look "bulky".
+        // 1. Create the SeekBar
+        val sb = SeekBar(context).apply {
+            max = this@PropertyControl.max
+            progress = value
             thumb = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setSize(18, 30) // Wider (18) makes it easier to see/grab
-                cornerRadius = 6f // Soft corners
-                setStroke(1, Color.argb(100, 0,0,0)) // Subtle shadow/border
+                setColor(Color.WHITE); setSize(18, 30); cornerRadius = 6f
+                setStroke(1, Color.argb(100, 0, 0, 0))
             }
-            // Add padding to drawable so touch target is larger than visual
             thumbOffset = 0
             splitTrack = false
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
 
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) listener(p) }
-                override fun onStartTrackingTouch(s: SeekBar?) {}
-                override fun onStopTrackingTouch(s: SeekBar?) {}
+        // 2. Assign to class property strictly
+        this.mainSeekBar = sb
+
+        // 3. Robust Touch Listener (Fixes ScrollView conflict)
+        sb.setOnTouchListener { v, event ->
+            v.parent.requestDisallowInterceptTouchEvent(true)
+            if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_UP) {
+                v.parent.requestDisallowInterceptTouchEvent(false)
+            }
+            v.onTouchEvent(event) // Manually trigger standard logic
+            true // Consume the event so the ScrollView doesn't get it
+        }
+
+        // 4. Set Listener explicitly outside apply block
+        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                // Log everything to debug
+                // Log.d("PROP_CTRL_RAW", "$id -> $p (User: $fromUser)")
+
+                if (fromUser) {
+                    Log.d("PROP_CTRL", "$id -> $p")
+                    setProgress(p)
+                }
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+
+        row.addView(sb)
+
+        if (hasModulation) {
+            modIndicator = object : View(context) {
+                private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+                override fun onDraw(canvas: Canvas) {
+                    val cx = width / 2f
+                    val cy = height / 2f
+                    val r = (Math.min(width, height) / 2f) - 2f
+
+                    paint.style = Paint.Style.STROKE
+                    paint.strokeWidth = 3f
+                    paint.color = if (isModActive) Color.CYAN else Color.DKGRAY
+                    paint.alpha = if (isModActive) 255 else 100
+                    canvas.drawCircle(cx, cy, r, paint)
+
+                    paint.style = Paint.Style.FILL
+                    val dotColor = if (isModActive) Color.WHITE else Color.LTGRAY
+                    val dotAlpha = if (isModActive) 255 else 80
+                    paint.color = dotColor; paint.alpha = dotAlpha
+
+                    var dotRadius = r * 0.3f
+                    if (isModActive && modDepth > 0) {
+                        val depthN = getModDepthNormalized().coerceAtLeast(0.001f)
+                        val rawWave = lastComputedModulation / depthN
+                        val sizeFactor = ((rawWave + 1.0) / 2.0) * 0.8 + 0.1
+                        dotRadius = (r * sizeFactor).toFloat()
+                    }
+                    canvas.drawCircle(cx, cy, dotRadius, paint)
+                }
+            }.apply {
+                layoutParams = LinearLayout.LayoutParams(55, 55).apply { leftMargin = 15 }
+                setOnClickListener { showModulationDialog() }
+            }
+            row.addView(modIndicator)
+        }
+        container.addView(row)
+        parent.addView(container)
+    }
+
+    private fun updateIndicatorVisuals() { modIndicator?.invalidate() }
+
+    private fun showModulationDialog() {
+        val dialogView = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 30, 40, 30)
+            setBackgroundColor(Color.argb(240, 20, 20, 20))
+            layoutParams = ViewGroup.LayoutParams(600, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+
+        val headerRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 20)
+        }
+        val title = TextView(context).apply {
+            text = "LFO: $label"; textSize = 18f; setTextColor(Color.WHITE); setTypeface(null, Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        }
+        val enableSwitch = Switch(context).apply {
+            isChecked = isModActive
+            setOnCheckedChangeListener { _, c -> isModActive = c; updateIndicatorVisuals() }
+        }
+        headerRow.addView(title); headerRow.addView(enableSwitch)
+        dialogView.addView(headerRow)
+
+        val shapeAdapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, WaveShape.values())
+        val spinner = Spinner(context).apply {
+            adapter = shapeAdapter
+            setSelection(modShape.ordinal)
+            background.setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_ATOP)
+            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 20 }
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(p0: AdapterView<*>?, p1: View?, pos: Int, p3: Long) {
+                    modShape = WaveShape.values()[pos]
+                    (p0?.getChildAt(0) as? TextView)?.setTextColor(Color.WHITE)
+                }
+                override fun onNothingSelected(p0: AdapterView<*>?) {}
+            }
+        }
+        dialogView.addView(spinner)
+
+        fun addSlider(name: String, max: Int, current: Int, onChange: (Int) -> Unit) {
+            dialogView.addView(TextView(context).apply { text = name; setTextColor(Color.LTGRAY); textSize = 12f })
+            dialogView.addView(SeekBar(context).apply {
+                this.max = max; progress = current
+                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20; topMargin = 10 }
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) onChange(p) }
+                    override fun onStartTrackingTouch(s: SeekBar?) {}
+                    override fun onStopTrackingTouch(s: SeekBar?) {}
+                })
             })
         }
+        addSlider("SPEED", 1000, modRate) { updateModRate(it) }
+        addSlider("DEPTH", 1000, modDepth) { updateModDepth(it); updateIndicatorVisuals() }
+
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(context).setView(dialogView).create()
+        dialog.window?.let { w ->
+            w.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+            val params = w.attributes
+            params.gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
+            params.x = 200
+            w.attributes = params
+        }
+        dialog.show()
     }
 }
+
+
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
     private lateinit var glView: GLSurfaceView
@@ -518,7 +681,7 @@ class MainActivity : AppCompatActivity() {
                 pendingSaveIndex = null
             }
             handleInteraction(event)
-            true
+            false
         }
         setContentView(glView)
         setupOverlayHUD()
@@ -1098,6 +1261,7 @@ class MainActivity : AppCompatActivity() {
                 override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
                     transitionMs = ((p / 1000f).pow(3.0f) * 30000).toLong()
                     timeLabel.text = "%.1fs".format(transitionMs / 1000f)
+                    Log.d("Value changed", "Slider $p")
                 }
                 override fun onStartTrackingTouch(s: SeekBar?) {}
                 override fun onStopTrackingTouch(s: SeekBar?) {}
@@ -1735,18 +1899,24 @@ class MainActivity : AppCompatActivity() {
         // --- PART 1: Hardcoded Defaults (Factory Settings) ---
         fun p(ax: Int = 1, mRot: Int = 500, vararg overrides: Any): Preset {
             val baseSnapshots = controls.associate { it.id to it.getSnapshot() }.toMutableMap()
-            baseSnapshots["M_ROT"] = PropertyControl.Snapshot(mRot, 0, 0)
+            // Reset M_ROT specifically with defaults
+            baseSnapshots["M_ROT"] = PropertyControl.Snapshot(mRot, false, 0, 0, "SINE")
+
             var i = 0
             while (i < overrides.size) {
                 val key = overrides[i] as String
                 val value = overrides[i + 1] as Int
+
+                // Check if modulation args follow (Value, Rate, Depth)
                 if (i + 3 < overrides.size && overrides[i + 2] is Int && overrides[i + 3] is Int) {
                     val rate = overrides[i + 2] as Int
                     val depth = overrides[i + 3] as Int
-                    baseSnapshots[key] = PropertyControl.Snapshot(value, rate, depth)
+                    // If rate/depth provided, assume Active = true and shape = SINE
+                    baseSnapshots[key] = PropertyControl.Snapshot(value, true, rate, depth, "SINE")
                     i += 4
                 } else {
-                    baseSnapshots[key] = PropertyControl.Snapshot(value, 0, 0)
+                    // Just value provided
+                    baseSnapshots[key] = PropertyControl.Snapshot(value, false, 0, 0, "SINE")
                     i += 2
                 }
             }
@@ -1782,20 +1952,22 @@ class MainActivity : AppCompatActivity() {
                     // Start with defaults to ensure missing keys don't crash
                     loadedSnapshots.putAll(presets[i]?.controlSnapshots ?: emptyMap())
 
-                    // --- FIX IS HERE: Use strict Iterator while-loop ---
                     val keysIterator = controlsObj.keys()
                     while (keysIterator.hasNext()) {
                         val key = keysIterator.next()
                         val snapObj = controlsObj.getJSONObject(key)
+                        // Update JSON parsing to include active/shape if available, or defaults
                         loadedSnapshots[key] = PropertyControl.Snapshot(
                             snapObj.getInt("v"),
+                            snapObj.optBoolean("active", false), // Handle legacy JSON gracefully
                             snapObj.optInt("r", 0),
-                            snapObj.optInt("d", 0)
+                            snapObj.optInt("d", 0),
+                            snapObj.optString("shape", "SINE")
                         )
                     }
 
                     presets[i] = Preset(loadedSnapshots, loadedFlipX, loadedFlipY, loadedRot180, loadedAxis)
-                    Log.d("PRESETS", "Successfully loaded user preset $i") // Log success
+                    Log.d("PRESETS", "Successfully loaded user preset $i")
                 } catch (e: Exception) {
                     Log.e("PRESET", "Error loading preset $i", e)
                 }
@@ -1820,44 +1992,40 @@ class MainActivity : AppCompatActivity() {
         // --- Programs ---
         private var kaleidoProgram = 0
         private var simpleProgram = 0
+
+        // --- Render State Variables (Restored) ---
         var scrollAccum = 0.0f
+        var mRotAccum = 0.0
+        var cRotAccum = 0.0
+        var lRotAccum = 0.0
+        var axisCount = 2.0f
+        var flipX = 1.0f
+        var flipY = -1.0f
+        var rot180 = false
+        private var lastTime = System.nanoTime()
+        private var deltaTime = 0.0f
+
         // --- Textures & Buffers ---
         private var cameraTexId = -1
         private var surfaceTexture: SurfaceTexture? = null
-
         private var playerSurface: Surface? = null
 
-        private var recordStartTimeNs: Long = 0
-
+        // --- FBO ---
         private var fboId = 0
         private var fboTexId = 0
         private var fboWidth = 1920
         private var fboHeight = 1080
 
-        private lateinit var pBuf: FloatBuffer
-        private lateinit var tBuf: FloatBuffer
-        private var uLocs = mutableMapOf<String, Int>()
-        private var simpleULocs = mutableMapOf<String, Int>()
-        private var viewWidth = 1
-        private var viewHeight = 1
-        private var lastTime = System.nanoTime()
-
-        // Geometric properties
-        var axisCount = 2.0f
-        var flipX = 1.0f
-        var flipY = -1.0f
-        var rot180 = false
-        var mRotAccum = 0.0
-        var cRotAccum = 0.0
-        var lRotAccum = 0.0
-
-        // Media / Capture vars
+        // --- Recording / Media ---
         private var captureRequested = false
         private var videoRecorder: VideoRecorder? = null
         private var recordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
         private var pendingRecordFile: File? = null
         private var onStopCallback: ((File?) -> Unit)? = null
         private var isStopRequested = false
+        private var recordStartTimeNs: Long = 0
+
+        // --- EGL / External Display ---
         private var mSavedDisplay = EGL14.EGL_NO_DISPLAY
         private var mSavedContext = EGL14.eglGetCurrentContext()
         private var mEglConfig: EGL14EGLConfig? = null
@@ -1865,16 +2033,22 @@ class MainActivity : AppCompatActivity() {
         private var extEglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
         private var extWidth = 0
         private var extHeight = 0
-        private var startTime = System.nanoTime()
+
+        // --- GL Buffers ---
+        private lateinit var pBuf: FloatBuffer
+        private lateinit var tBuf: FloatBuffer
+        private var uLocs = mutableMapOf<String, Int>()
+        private var simpleULocs = mutableMapOf<String, Int>()
+        private var viewWidth = 1
+        private var viewHeight = 1
 
         fun resetPhases() {
-            ctx.controls.forEach { it.lfoPhase = 0.0; it.lfoDrift = 0.0 }
+            ctx.controls.forEach { it.lfoPhase = 0.0 }
             mRotAccum = 0.0; cRotAccum = 0.0; lRotAccum = 0.0
         }
 
         fun capturePhoto() { captureRequested = true }
 
-        // Clean stop function (Removed recursive loop)
         fun stopRecording(callback: (File?) -> Unit) {
             onStopCallback = callback
             isStopRequested = true
@@ -1890,32 +2064,39 @@ class MainActivity : AppCompatActivity() {
 
         fun startRecording(file: File) {
             pendingRecordFile = file
-            // CRITICAL FIX: Reset the time to 0 for every new video
             recordStartTimeNs = 0
         }
 
         fun resetVideoTexture() {
-            // 1. Release existing surfaces
             playerSurface?.release()
             playerSurface = null
-
             surfaceTexture?.release()
             surfaceTexture = null
-
-            // 2. Delete old texture ID
             if (cameraTexId != -1) {
                 val t = IntArray(1)
                 t[0] = cameraTexId
                 GLES20.glDeleteTextures(1, t, 0)
                 cameraTexId = -1
             }
-
-            // 3. Create fresh Texture & SurfaceTexture
             cameraTexId = createOESTex()
             surfaceTexture = SurfaceTexture(cameraTexId)
-
-            // Default size, will be updated by player later
             surfaceTexture?.setDefaultBufferSize(viewWidth, viewHeight)
+        }
+
+        fun provideSurface(req: SurfaceRequest) {
+            glView.queueEvent {
+                surfaceTexture?.let { st ->
+                    st.setDefaultBufferSize(req.resolution.width, req.resolution.height)
+                    val s = Surface(st)
+                    req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() }
+                }
+            }
+        }
+
+        fun setExternalSurface(s: Surface, w: Int, h: Int) { extSurfaceArgs = Triple(s, w, h) }
+        fun removeExternalSurface() { extSurfaceArgs = null }
+        fun updateTextureSize(width: Int, height: Int) {
+            glView.queueEvent { surfaceTexture?.setDefaultBufferSize(width, height) }
         }
 
         override fun onSurfaceCreated(gl: GL10?, config: GL10EGLConfig?) {
@@ -2012,34 +2193,19 @@ class MainActivity : AppCompatActivity() {
                     float sOff = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
                     vec3 smp = sampleCamera(cameraUV, sOff);
 
-                    // --- 3D EFFECTS ---
                     if (uMode > 0.01) {
-                        // 1. Rainbow Tunnel
                         if (uTHueStr > 0.01) {
                             float hueArg = (mixedUV.y * 0.5) + uTHuePos; 
                             vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (hueArg + vec3(0.0, 0.33, 0.67)));
                             smp = mix(smp, smp * rainbow * 2.0, uTHueStr * uMode);
                         }
-
-                        // 2. Magical Wave (FIXED: Inverted, Softer, Lower Strength)
                         if (uTWaveStr > 0.01) {
-                            // Calculate distance from the "Wave Center"
                             float waveDomain = mixedUV.y - (uTWavePos * 10.0);
                             float distFromWave = abs(fract(waveDomain) - 0.5); 
-                            
-                            // Width increases slightly with strength, but stays soft
                             float width = 0.15 + (uTWaveStr * 0.2); 
-                            
-                            // 1.0 at center, 0.0 at edges (Bright Ring Logic)
                             float wavePulse = smoothstep(width, 0.0, distFromWave);
-                            
-                            // Square it to make it "Glowy" (Softness)
                             wavePulse = wavePulse * wavePulse;
-                            
-                            // Intensity Curve: Squared input for better slider control at low levels
-                            // 10% slider = 1% opacity. 100% slider = 80% opacity.
                             float intensity = (uTWaveStr * uTWaveStr) * 0.8;
-                            
                             vec3 waveColor = vec3(0.5, 0.8, 1.0) * wavePulse * intensity; 
                             smp += waveColor;
                         }
@@ -2077,7 +2243,7 @@ class MainActivity : AppCompatActivity() {
                 if (loc != -1) uLocs[name] = loc
             }
 
-            // --- 2. COMPILE SIMPLE COPY SHADER ---
+            // Simple copy shader
             val fSrcSimple = """
             precision mediump float;
             varying vec2 v;
@@ -2088,7 +2254,7 @@ class MainActivity : AppCompatActivity() {
             simpleProgram = createProgram(vSrc, fSrcSimple)
             simpleULocs["uTex"] = GLES20.glGetUniformLocation(simpleProgram, "uTex")
 
-            // --- 3. SETUP TEXTURES & FBO ---
+            // Setup Textures & FBO
             cameraTexId = createOESTex()
             surfaceTexture = SurfaceTexture(cameraTexId)
             initFBO(fboWidth, fboHeight)
@@ -2114,80 +2280,39 @@ class MainActivity : AppCompatActivity() {
         override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
             viewWidth = w; viewHeight = h
         }
-// Ensure "var scrollAccum = 0.0f" exists at the top of KaleidoscopeRenderer
-
-        private var deltaTime = 0.0f // Add this line
 
         override fun onDrawFrame(gl: GL10?) {
             val now = System.nanoTime()
-            // Update the class-level variable so all functions can see it
             deltaTime = (now - lastTime) / 1e9f
             lastTime = now
+
+            // 1. UPDATE ALL CONTROLS (Physics step for LFOs)
+            ctx.controls.forEach { it.update(deltaTime) }
 
             // Safety checks
             if (!ctx.controlsMap.containsKey("S_SHAPE") || !uLocs.containsKey("uSShape")) return
             try { surfaceTexture?.updateTexImage() } catch (e: Exception) { return }
             manageSurfaces()
 
-            // 1. Update Physics
-            updateMovementPhysics()
-
-            // 2. Render to Framebuffer (FBO)
+            updateMovementPhysics(deltaTime) // Global flight physics
             renderToFBO()
-
-            // 3. Output to screens and recorder
             renderToScreen()
             renderToExternal()
             renderToRecorder()
-
             handleCapture()
         }
-        private fun resolveModulation(id: String): Float {
-            val c = ctx.controlsMap[id] ?: return 0f
-            val normValue = c.getNormalized()
 
-            // Performance optimization
-            if (!c.hasModulation || (c.modRate == 0 && c.modDepth == 0)) return normValue
+        private fun updateMovementPhysics(d: Float) {
+            val speedCtrl = ctx.controlsMap["S_SPEED"] ?: return
+            val rawVal = speedCtrl.getNormalized() - 0.5f
+            val sign = sign(rawVal)
+            val curvedSpeed = sign * (abs(rawVal) * 2.0f).pow(2.2f)
+            scrollAccum += curvedSpeed * d * 0.6f
 
-            // Calculate LFO Drift
-            val r = c.getModRateNormalized().toDouble()
-            val tpi = 2.0 * PI
-            // Use 'this.deltaTime'
-            c.lfoDrift += (r * 0.4) * deltaTime.toDouble() * tpi
-
-            val modSignal = sin(c.lfoDrift).toFloat() * c.getModDepthNormalized()
-            val combined = normValue + modSignal
-
-            if (c.modMode == PropertyControl.ModMode.WRAP) {
-                return combined - floor(combined)
-            } else {
-                // Mirror Logic
-                val t = combined % 2.0f
-                val res = if (t < 0) t + 2.0f else t
-                return if (res > 1.0f) 2.0f - res else res
-            }
-        }
-
-        private fun updateMovementPhysics() {
-            // Flight Speed (Curved)
-            val speedCtrl = ctx.controlsMap["S_SPEED"]
-            if (speedCtrl != null) {
-                val rawVal = speedCtrl.getNormalized() - 0.5f
-                val sign = sign(rawVal)
-                val curvedSpeed = sign * (abs(rawVal) * 2.0f).pow(2.2f)
-                scrollAccum += curvedSpeed * deltaTime * 0.6f
-            }
-
-            // Rotations (Explicit Float/Double casting to fix Ambiguity errors)
-            val mRotCtrl = ctx.controlsMap["M_ROT"]
-            if (mRotCtrl != null) {
-                mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * deltaTime.toDouble()
-            }
-
-            val cRotCtrl = ctx.controlsMap["C_ROT"]
-            if (cRotCtrl != null) {
-                cRotAccum += cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * deltaTime.toDouble()
-            }
+            val mRotCtrl = ctx.controlsMap["M_ROT"] ?: return
+            mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
+            val cRotCtrl = ctx.controlsMap["C_ROT"] ?: return
+            cRotAccum += cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
         }
 
         private fun renderToFBO() {
@@ -2199,10 +2324,14 @@ class MainActivity : AppCompatActivity() {
             fun safeUni(name: String, v: Float) { uLocs[name]?.let { GLES20.glUniform1f(it, v) } }
             fun safeUni2(name: String, v1: Float, v2: Float) { uLocs[name]?.let { GLES20.glUniform2f(it, v1, v2) } }
 
-            val vMAngle = resolveModulation("M_ANGLE"); val vMZoom = resolveModulation("M_ZOOM")
-            val vMTx = resolveModulation("M_TX"); val vMTy = resolveModulation("M_TY")
-            val vMTiltX = resolveModulation("M_TILTX"); val vMTiltY = resolveModulation("M_TILTY")
-            val v3DMix = resolveModulation("3D_MIX")
+            // DIRECT ACCESS TO COMPUTED VALUES
+            val vMAngle = ctx.controlsMap["M_ANGLE"]?.computedValue ?: 0f
+            val vMZoom = ctx.controlsMap["M_ZOOM"]?.computedValue ?: 0f
+            val vMTx = ctx.controlsMap["M_TX"]?.computedValue ?: 0.5f
+            val vMTy = ctx.controlsMap["M_TY"]?.computedValue ?: 0.5f
+            val vMTiltX = ctx.controlsMap["M_TILTX"]?.computedValue ?: 0.5f
+            val vMTiltY = ctx.controlsMap["M_TILTY"]?.computedValue ?: 0.5f
+            val v3DMix = ctx.controlsMap["3D_MIX"]?.computedValue ?: 0f
 
             safeUni("uAx", axisCount)
             safeUni("uA", fboWidth.toFloat() / fboHeight.toFloat())
@@ -2213,37 +2342,44 @@ class MainActivity : AppCompatActivity() {
 
             safeUni("uMode", v3DMix.pow(2.0f))
             safeUni("uScroll", scrollAccum)
-            safeUni("uSShape", resolveModulation("S_SHAPE"))
-            safeUni("uSFov", resolveModulation("S_FOV"))
+            safeUni("uSShape", ctx.controlsMap["S_SHAPE"]?.computedValue ?: 0f)
+            safeUni("uSFov", ctx.controlsMap["S_FOV"]?.computedValue ?: 0.5f)
 
-            // --- NEW TUNNEL CONTROLS ---
-            safeUni("uTHueStr", ctx.controlsMap["T_HUE_STR"]?.getNormalized() ?: 0f)
-            safeUni("uTHuePos", resolveModulation("T_HUE_POS")) // Modulatable
-            safeUni("uTWaveStr", ctx.controlsMap["T_WAVE_STR"]?.getNormalized() ?: 0f)
-            safeUni("uTWavePos", resolveModulation("T_WAVE_POS")) // Modulatable
+            // Tunnel Controls
+            safeUni("uTHueStr", ctx.controlsMap["T_HUE_STR"]?.computedValue ?: 0f)
+            safeUni("uTHuePos", ctx.controlsMap["T_HUE_POS"]?.computedValue ?: 0f)
+            safeUni("uTWaveStr", ctx.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f)
+            safeUni("uTWavePos", ctx.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
 
-            val cRaw = ctx.controlsMap["CURVE"]?.getMapped(0f, 1f) ?: 0.5f
+            // Morphing
+            val cRaw = ctx.controlsMap["CURVE"]?.computedValue ?: 0.5f
             safeUni("uCurve", if (cRaw > 0.5f) 1.0f + (cRaw - 0.5f) * 6.0f else 0.2f + (cRaw * 1.6f))
             safeUni("uTwist", ctx.controlsMap["TWIST"]?.getMapped(-5.0f, 5.0f) ?: 0f)
-            safeUni("uFlux", resolveModulation("FLUX") * 0.2f)
+            safeUni("uFlux", (ctx.controlsMap["FLUX"]?.computedValue ?: 0f) * 0.2f)
 
-            val vCZoom = resolveModulation("C_ZOOM"); val vCAngle = resolveModulation("C_ANGLE")
-            val vCTx = resolveModulation("C_TX"); val vCTy = resolveModulation("C_TY")
-            val vCTiltX = resolveModulation("C_TILTX"); val vCTiltY = resolveModulation("C_TILTY")
+            // Camera Trans
+            val vCZoom = ctx.controlsMap["C_ZOOM"]?.computedValue ?: 0f
+            val vCAngle = ctx.controlsMap["C_ANGLE"]?.computedValue ?: 0f
+            val vCTx = ctx.controlsMap["C_TX"]?.computedValue ?: 0.5f
+            val vCTy = ctx.controlsMap["C_TY"]?.computedValue ?: 0.5f
+            val vCTiltX = ctx.controlsMap["C_TILTX"]?.computedValue ?: 0.5f
+            val vCTiltY = ctx.controlsMap["C_TILTY"]?.computedValue ?: 0.5f
+
             safeUni("uCZ", 0.3f + (vCZoom * 2.0f))
             safeUni("uCR", (vCAngle * 360f + cRotAccum).toFloat())
             safeUni2("uCT", (vCTx - 0.5f), (vCTy - 0.5f))
             safeUni2("uCTilt", (vCTiltX - 0.5f) * 1.2f, (vCTiltY - 0.5f) * 1.2f)
             safeUni2("uF", if (rot180) -flipX else flipX, if (rot180) -flipY else flipY)
-            safeUni("uWarp", ctx.controlsMap["WARP"]?.getNormalized() ?: 0f)
+            safeUni("uWarp", ctx.controlsMap["WARP"]?.computedValue ?: 0f)
 
+            // Colors
             safeUni("uC", ctx.controlsMap["CONTRAST"]?.getMapped(0f, 2f) ?: 1f)
             safeUni("uS", ctx.controlsMap["VIBRANCE"]?.getMapped(0f, 2f) ?: 1f)
-            safeUni("uHue", resolveModulation("HUE")); safeUni("uSol", resolveModulation("NEG"))
-            safeUni("uBloom", resolveModulation("GLOW")); safeUni("uRGB", resolveModulation("RGB") * 0.05f)
-            safeUni("uMRGB", resolveModulation("M_RGB") * 0.1f)
-
-            // --- NEW BRIGHTNESS UNIFORM ---
+            safeUni("uHue", ctx.controlsMap["HUE"]?.computedValue ?: 0f)
+            safeUni("uSol", ctx.controlsMap["NEG"]?.computedValue ?: 0f)
+            safeUni("uBloom", ctx.controlsMap["GLOW"]?.computedValue ?: 0f)
+            safeUni("uRGB", (ctx.controlsMap["RGB"]?.computedValue ?: 0f) * 0.05f)
+            safeUni("uMRGB", (ctx.controlsMap["M_RGB"]?.computedValue ?: 0f) * 0.1f)
             safeUni("uBrit", ctx.controlsMap["BRIT"]?.getMapped(0.0f, 2.0f) ?: 1.0f)
 
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -2252,33 +2388,6 @@ class MainActivity : AppCompatActivity() {
             bindCommonAttribs(kaleidoProgram)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        }
-
-        /**
-         * Updates physics with a Quadratic Curve to prevent speed rushing.
-         * Center stickiness makes 0.0 speed easier to hit.
-         */
-        private fun updateMovementPhysics(d: Float) {
-            val speedCtrl = ctx.controlsMap["S_SPEED"] ?: return
-
-            // 1. Get raw -0.5 to 0.5 range
-            val rawVal = speedCtrl.getNormalized() - 0.5f
-            val sign = sign(rawVal)
-
-            // 2. Apply Quadratic Curve (x^2)
-            // This makes small movements of the slider result in VERY small speed changes.
-            // Large movements still allow for high speed.
-            val curvedSpeed = sign * (abs(rawVal) * 2.0f).pow(2.2f)
-
-            // 3. Accumulate
-            // Reduced multiplier (1.2) for more controlled flight
-            scrollAccum += curvedSpeed * d * 1.2f
-
-            // Rotation Physics
-            val mRotCtrl = ctx.controlsMap["M_ROT"] ?: return
-            mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
-            val cRotCtrl = ctx.controlsMap["C_ROT"] ?: return
-            cRotAccum += cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
         }
 
         private fun renderToScreen() {
@@ -2308,13 +2417,7 @@ class MainActivity : AppCompatActivity() {
                 val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
 
                 if (EGL14.eglMakeCurrent(mSavedDisplay, recordSurface, recordSurface, mSavedContext)) {
-
-                    // --- CRITICAL FIX: VIEWPORT MISMATCH ---
-                    // Previously: GLES20.glViewport(0, 0, viewWidth, viewHeight)
-                    // This caused the GL driver to scale 1080p content into a 1072p buffer incorrectly.
-                    // New: Use the SAFE dimensions calculated by the recorder.
                     GLES20.glViewport(0, 0, videoRecorder!!.width, videoRecorder!!.height)
-
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                     drawSimpleTexture(fboTexId)
 
@@ -2325,7 +2428,6 @@ class MainActivity : AppCompatActivity() {
                     videoRecorder?.drain(false)
                 }
 
-                // Restore original context
                 EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
                 handleStopRecording()
             }
@@ -2359,10 +2461,6 @@ class MainActivity : AppCompatActivity() {
         private fun compile(t: Int, s: String) = GLES20.glCreateShader(t).apply { GLES20.glShaderSource(this, s); GLES20.glCompileShader(this) }
         private fun createOESTex(): Int { val t=IntArray(1); GLES20.glGenTextures(1,t,0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,t[0]); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MIN_FILTER,GLES20.GL_LINEAR); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MAG_FILTER,GLES20.GL_LINEAR); return t[0] }
 
-        fun provideSurface(req: SurfaceRequest) { glView.queueEvent { surfaceTexture?.let { st -> st.setDefaultBufferSize(req.resolution.width, req.resolution.height); val s = Surface(st); req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() } } } }
-        fun setExternalSurface(s: Surface, w: Int, h: Int) { extSurfaceArgs = Triple(s, w, h) }
-        fun removeExternalSurface() { extSurfaceArgs = null }
-
         private fun setupEGL() {
             mSavedDisplay = EGL14.eglGetCurrentDisplay()
             mSavedContext = EGL14.eglGetCurrentContext()
@@ -2374,12 +2472,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         private fun manageSurfaces() {
-            if (extSurfaceArgs != null && extEglSurface == EGL14.EGL_NO_SURFACE) {
-                val (rawSurf, w, h) = extSurfaceArgs!!
-                extWidth = w; extHeight = h
+            val args = extSurfaceArgs
+            if (args != null && extEglSurface == EGL14.EGL_NO_SURFACE) {
+                // Manually extracting components to avoid ambiguity error
+                val rawSurf = args.first
+                extWidth = args.second
+                extHeight = args.third
                 extEglSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, rawSurf, intArrayOf(EGL14.EGL_NONE), 0)
             }
-            if (extSurfaceArgs == null && extEglSurface != EGL14.EGL_NO_SURFACE) {
+            if (args == null && extEglSurface != EGL14.EGL_NO_SURFACE) {
                 EGL14.eglDestroySurface(mSavedDisplay, extEglSurface); extEglSurface = EGL14.EGL_NO_SURFACE
             }
             if (pendingRecordFile != null) {
@@ -2389,11 +2490,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        fun updateTextureSize(width: Int, height: Int) {
-            glView.queueEvent { surfaceTexture?.setDefaultBufferSize(width, height) }
-        }
-
-        // --- NON-RECURSIVE STOP FUNCTION ---
         private fun handleStopRecording() {
             if (isStopRequested) {
                 videoRecorder?.drain(true)
