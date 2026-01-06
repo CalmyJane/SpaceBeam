@@ -160,6 +160,13 @@ class PropertyControl(
     enum class ModMode { WRAP, MIRROR }
     enum class WaveShape { SINE, WOBBLE_SINE, POLY_SINE, RAMP, TRIANGLE, SMOOTH_NOISE, ROUGH_NOISE }
 
+    companion object {
+        var activeControl: PropertyControl? = null
+        fun closeActiveMenu() {
+            activeControl?.closeMenu()
+        }
+    }
+
     // --- State Variables ---
     @Volatile var value: Int = defaultValue
         private set
@@ -167,9 +174,8 @@ class PropertyControl(
         private set
 
     // Modulation State
-    // "Active" logic is now implicitly defined by modDepth > 0
-    var modRate: Int = 200         // 0-1000
-    var modDepth: Int = 0        // 0-1000
+    var modRate: Int = 200
+    var modDepth: Int = 0
     var modShape: WaveShape = WaveShape.SINE
 
     // Physics / Internal
@@ -181,13 +187,18 @@ class PropertyControl(
     val computedValue: Float
         get() = applyModulation(getNormalized())
 
+    // --- UI References ---
     private var mainSeekBar: SeekBar? = null
     private var modIndicator: View? = null
+    // We keep reference to the row to calculate screen position
+    private var mainRowLayout: LinearLayout? = null
+    // The floating panel
+    private var floatingPanel: LinearLayout? = null
 
     // --- Snapshot for Presets ---
     data class Snapshot(
         val value: Int,
-        val active: Boolean, // Kept for JSON compatibility, logic relies on depth
+        val active: Boolean,
         val rate: Int,
         val depth: Int,
         val shape: String
@@ -219,20 +230,16 @@ class PropertyControl(
 
     // --- Core Logic ---
     fun update(deltaTime: Float) {
-        // If no modulation capability or depth is 0, no need to calc, but we reset modulation to 0
         if (!hasModulation || (modRate == 0 && modDepth == 0)) {
             lastComputedModulation = 0f
-            // If the indicator is still showing "active" visual, redraw it to dim it
             if (modIndicator?.alpha == 1.0f) modIndicator?.postInvalidate()
             return
         }
 
-        // 1. Update Phase
         val baseSpeed = (preciseModRate / 1000f + 0.05f).pow(3f)
         val phaseInc = baseSpeed * deltaTime * 2.0 * Math.PI
         lfoPhase += phaseInc
 
-        // 2. Calculate Waveform (-1.0 to 1.0)
         val rawWave = when (modShape) {
             WaveShape.SINE -> sin(lfoPhase)
             WaveShape.WOBBLE_SINE -> sin(lfoPhase) * sin(lfoPhase * 0.5 + 0.5)
@@ -246,26 +253,24 @@ class PropertyControl(
             WaveShape.ROUGH_NOISE -> (Math.random() * 2.0 - 1.0)
         }
 
-        // 3. Apply Depth
         val depthNorm = getModDepthNormalized()
         lastComputedModulation = (rawWave * depthNorm).toFloat()
-
-        // 4. Trigger UI Redraw
         modIndicator?.postInvalidate()
     }
 
     private fun applyModulation(baseNorm: Float): Float {
         if (!hasModulation || modDepth == 0) return baseNorm
         val combined = baseNorm + lastComputedModulation
-
-        // This forces the result to stay between 0.0 and 1.0.
-        // If the sine wave pushes it above 1.0, it stays flat at 1.0.
-        // If it pushes below 0.0, it stays flat at 0.0.
         return combined.coerceIn(0f, 1f)
     }
 
     // --- Setters ---
     fun setProgress(v: Int) {
+        // Close other menus if touching this slider
+        if (activeControl != null && activeControl != this) {
+            activeControl?.closeMenu()
+        }
+
         val clamped = v.coerceIn(min, max)
         value = clamped
         preciseValue = clamped.toFloat()
@@ -329,6 +334,7 @@ class PropertyControl(
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 55)
         }
+        this.mainRowLayout = row
 
         val sb = SeekBar(context).apply {
             max = this@PropertyControl.max
@@ -343,8 +349,14 @@ class PropertyControl(
         }
         this.mainSeekBar = sb
 
+        // Slider Interaction Logic
         sb.setOnTouchListener { v, event ->
             v.parent.requestDisallowInterceptTouchEvent(true)
+            if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_DOWN) {
+                if (activeControl != null && activeControl != this@PropertyControl) {
+                    closeActiveMenu()
+                }
+            }
             if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_UP) {
                 v.parent.requestDisallowInterceptTouchEvent(false)
             }
@@ -369,20 +381,15 @@ class PropertyControl(
                     val cx = width / 2f
                     val cy = height / 2f
                     val r = (Math.min(width, height) / 2f) - 2f
-
                     val active = modDepth > 0
 
-                    // --- DRAW RING ---
                     paint.style = Paint.Style.STROKE
                     paint.strokeWidth = 3f
                     paint.color = Color.WHITE
-                    // Always fully visible ring
                     paint.alpha = 255
                     canvas.drawCircle(cx, cy, r, paint)
 
-                    // --- DRAW DOT ---
                     paint.style = Paint.Style.FILL
-                    // White if active (Depth > 0), Gray if inactive
                     paint.color = if (active) Color.WHITE else Color.LTGRAY
                     paint.alpha = if (active) 255 else 100
 
@@ -397,7 +404,7 @@ class PropertyControl(
                 }
             }.apply {
                 layoutParams = LinearLayout.LayoutParams(55, 55).apply { leftMargin = 15 }
-                setOnClickListener { showModulationDialog() }
+                setOnClickListener { toggleMenu() }
             }
             row.addView(modIndicator)
         }
@@ -407,38 +414,81 @@ class PropertyControl(
 
     private fun updateIndicatorVisuals() { modIndicator?.invalidate() }
 
-    private fun showModulationDialog() {
-        val displayMetrics = context.resources.displayMetrics
-        val dialogWidth = (displayMetrics.widthPixels * 0.50).toInt()
+    // --- POPUP / FLYOUT LOGIC ---
 
-        val dialogView = LinearLayout(context).apply {
+    fun toggleMenu() {
+        if (activeControl == this) {
+            closeMenu()
+        } else {
+            activeControl?.closeMenu()
+            openMenu()
+        }
+    }
+
+    private fun openMenu() {
+        // 1. Get the Main Activity Root View
+        val activity = context as? MainActivity ?: return
+        val rootLayout = activity.overlayHUD
+
+        // 2. Calculate Position
+        // We get the absolute screen position of the row (Slider + Dot)
+        // Then we position the popup to the right of the sidebar width (850px)
+        // and at the same Y coordinate as the row.
+        val location = IntArray(2)
+        mainRowLayout?.getLocationOnScreen(location)
+        val rowY = location[1] // Absolute Y position on screen
+
+        // Note: The sidebar width is 850 in MainActivity. We start slightly after that.
+        val sidebarWidth = 850
+        val popupX = sidebarWidth + 20
+
+        // 3. Create the Panel
+        floatingPanel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(40, 30, 40, 30)
-            setBackgroundColor(Color.argb(240, 20, 20, 20))
-            layoutParams = ViewGroup.LayoutParams(dialogWidth, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setPadding(20, 20, 20, 20)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(150, 30, 30, 30)) // Opaque dark background
+                cornerRadius = 12f
+                setStroke(2, Color.GRAY)
+            }
+            // Add elevation for shadow
+            elevation = 20f
+
+            // LayoutParams for the FrameLayout (Main HUD)
+            layoutParams = FrameLayout.LayoutParams(600, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                leftMargin = popupX
+                topMargin = rowY - 20 // Shift up slightly to center-align vertically with row
+                gravity = Gravity.TOP or Gravity.START
+            }
+
+            // Prevent clicks from passing through to the GLView behind the popup
+            isClickable = true
         }
 
-        val headerRow = LinearLayout(context).apply {
+        // 4. Populate Panel (Title)
+        val titleText = TextView(context).apply {
+            text = "$label MODULATION"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 15 }
+        }
+        floatingPanel?.addView(titleText)
+
+        // 5. Shape Spinner
+        val shapeRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, 20)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 }
         }
-        val title = TextView(context).apply {
-            text = "LFO: $label"; textSize = 18f; setTextColor(Color.WHITE); setTypeface(null, Typeface.BOLD)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2)
-            gravity = Gravity.CENTER_HORIZONTAL
-        }
-
-        // Removed the Switch
-        headerRow.addView(title)
-        dialogView.addView(headerRow)
+        shapeRow.addView(TextView(context).apply { text="SHAPE"; textSize=10f; setTextColor(Color.LTGRAY); layoutParams=LinearLayout.LayoutParams(120, -2) })
 
         val shapeAdapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, WaveShape.values())
         val spinner = Spinner(context).apply {
             adapter = shapeAdapter
             setSelection(modShape.ordinal)
             background.setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_ATOP)
-            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 20 }
+            layoutParams = LinearLayout.LayoutParams(0, 70, 1f)
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(p0: AdapterView<*>?, p1: View?, pos: Int, p3: Long) {
                     modShape = WaveShape.values()[pos]
@@ -447,50 +497,47 @@ class PropertyControl(
                 override fun onNothingSelected(p0: AdapterView<*>?) {}
             }
         }
-        dialogView.addView(spinner)
+        shapeRow.addView(spinner)
+        floatingPanel?.addView(shapeRow)
 
-        fun addSlider(name: String, max: Int, current: Int, onChange: (Int) -> Unit) {
-            dialogView.addView(TextView(context).apply { text = name; setTextColor(Color.LTGRAY); textSize = 12f })
-            dialogView.addView(SeekBar(context).apply {
-                this.max = max; progress = current
-                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20; topMargin = 10 }
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) onChange(p) }
-                    override fun onStartTrackingTouch(s: SeekBar?) {}
-                    override fun onStopTrackingTouch(s: SeekBar?) {}
-                })
-            })
+        // 6. Speed & Depth Sliders
+        addSliderToPanel("SPEED", modRate) { updateModRate(it) }
+        addSliderToPanel("DEPTH", modDepth) { updateModDepth(it); updateIndicatorVisuals() }
+
+        // 7. Add to Root
+        rootLayout.addView(floatingPanel)
+        activeControl = this
+    }
+
+    private fun addSliderToPanel(name: String, current: Int, onChange: (Int) -> Unit) {
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 10, 0, 10)
         }
-        addSlider("SPEED", 1000, modRate) { updateModRate(it) }
-        addSlider("DEPTH", 1000, modDepth) { updateModDepth(it); updateIndicatorVisuals() }
+        row.addView(TextView(context).apply { text=name; textSize=10f; setTextColor(Color.LTGRAY); layoutParams=LinearLayout.LayoutParams(120, -2) })
+        row.addView(SeekBar(context).apply {
+            max = 1000
+            progress = current
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) onChange(p) }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        })
+        floatingPanel?.addView(row)
+    }
 
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(context).setView(dialogView).create()
-        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
-
-        // --- IMMERSIVE MODE FIX START ---
-        dialog.window?.setFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-
-        dialog.show()
-
-        dialog.window?.decorView?.systemUiVisibility = (
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        or View.SYSTEM_UI_FLAG_FULLSCREEN
-                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                )
-
-        dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-        // --- IMMERSIVE MODE FIX END ---
-
-        // Force Resize logic
-        dialog.window?.let { w ->
-            w.setLayout(dialogWidth, ViewGroup.LayoutParams.WRAP_CONTENT)
-            val params = w.attributes
-            params.gravity = Gravity.CENTER_VERTICAL or Gravity.END
-            params.x = 100
-            w.attributes = params
+    fun closeMenu() {
+        if (floatingPanel != null) {
+            val activity = context as? MainActivity
+            activity?.overlayHUD?.removeView(floatingPanel)
+            floatingPanel = null
+        }
+        if (activeControl == this) {
+            activeControl = null
         }
     }
 }
@@ -502,7 +549,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var glView: GLSurfaceView
     private lateinit var renderer: KaleidoscopeRenderer
     private var currentSelector = CameraSelector.DEFAULT_FRONT_CAMERA
-    private lateinit var overlayHUD: FrameLayout
+    lateinit var overlayHUD: FrameLayout
     private lateinit var displayHelper: ExternalDisplayHelper
     private lateinit var axisSb: SeekBar
     private val controls = mutableListOf<PropertyControl>()
@@ -680,12 +727,18 @@ class MainActivity : AppCompatActivity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         glView.setOnTouchListener { _, event ->
+            // --- NEW: Close modulation menu when touching the background ---
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                PropertyControl.closeActiveMenu()
+            }
+            // ---------------------------------------------------------------
+
             if (saveConfirmBtn.visibility == View.VISIBLE) {
                 saveConfirmBtn.visibility = View.GONE
                 pendingSaveIndex = null
             }
             handleInteraction(event)
-            true // <--- CHANGE THIS FROM 'false' TO 'true'
+            true
         }
         setContentView(glView)
         setupOverlayHUD()
