@@ -178,7 +178,14 @@ class PropertyControl(
     @Volatile var preciseValue: Float = defaultValue.toFloat()
         private set
 
-    // Modulation State
+    // --- Animation State (GL Thread) ---
+    private var animTarget: Float? = null
+    private var animStart: Float = 0f
+    private var animDuration: Float = 0f
+    private var animTime: Float = 0f
+    private var isAnimating = false
+
+    // --- Modulation State ---
     var modRate: Int = 200
     var modDepth: Int = 0
     var modShape: WaveShape = WaveShape.SINE
@@ -195,9 +202,7 @@ class PropertyControl(
     // --- UI References ---
     private var mainSeekBar: SeekBar? = null
     private var modIndicator: View? = null
-    // We keep reference to the row to calculate screen position
     private var mainRowLayout: LinearLayout? = null
-    // The floating panel
     private var floatingPanel: LinearLayout? = null
 
     // --- Snapshot for Presets ---
@@ -221,7 +226,20 @@ class PropertyControl(
         }
     }
 
-    // --- Animation Support ---
+    // --- Animation Support (Called from Main Thread, executed on GL Thread) ---
+    fun animateTo(target: Float, durationSec: Float) {
+        animTarget = target
+        animStart = preciseValue
+        animDuration = durationSec
+        animTime = 0f
+        isAnimating = true
+    }
+
+    fun stopAnimation() {
+        isAnimating = false
+        animTarget = null
+    }
+
     fun setAnimatedModRate(v: Float) {
         preciseModRate = v.coerceIn(0f, 1000f)
         modRate = preciseModRate.toInt()
@@ -233,8 +251,30 @@ class PropertyControl(
         updateIndicatorVisuals()
     }
 
-    // --- Core Logic ---
+    // --- Core Logic (Runs on GL Thread) ---
     fun update(deltaTime: Float) {
+        // 1. Handle Value Transition (Animation)
+        if (isAnimating && animTarget != null) {
+            animTime += deltaTime
+            if (animTime >= animDuration) {
+                // Finish
+                preciseValue = animTarget!!
+                value = preciseValue.toInt()
+                isAnimating = false
+                // Sync UI (Post to main thread, low priority)
+                mainSeekBar?.post {
+                    if (mainSeekBar?.progress != value) mainSeekBar?.progress = value
+                }
+            } else {
+                // Ease Out Cubic Interpolation
+                val t = (animTime / animDuration).coerceIn(0f, 1f)
+                val ease = 1f - (1f - t).pow(3f)
+                preciseValue = animStart + (animTarget!! - animStart) * ease
+                value = preciseValue.toInt()
+            }
+        }
+
+        // 2. Handle Modulation
         if (!hasModulation || (modRate == 0 && modDepth == 0)) {
             lastComputedModulation = 0f
             if (modIndicator?.alpha == 1.0f) modIndicator?.postInvalidate()
@@ -271,7 +311,9 @@ class PropertyControl(
 
     // --- Setters ---
     fun setProgress(v: Int) {
-        // Close other menus if touching this slider
+        // Stop any active animation if user touches slider
+        if (isAnimating) stopAnimation()
+
         if (activeControl != null && activeControl != this) {
             activeControl?.closeMenu()
         }
@@ -296,13 +338,18 @@ class PropertyControl(
         updateIndicatorVisuals()
     }
 
+    // Used by animation logic internally, or manual overrides
     fun setAnimatedValue(v: Float) {
         preciseValue = v.coerceIn(min.toFloat(), max.toFloat())
         val intVal = preciseValue.toInt()
-        if (intVal != value) setProgress(intVal)
+        if (intVal != value) {
+            value = intVal
+            mainSeekBar?.post { if (mainSeekBar?.progress != value) mainSeekBar?.progress = value }
+        }
     }
 
     fun reset() {
+        stopAnimation()
         setProgress(defaultValue)
         if (hasModulation) {
             updateModRate(200)
@@ -318,15 +365,11 @@ class PropertyControl(
     fun getModDepthNormalized(): Float = (preciseModDepth / 1000f).pow(3f)
 
     // --- UI Construction ---
-// Inside PropertyControl class
-
     fun attachTo(parent: ViewGroup) {
-        // 1. Clean up references to old UI elements (from previous orientation)
         mainSeekBar = null
         modIndicator = null
         mainRowLayout = null
 
-        // 2. Create the container
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 2, 0, 6)
@@ -349,10 +392,9 @@ class PropertyControl(
         }
         this.mainRowLayout = row
 
-        // 3. Create NEW SeekBar, but initialize with EXISTING 'value'
         val sb = SeekBar(context).apply {
             max = this@PropertyControl.max
-            progress = value // <--- CRITICAL: Use the stored value!
+            progress = value
             thumb = GradientDrawable().apply {
                 setColor(Color.WHITE)
                 setSize(30, 30)
@@ -367,6 +409,8 @@ class PropertyControl(
         sb.setOnTouchListener { v, event ->
             v.parent.requestDisallowInterceptTouchEvent(true)
             if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_DOWN) {
+                // User interaction stops animation
+                stopAnimation()
                 if (activeControl != null && activeControl != this@PropertyControl) {
                     closeActiveMenu()
                 }
@@ -388,7 +432,6 @@ class PropertyControl(
 
         row.addView(sb)
 
-        // 4. Re-create Modulation Indicator if needed
         if (hasModulation) {
             modIndicator = object : View(context) {
                 private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -430,7 +473,6 @@ class PropertyControl(
     private fun updateIndicatorVisuals() { modIndicator?.invalidate() }
 
     // --- POPUP / FLYOUT LOGIC ---
-
     fun toggleMenu() {
         if (activeControl == this) {
             closeMenu()
@@ -448,54 +490,42 @@ class PropertyControl(
         val isPortrait = res.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
         val dm = res.displayMetrics
 
-        // 3. Create the Panel
         floatingPanel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(20, 20, 20, 20)
             background = GradientDrawable().apply {
-                setColor(Color.argb(240, 20, 20, 20)) // High opacity dark bg
+                setColor(Color.argb(240, 20, 20, 20))
                 cornerRadius = 20f
                 setStroke(2, Color.GRAY)
             }
             elevation = 30f
             isClickable = true
 
-            // 4. Layout Params - STATIC POSITIONS
             layoutParams = if (isPortrait) {
-                // PORTRAIT:
-                // The Parameter Menu takes up the top 40% of the screen (defined in setupParameterMenu).
-                // We place this popup immediately below that area.
                 val menuHeight = (dm.heightPixels * 0.40).toInt()
-
                 FrameLayout.LayoutParams(700, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                     gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                    topMargin = menuHeight + 20 // 20px padding below the menu area
+                    topMargin = menuHeight + 20
                 }
             } else {
-                // LANDSCAPE:
-                // The Sidebar is 850px wide. We place this popup to the right of it.
-                // We Center it Vertically regardless of which slider was clicked.
                 val sidebarWidth = 850
-
                 FrameLayout.LayoutParams(600, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                     gravity = Gravity.CENTER_VERTICAL or Gravity.START
-                    leftMargin = sidebarWidth + 30 // 30px padding to the right of sidebar
+                    leftMargin = sidebarWidth + 30
                 }
             }
         }
 
-        // 5. Populate Panel (Title)
         val titleText = TextView(context).apply {
             text = "$label MODULATION"
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER // Center title in the popup
+            gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 15 }
         }
         floatingPanel?.addView(titleText)
 
-        // 6. Shape Spinner
         val shapeRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -520,11 +550,9 @@ class PropertyControl(
         shapeRow.addView(spinner)
         floatingPanel?.addView(shapeRow)
 
-        // 7. Speed & Depth Sliders
         addSliderToPanel("SPEED", modRate) { updateModRate(it) }
         addSliderToPanel("DEPTH", modDepth) { updateModDepth(it); updateIndicatorVisuals() }
 
-        // 8. Add to Root
         rootLayout.addView(floatingPanel)
         activeControl = this
     }
@@ -563,7 +591,6 @@ class PropertyControl(
 }
 
 
-
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
     private lateinit var glView: GLSurfaceView
@@ -572,11 +599,11 @@ class MainActivity : AppCompatActivity() {
     lateinit var overlayHUD: FrameLayout
     private lateinit var displayHelper: ExternalDisplayHelper
     private lateinit var axisSb: SeekBar
-    private val controls = java.util.concurrent.CopyOnWriteArrayList<PropertyControl>()
+    val controls = java.util.concurrent.CopyOnWriteArrayList<PropertyControl>()
     val controlsMap = mutableMapOf<String, PropertyControl>()
     private val presetButtons = mutableMapOf<Int, Button>()
     private lateinit var menuBtn: Button
-    private var currentAnimator: ValueAnimator? = null
+    // private var currentAnimator: ValueAnimator? = null // REMOVED
     private var activePreset: Int = -1
     private lateinit var flipXBtn: ImageButton
     private lateinit var flipYBtn: ImageButton
@@ -585,8 +612,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var resetBtn: ImageButton
     private lateinit var photoBtn: ImageButton
     private lateinit var recordBtn: ImageButton
-    private lateinit var parameterToggleBtn: Button
-    private lateinit var parameterToggleContainer: FrameLayout
     private lateinit var flashOverlay: View
     private lateinit var leftHUDContainer: LinearLayout
     private var axisLocked = true
@@ -598,8 +623,8 @@ class MainActivity : AppCompatActivity() {
     private var lastFingerFocusY = 0f
     private var exoPlayer: ExoPlayer? = null
     private var isRtspMode = false
-    private var lastRtspUrl: String =
-        "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4" // Example URL
+    private var lastRtspUrl: String = "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4"
+
     private data class Preset(
         val controlSnapshots: Map<String, PropertyControl.Snapshot>,
         val flipX: Float,
@@ -622,144 +647,88 @@ class MainActivity : AppCompatActivity() {
     private lateinit var presetPanel: LinearLayout
     private lateinit var recordControls: LinearLayout
 
-    // Inside MainActivity class
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-
-        // 1. Save State
         val activeControlId = PropertyControl.activeControl?.id
-        PropertyControl.closeActiveMenu() // Close old popup
-
-        // 2. Clear Views
+        PropertyControl.closeActiveMenu()
         overlayHUD.removeAllViews()
-
-        // 3. Rebuild UI (This now REUSES controls instead of resetting them)
         setupOverlayHUD()
         applyReadabilityStyle()
         updateSidebarVisuals()
-
-        // 4. Restore Menu
         if (activeControlId != null && controlsMap.containsKey(activeControlId)) {
-            // Slight delay to ensure layout passes are done
-            handler.postDelayed({
-                controlsMap[activeControlId]?.toggleMenu()
-            }, 50)
+            handler.postDelayed({ controlsMap[activeControlId]?.toggleMenu() }, 50)
         }
     }
 
-    private val mediaPickerLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
+    private val mediaPickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK) {
             val uri = result.data?.data
             if (uri != null) {
-                // Determine if it's a persistent permission (optional, but good practice)
                 try {
                     val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
                     contentResolver.takePersistableUriPermission(uri, flags)
-                } catch (e: Exception) {
-                    // Ignore if we can't take persistent permission
-                }
+                } catch (e: Exception) {}
                 startLocalMedia(uri)
             }
         }
     }
 
     private fun startLocalMedia(uri: android.net.Uri) {
-        // 1. Unbind Camera to free up resources
         val cpFuture = ProcessCameraProvider.getInstance(this)
-        cpFuture.addListener({
-            try { cpFuture.get().unbindAll() } catch (e: Exception) {}
-        }, ContextCompat.getMainExecutor(this))
-
-        // 2. Check file type
+        cpFuture.addListener({ try { cpFuture.get().unbindAll() } catch (e: Exception) {} }, ContextCompat.getMainExecutor(this))
         val mimeType = contentResolver.getType(uri)
         val isImage = mimeType?.startsWith("image") == true
 
         glView.queueEvent {
-            // CRITICAL: Reset texture to clear any "Canvas Lock" from previous images
-            // This destroys the old SurfaceTexture and creates a fresh one.
             renderer.resetVideoTexture()
-
-            // Get the new fresh surface
             val surface = renderer.getPlayerSurface() ?: return@queueEvent
-
             runOnUiThread {
                 if (isImage) {
-                    // --- IMAGE LOGIC (Unchanged, works well) ---
                     try {
                         exoPlayer?.stop()
                         exoPlayer?.clearVideoSurface()
-
                         val inputStream = contentResolver.openInputStream(uri)
                         val bitmap = BitmapFactory.decodeStream(inputStream)
                         inputStream?.close()
-
                         if (bitmap != null) {
                             renderer.updateTextureSize(bitmap.width, bitmap.height)
                             val canvas = surface.lockCanvas(null)
                             canvas.drawColor(Color.BLACK)
-                            // Draw bitmap to cover surface
                             val destRect = Rect(0, 0, canvas.width, canvas.height)
                             val srcRect = Rect(0, 0, bitmap.width, bitmap.height)
                             canvas.drawBitmap(bitmap, srcRect, destRect, null)
                             surface.unlockCanvasAndPost(canvas)
-
                             isRtspMode = true
                             Toast.makeText(this, "Image Loaded", Toast.LENGTH_SHORT).show()
                         }
-                    } catch (e: Exception) {
-                        Log.e("Media", "Image Load Failed", e)
-                    }
+                    } catch (e: Exception) { Log.e("Media", "Image Load Failed", e) }
                 } else {
-                    // --- VIDEO LOGIC (FIXED) ---
-                    if (exoPlayer == null) {
-                        exoPlayer = ExoPlayer.Builder(this)
-                            .setMediaSourceFactory(androidx.media3.exoplayer.source.DefaultMediaSourceFactory(this))
-                            .build()
-                    }
-
-                    // Reset Player State
+                    if (exoPlayer == null) exoPlayer = ExoPlayer.Builder(this).setMediaSourceFactory(androidx.media3.exoplayer.source.DefaultMediaSourceFactory(this)).build()
                     exoPlayer?.stop()
                     exoPlayer?.clearVideoSurface()
-
-                    // CRITICAL FIX 1: Attach Surface IMMEDIATELY.
-                    // The decoder needs this to start processing frames.
                     exoPlayer?.setVideoSurface(surface)
-
-                    // CRITICAL FIX 2: Set Scaling Mode.
-                    // This prevents MediaCodec crashes if the video resolution is slightly odd (e.g. not mod-16).
                     exoPlayer?.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
-
                     val mediaItem = MediaItem.fromUri(uri)
                     exoPlayer?.setMediaItem(mediaItem)
                     exoPlayer?.repeatMode = Player.REPEAT_MODE_ONE
-                    exoPlayer?.volume = 0f // Mute loop
-
+                    exoPlayer?.volume = 0f
                     exoPlayer?.addListener(object : Player.Listener {
                         override fun onVideoSizeChanged(videoSize: VideoSize) {
-                            // Only when the video actually has dimensions do we tell OpenGL
-                            // to resize the underlying texture to match.
-                            if (videoSize.width > 0 && videoSize.height > 0) {
-                                renderer.updateTextureSize(videoSize.width, videoSize.height)
-                            }
+                            if (videoSize.width > 0 && videoSize.height > 0) renderer.updateTextureSize(videoSize.width, videoSize.height)
                         }
-
                         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                            Log.e("ExoPlayer", "Playback Error: ${error.errorCodeName}", error)
                             Toast.makeText(this@MainActivity, "Video Error: Try a different file", Toast.LENGTH_SHORT).show()
                         }
                     })
-
                     exoPlayer?.prepare()
                     exoPlayer?.play()
-
                     isRtspMode = true
                     Toast.makeText(this, "Playing Video", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
@@ -773,12 +742,7 @@ class MainActivity : AppCompatActivity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         glView.setOnTouchListener { _, event ->
-            // --- NEW: Close modulation menu when touching the background ---
-            if (event.action == MotionEvent.ACTION_DOWN) {
-                PropertyControl.closeActiveMenu()
-            }
-            // ---------------------------------------------------------------
-
+            if (event.action == MotionEvent.ACTION_DOWN) PropertyControl.closeActiveMenu()
             if (saveConfirmBtn.visibility == View.VISIBLE) {
                 saveConfirmBtn.visibility = View.GONE
                 pendingSaveIndex = null
@@ -798,9 +762,9 @@ class MainActivity : AppCompatActivity() {
         displayHelper.start()
         checkAndRequestPermissions()
     }
+
     private fun checkAndRequestPermissions() {
-        val permissions =
-            mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+        val permissions = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
@@ -808,246 +772,133 @@ class MainActivity : AppCompatActivity() {
             permissions.add(Manifest.permission.READ_MEDIA_VIDEO)
             permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
         }
-        val missing = permissions.filter {
-            ContextCompat.checkSelfPermission(
-                this,
-                it
-            ) != PackageManager.PERMISSION_GRANTED
-        }
+        val missing = permissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), 10)
         } else {
             startCamera()
         }
     }
+
     fun startCamera() {
         stopRtsp()
         isRtspMode = false
-
         val cpFuture = ProcessCameraProvider.getInstance(this)
         cpFuture.addListener({
             val provider = cpFuture.get()
             provider.unbindAll()
-
             glView.queueEvent {
                 renderer.resetVideoTexture()
                 runOnUiThread {
-                    // CRITICAL FIX: Lock Target Rotation to Landscape (90 deg)
-                    // This prevents the camera stream from physically rotating when you turn the phone.
-                    val preview = Preview.Builder()
-                        .setTargetRotation(Surface.ROTATION_90)
-                        .build()
-
+                    val preview = Preview.Builder().setTargetRotation(Surface.ROTATION_90).build()
                     preview.setSurfaceProvider { req -> renderer.provideSurface(req) }
-
-                    try {
-                        provider.bindToLifecycle(this, currentSelector, preview)
-                    } catch (e: Exception) {
-                        Log.e("Camera", "Bind failed", e)
-                    }
+                    try { provider.bindToLifecycle(this, currentSelector, preview) } catch (e: Exception) { Log.e("Camera", "Bind failed", e) }
                 }
             }
         }, ContextCompat.getMainExecutor(this))
     }
 
     private fun startRtsp(url: String) {
-        // 1. Unbind CameraX
         val cpFuture = ProcessCameraProvider.getInstance(this)
-        cpFuture.addListener({
-            try {
-                cpFuture.get().unbindAll()
-            } catch (e: Exception) {}
-        }, ContextCompat.getMainExecutor(this))
-
-        // 2. Reset Texture & Start Player
+        cpFuture.addListener({ try { cpFuture.get().unbindAll() } catch (e: Exception) {} }, ContextCompat.getMainExecutor(this))
         glView.queueEvent {
-            // CRITICAL: Reset texture to clear any "Canvas Lock" from previous images
             renderer.resetVideoTexture()
             val surface = renderer.getPlayerSurface()
-
             runOnUiThread {
                 if (surface != null) {
-                    if (exoPlayer == null) {
-                        exoPlayer = ExoPlayer.Builder(this).build()
-                    }
-
+                    if (exoPlayer == null) exoPlayer = ExoPlayer.Builder(this).build()
                     exoPlayer?.volume = 0f
                     exoPlayer?.stop()
                     exoPlayer?.clearVideoSurface()
-
-                    // Attach the NEW surface
                     exoPlayer?.setVideoSurface(surface)
-
-                    // RTSP Specific Config
-                    val rtspSource = RtspMediaSource.Factory()
-                        .setForceUseRtpTcp(true)
-                        .setTimeoutMs(5000)
-                        .createMediaSource(MediaItem.fromUri(url))
-
+                    val rtspSource = RtspMediaSource.Factory().setForceUseRtpTcp(true).setTimeoutMs(5000).createMediaSource(MediaItem.fromUri(url))
                     exoPlayer?.setMediaSource(rtspSource)
-
-                    // Listeners
                     exoPlayer?.addListener(object : Player.Listener {
                         override fun onVideoSizeChanged(videoSize: VideoSize) {
-                            if (videoSize.width > 0 && videoSize.height > 0) {
-                                renderer.updateTextureSize(videoSize.width, videoSize.height)
-                            }
+                            if (videoSize.width > 0 && videoSize.height > 0) renderer.updateTextureSize(videoSize.width, videoSize.height)
                         }
-                        override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                            Toast.makeText(this@MainActivity, "Stream Error: ${error.message}", Toast.LENGTH_LONG).show()
-                        }
+                        override fun onPlayerError(error: androidx.media3.common.PlaybackException) { Toast.makeText(this@MainActivity, "Stream Error: ${error.message}", Toast.LENGTH_LONG).show() }
                     })
-
                     exoPlayer?.prepare()
                     exoPlayer?.play()
                     isRtspMode = true
                     lastRtspUrl = url
                     Toast.makeText(this, "Connecting (TCP)...", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this, "Renderer not ready", Toast.LENGTH_SHORT).show()
-                }
+                } else { Toast.makeText(this, "Renderer not ready", Toast.LENGTH_SHORT).show() }
             }
         }
     }
+
     private fun stopRtsp() {
         exoPlayer?.stop()
         exoPlayer?.clearVideoSurface()
-        // We do NOT release the player here if we want to reuse it quickly,
-        // but for memory safety you could release.
     }
+
     override fun onDestroy() {
         super.onDestroy()
         exoPlayer?.release()
         exoPlayer = null
-        displayHelper.stop() // Existing
+        displayHelper.stop()
     }
+
     private fun handleInteraction(event: MotionEvent) {
         if (event.pointerCount >= 2) {
-            val p1x = event.getX(0);
-            val p1y = event.getY(0)
-            val p2x = event.getX(1);
-            val p2y = event.getY(1)
-            val focusX = (p1x + p2x) / 2f;
-            val focusY = (p1y + p2y) / 2f
+            val p1x = event.getX(0); val p1y = event.getY(0)
+            val p2x = event.getX(1); val p2y = event.getY(1)
+            val focusX = (p1x + p2x) / 2f; val focusY = (p1y + p2y) / 2f
             val dist = hypot(p1x - p2x, p1y - p2y)
-            val angle =
-                Math.toDegrees(atan2((p1y - p2y).toDouble(), (p1x - p2x).toDouble())).toFloat()
+            val angle = Math.toDegrees(atan2((p1y - p2y).toDouble(), (p1x - p2x).toDouble())).toFloat()
             if (event.actionMasked == MotionEvent.ACTION_MOVE) {
                 val dx = (focusX - lastFingerFocusX) / glView.width.toFloat() * 2.0f
                 val dy = (focusY - lastFingerFocusY) / glView.height.toFloat() * 2.0f
-                controlsMap["M_TX"]?.let {
-                    it.setProgress(
-                        (it.value - (dx * 500).toInt()).coerceIn(
-                            0,
-                            1000
-                        )
-                    )
-                }
-                controlsMap["M_TY"]?.let {
-                    it.setProgress(
-                        (it.value + (dy * 500).toInt()).coerceIn(
-                            0,
-                            1000
-                        )
-                    )
-                }
+                controlsMap["M_TX"]?.let { it.setProgress((it.value - (dx * 500).toInt()).coerceIn(0, 1000)) }
+                controlsMap["M_TY"]?.let { it.setProgress((it.value + (dy * 500).toInt()).coerceIn(0, 1000)) }
                 val scaleFactor = dist / lastFingerDist
                 if (scaleFactor > 0) {
-                    controlsMap["M_ZOOM"]?.let {
-                        it.setProgress(
-                            (it.value - (log2(scaleFactor) * 300).toInt()).coerceIn(
-                                0,
-                                1000
-                            )
-                        )
-                    }
+                    controlsMap["M_ZOOM"]?.let { it.setProgress((it.value - (log2(scaleFactor) * 300).toInt()).coerceIn(0, 1000)) }
                 }
                 val dAngle = angle - lastFingerAngle
-                controlsMap["M_ANGLE"]?.let {
-                    it.setProgress((it.value - (dAngle * (1000f / 360f)).toInt() + 1000) % 1000)
-                }
+                controlsMap["M_ANGLE"]?.let { it.setProgress((it.value - (dAngle * (1000f / 360f)).toInt() + 1000) % 1000) }
             }
-            lastFingerDist = dist; lastFingerAngle = angle; lastFingerFocusX =
-                focusX; lastFingerFocusY = focusY
+            lastFingerDist = dist; lastFingerAngle = angle; lastFingerFocusX = focusX; lastFingerFocusY = focusY
         } else if (event.action == MotionEvent.ACTION_UP) {
-            // CHANGE: Increased timeout from 200 to 400ms to make tapping easier
             if (event.eventTime - event.downTime < 400) toggleHud()
         }
     }
 
     private fun textToIcon(t: String, size: Float = 60f, color: Int = Color.WHITE): BitmapDrawable {
-        val b = Bitmap.createBitmap(160, 160, Bitmap.Config.ARGB_8888);
-        val c = Canvas(b);
-        val p = Paint().apply {
-            this.color = color; textSize = size; textAlign = Paint.Align.CENTER; isFakeBoldText =
-            true; isAntiAlias = true
-        }
+        val b = Bitmap.createBitmap(160, 160, Bitmap.Config.ARGB_8888)
+        val c = Canvas(b)
+        val p = Paint().apply { this.color = color; textSize = size; textAlign = Paint.Align.CENTER; isFakeBoldText = true; isAntiAlias = true }
         c.drawText(t, 80f, 80f + (size / 3f), p); return BitmapDrawable(resources, b)
     }
 
     private fun createClockDrawable(): BitmapDrawable {
-        val b = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888);
-        val c = Canvas(b);
-        val p = Paint().apply {
-            color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 6f; isAntiAlias = true
-        }
-        c.drawCircle(50f, 55f, 35f, p); c.drawLine(50f, 55f, 50f, 35f, p); c.drawLine(
-            50f,
-            55f,
-            65f,
-            55f,
-            p
-        )
-        c.drawLine(40f, 15f, 60f, 15f, p); c.drawLine(50f, 15f, 50f, 20f, p); return BitmapDrawable(
-            resources,
-            b
-        )
+        val b = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+        val c = Canvas(b)
+        val p = Paint().apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 6f; isAntiAlias = true }
+        c.drawCircle(50f, 55f, 35f, p); c.drawLine(50f, 55f, 50f, 35f, p); c.drawLine(50f, 55f, 65f, 55f, p)
+        c.drawLine(40f, 15f, 60f, 15f, p); c.drawLine(50f, 15f, 50f, 20f, p); return BitmapDrawable(resources, b)
     }
 
     private fun createLogoDrawable(): ShapeDrawable {
-        val p = Path().apply {
-            moveTo(46f, 131f); lineTo(46f, 162f); lineTo(159f, 162f); lineTo(
-            159f,
-            144f
-        ); lineTo(64f, 144f); lineTo(64f, 131f); close()
-        }
-        return ShapeDrawable(PathShape(p, 200f, 200f)).apply {
-            paint.color = Color.WHITE; paint.isAntiAlias = true
-        }
+        val p = Path().apply { moveTo(46f, 131f); lineTo(46f, 162f); lineTo(159f, 162f); lineTo(159f, 144f); lineTo(64f, 144f); lineTo(64f, 131f); close() }
+        return ShapeDrawable(PathShape(p, 200f, 200f)).apply { paint.color = Color.WHITE; paint.isAntiAlias = true }
     }
 
     private fun createLockDrawable(locked: Boolean): BitmapDrawable {
-        val b = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888);
-        val c = Canvas(b);
-        val p = Paint().apply {
-            color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 8f; isAntiAlias = true
-        }
-        val shackle = RectF(30f, 20f, 70f, 60f); if (locked) c.drawArc(
-            shackle,
-            180f,
-            180f,
-            false,
-            p
-        ) else c.drawArc(shackle, 160f, 180f, false, p)
-
-        p.style = Paint.Style.FILL; c.drawRoundRect(
-            RectF(25f, 50f, 75f, 85f),
-            8f,
-            8f,
-            p
-        ); return BitmapDrawable(resources, b)
+        val b = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+        val c = Canvas(b)
+        val p = Paint().apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 8f; isAntiAlias = true }
+        val shackle = RectF(30f, 20f, 70f, 60f); if (locked) c.drawArc(shackle, 180f, 180f, false, p) else c.drawArc(shackle, 160f, 180f, false, p)
+        p.style = Paint.Style.FILL; c.drawRoundRect(RectF(25f, 50f, 75f, 85f), 8f, 8f, p); return BitmapDrawable(resources, b)
     }
 
     private fun setupOverlayHUD() {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-
-        overlayHUD = FrameLayout(this).apply {
-            layoutParams = FrameLayout.LayoutParams(-1, -1)
-        }
-
+        overlayHUD = FrameLayout(this).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
         flashOverlay = createFlashView()
         val logoView = createLogoView()
-
         setupParameterMenu()
         val cameraPanel = createCameraSettingsPanel()
         val recordPanel = createRecordControls()
@@ -1055,91 +906,43 @@ class MainActivity : AppCompatActivity() {
         val menuUtilBtn = createMenuUtilityButton()
         val readabilityBtn = createReadabilityButton()
         val resetBtn = createResetButton()
-
         overlayHUD.addView(flashOverlay)
         overlayHUD.addView(logoView)
         overlayHUD.addView(leftHUDContainer)
 
-        // --- ADAPTIVE LAYOUT LOGIC ---
-
-        // 1. RECORD PANEL (Portrait: Bottom Left Vertical | Landscape: Top Center Horizontal)
         val recordParams = FrameLayout.LayoutParams(-2, -2).apply {
             if (isPortrait) {
-                recordPanel.orientation = LinearLayout.VERTICAL
-                gravity = Gravity.BOTTOM or Gravity.START
-                bottomMargin = 450
-                leftMargin = 30
-                // Adjust gap between buttons
+                recordPanel.orientation = LinearLayout.VERTICAL; gravity = Gravity.BOTTOM or Gravity.START; bottomMargin = 450; leftMargin = 30
                 (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 40; leftMargin = 0 }
             } else {
-                recordPanel.orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                topMargin = 30
+                recordPanel.orientation = LinearLayout.HORIZONTAL; gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30
                 (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 40 }
             }
         }
         overlayHUD.addView(recordPanel, recordParams)
 
-        // 2. PRESETS (Bottom Center)
         val presetParams = FrameLayout.LayoutParams(-2, -2).apply {
             if (isPortrait) {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                bottomMargin = 60
-                presetPanel.scaleX = 0.85f
-                presetPanel.scaleY = 0.85f
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; bottomMargin = 60; presetPanel.scaleX = 0.85f; presetPanel.scaleY = 0.85f
             } else {
-                gravity = Gravity.BOTTOM or Gravity.END
-                bottomMargin = 15
-                rightMargin = 180
-                presetPanel.scaleX = 1.0f
-                presetPanel.scaleY = 1.0f
+                gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 180; presetPanel.scaleX = 1.0f; presetPanel.scaleY = 1.0f
             }
         }
         overlayHUD.addView(presetPanel, presetParams)
 
-        // 3. RIGHT SIDE STACK (Utility + Camera Inputs)
-        // We stack them from bottom-right up
-        val baseBottom = 30
-        val baseRight = 30
-
-        // A. Reset (Bottom Right)
-        resetBtn.layoutParams = (resetBtn.layoutParams as FrameLayout.LayoutParams).apply {
-            gravity = Gravity.BOTTOM or Gravity.END
-            bottomMargin = baseBottom
-            rightMargin = baseRight
-        }
+        val baseBottom = 30; val baseRight = 30
+        resetBtn.layoutParams = (resetBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom; rightMargin = baseRight }
         overlayHUD.addView(resetBtn)
-
-        // B. Readability (Above Reset)
-        readabilityBtn.layoutParams = (readabilityBtn.layoutParams as FrameLayout.LayoutParams).apply {
-            gravity = Gravity.BOTTOM or Gravity.END
-            bottomMargin = baseBottom + 120
-            rightMargin = baseRight
-        }
+        readabilityBtn.layoutParams = (readabilityBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 120; rightMargin = baseRight }
         overlayHUD.addView(readabilityBtn)
-
-        // C. Menu Toggle (Above Readability)
-        menuUtilBtn.layoutParams = (menuUtilBtn.layoutParams as FrameLayout.LayoutParams).apply {
-            gravity = Gravity.BOTTOM or Gravity.END
-            bottomMargin = baseBottom + 240
-            rightMargin = baseRight
-        }
+        menuUtilBtn.layoutParams = (menuUtilBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 240; rightMargin = baseRight }
         overlayHUD.addView(menuUtilBtn)
 
-        // D. Camera Inputs (Above Menu Toggle in Portrait, Top Right in Landscape)
         val cameraParams = FrameLayout.LayoutParams(-2, -2).apply {
-            if (isPortrait) {
-                gravity = Gravity.BOTTOM or Gravity.END
-                bottomMargin = baseBottom + 450 // Clear the utility stack
-                rightMargin = 20
-            } else {
-                gravity = Gravity.TOP or Gravity.END
-                topMargin = 40
-                rightMargin = 40
-            }
+            if (isPortrait) { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 450; rightMargin = 20 }
+            else { gravity = Gravity.TOP or Gravity.END; topMargin = 40; rightMargin = 40 }
         }
         overlayHUD.addView(cameraPanel, cameraParams)
-
         addContentView(overlayHUD, ViewGroup.LayoutParams(-1, -1))
         updateSidebarVisuals()
     }
@@ -1147,84 +950,45 @@ class MainActivity : AppCompatActivity() {
     private fun setupParameterMenu() {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
         val dm = resources.displayMetrics
-
-        // Container config
         leftHUDContainer = LinearLayout(this).apply {
-            if (isPortrait) {
-                // PORTRAIT: Bottom Sheet style
-                orientation = LinearLayout.VERTICAL
-                layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, (dm.heightPixels * 0.40).toInt()).apply {
-                    gravity = Gravity.TOP
-                }
-            } else {
-                // LANDSCAPE: Left Sidebar style
-                orientation = LinearLayout.HORIZONTAL
-                layoutParams = FrameLayout.LayoutParams(-2, -1).apply {
-                    gravity = Gravity.START
-                }
-            }
+            if (isPortrait) { orientation = LinearLayout.VERTICAL; layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, (dm.heightPixels * 0.40).toInt()).apply { gravity = Gravity.TOP } }
+            else { orientation = LinearLayout.HORIZONTAL; layoutParams = FrameLayout.LayoutParams(-2, -1).apply { gravity = Gravity.START } }
         }
-
-        // ScrollView Config
         parameterPanel = ScrollView(this).apply {
-            if (isPortrait) {
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            } else {
-                layoutParams = LinearLayout.LayoutParams(850, ViewGroup.LayoutParams.MATCH_PARENT)
-            }
-            layoutDirection = View.LAYOUT_DIRECTION_RTL
-            isVerticalScrollBarEnabled = true
-            scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
-            visibility = View.VISIBLE
+            if (isPortrait) layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            else layoutParams = LinearLayout.LayoutParams(850, ViewGroup.LayoutParams.MATCH_PARENT)
+            layoutDirection = View.LAYOUT_DIRECTION_RTL; isVerticalScrollBarEnabled = true; scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY; visibility = View.VISIBLE
         }
-
-        // Internal Item Layout
         val menuLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            // Add extra padding at bottom in portrait to avoid navigation bar overlap
-            val bottomPad = if (isPortrait) 150 else 240
-            setPadding(25, 20, 10, bottomPad)
-            layoutDirection = View.LAYOUT_DIRECTION_LTR
+            orientation = LinearLayout.VERTICAL; val bottomPad = if (isPortrait) 150 else 240
+            setPadding(25, 20, 10, bottomPad); layoutDirection = View.LAYOUT_DIRECTION_LTR
             layoutTransition = LayoutTransition().apply { enableTransitionType(LayoutTransition.CHANGING) }
         }
-
         parameterPanel.addView(menuLayout)
         leftHUDContainer.addView(parameterPanel)
-
-        // Populate items
         populateParameterGroups(menuLayout)
     }
 
     private fun populateParameterGroups(menuLayout: LinearLayout) {
-        // Helper var to track where controls are added
         var currentGroupContent: LinearLayout? = null
-
-        // Local Helper to create collapsible sections
         fun createGroup(title: String, startOpen: Boolean = false) {
             val (container, content) = createCollapsibleGroupView(title, startOpen)
             menuLayout.addView(container)
             currentGroupContent = content
         }
-
         fun addControl(c: PropertyControl) {
             if (controlsMap.containsKey(c.id)) {
-                // CASE 1: Control exists (Rotation happened).
-                // Reuse the Logic Object, just attach new Views.
                 val existingControl = controlsMap[c.id]!!
                 currentGroupContent?.let { existingControl.attachTo(it) } ?: existingControl.attachTo(menuLayout)
             } else {
-                // CASE 2: First boot. Create new.
                 controls.add(c)
                 controlsMap[c.id] = c
                 currentGroupContent?.let { c.attachTo(it) } ?: c.attachTo(menuLayout)
             }
         }
-
-        // --- 1. GEOMETRY ---
         createGroup("GEOMETRY", startOpen = true)
-        setupGeometrySpecifics(currentGroupContent!!) // Extracted logic for Axis/Lock
+        setupGeometrySpecifics(currentGroupContent!!)
 
-        // --- 2. 3D ---
         createGroup("3D")
         addControl(PropertyControl(this, "3D_MIX", "STRENGTH", defaultValue = 0, hasModulation = true))
         addControl(PropertyControl(this, "S_SHAPE", "SHAPE", defaultValue = 0, hasModulation = true))
@@ -1235,13 +999,11 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl(this, "T_WAVE_STR", "WAVE STR", defaultValue = 0))
         addControl(PropertyControl(this, "T_WAVE_POS", "WAVE POS", defaultValue = 0, hasModulation = true))
 
-        // --- 3. MORPHING ---
         createGroup("MORPHING")
         addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "TWIST", "VORTEX", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "FLUX", "FLUX", defaultValue = 0, hasModulation = true))
 
-        // --- 4. MASTER TRANSFORM ---
         createGroup("MASTER TRANSFORM")
         addControl(PropertyControl(this, "M_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
         addControl(PropertyControl(this, "M_ZOOM", "ZOOM", defaultValue = 160, hasModulation = true))
@@ -1251,9 +1013,8 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl(this, "M_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "M_RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true))
 
-        // --- 5. CAMERA TRANSFORM ---
         createGroup("CAMERA TRANSFORM")
-        setupCameraOrientationControls(currentGroupContent!!) // Flip/Rotate Icons
+        setupCameraOrientationControls(currentGroupContent!!)
         addControl(PropertyControl(this, "C_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
         addControl(PropertyControl(this, "WARP", "WARP DISTORT", defaultValue = 0))
         addControl(PropertyControl(this, "C_ZOOM", "ZOOM", defaultValue = 300, hasModulation = true))
@@ -1263,7 +1024,6 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl(this, "C_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true))
 
-        // --- 6. COLOR ---
         createGroup("COLOR")
         addControl(PropertyControl(this, "BRIT", "BRIGHTNESS", defaultValue = 500))
         addControl(PropertyControl(this, "HUE", "HUE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
@@ -1274,34 +1034,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupGeometrySpecifics(parent: LinearLayout) {
-        val axisContainer = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 10)
-        }
-
-        // REUSE LOGIC for Axis Control
+        val axisContainer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 10) }
         val axisId = "AXIS"
         val axisCtrl: PropertyControl
-
         if (controlsMap.containsKey(axisId)) {
             axisCtrl = controlsMap[axisId]!!
-            // Re-attach UI for consistency, though Axis uses a custom SeekBar below
-            // We usually don't call attachTo for AXIS because it has custom UI,
-            // but we need the object reference.
         } else {
             axisCtrl = PropertyControl(this, axisId, "COUNT", min = 0, max = 15, defaultValue = 1)
             controls.add(axisCtrl)
             controlsMap[axisId] = axisCtrl
         }
-
         axisSb = SeekBar(this).apply {
             max = 25
-            progress = axisCtrl.value // Restore value from object
+            progress = axisCtrl.value
             layoutParams = LinearLayout.LayoutParams(0, 65, 1f)
-            thumb = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setSize(30, 30)
-                cornerRadius = 15f
-            }
+            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
                     renderer.axisCount = (p + 1).toFloat()
@@ -1310,7 +1057,6 @@ class MainActivity : AppCompatActivity() {
                 override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {}
             })
         }
-
         lockBtn = Button(this).apply {
             background = createLockDrawable(axisLocked)
             layoutParams = LinearLayout.LayoutParams(80, 80).apply { leftMargin = 20 }
@@ -1321,683 +1067,251 @@ class MainActivity : AppCompatActivity() {
                 alpha = if (axisLocked) 1.0f else 0.4f
             }
         }
-
-        // Ensure renderer matches current state immediately
         renderer.axisCount = (axisCtrl.value + 1).toFloat()
-
-        axisContainer.addView(TextView(this).apply {
-            text = "COUNT"; setTextColor(Color.WHITE); textSize = 8f; minWidth = 100; alpha = 0.8f
-        })
+        axisContainer.addView(TextView(this).apply { text = "COUNT"; setTextColor(Color.WHITE); textSize = 8f; minWidth = 100; alpha = 0.8f })
         axisContainer.addView(axisSb)
         axisContainer.addView(lockBtn)
         parent.addView(axisContainer)
     }
 
     private fun setupCameraOrientationControls(parent: LinearLayout) {
-        val orientationRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(0, 10, 0, 20)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120)
-        }
-
+        val orientationRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, 10, 0, 20); layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120) }
         fun createParamBtn(icon: BitmapDrawable, action: () -> Unit): ImageButton {
-            return ImageButton(this).apply {
-                setImageDrawable(icon)
-                background = GradientDrawable().apply { setColor(Color.parseColor("#22FFFFFF")); cornerRadius = 12f }
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { setMargins(6, 0, 6, 0) }
-                setOnClickListener { action(); updateSidebarVisuals() }
-            }
+            return ImageButton(this).apply { setImageDrawable(icon); background = GradientDrawable().apply { setColor(Color.parseColor("#22FFFFFF")); cornerRadius = 12f }; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { setMargins(6, 0, 6, 0) }; setOnClickListener { action(); updateSidebarVisuals() } }
         }
-
         flipXBtn = createParamBtn(createCustomIcon(0)) { renderer.flipX = if (renderer.flipX == 1f) -1f else 1f }
         flipYBtn = createParamBtn(createCustomIcon(1)) { renderer.flipY = if (renderer.flipY == 1f) -1f else 1f }
         rot180Btn = createParamBtn(createCustomIcon(2)) { renderer.rot180 = !renderer.rot180 }
-
-        orientationRow.addView(flipXBtn)
-        orientationRow.addView(flipYBtn)
-        orientationRow.addView(rot180Btn)
+        orientationRow.addView(flipXBtn); orientationRow.addView(flipYBtn); orientationRow.addView(rot180Btn)
         parent.addView(orientationRow)
     }
 
     private fun createCameraSettingsPanel(): LinearLayout {
-        cameraSettingsPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(10, 20, 10, 20)
-        }
-
-        fun createSideBtn(resId: Int, action: () -> Unit) = ImageButton(this).apply {
-            setImageResource(resId)
-            setColorFilter(Color.WHITE)
-            setBackgroundColor(Color.TRANSPARENT)
-            alpha = 0.85f
-            layoutParams = LinearLayout.LayoutParams(100, 100)
-            setOnClickListener { action(); updateSidebarVisuals() }
-        }
-
-        // Switch Camera
-        cameraSettingsPanel.addView(createSideBtn(android.R.drawable.ic_menu_camera) {
-            currentSelector = if (currentSelector == CameraSelector.DEFAULT_BACK_CAMERA) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
-            startCamera()
-        })
-
-        // Gallery / File Picker
+        cameraSettingsPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(10, 20, 10, 20) }
+        fun createSideBtn(resId: Int, action: () -> Unit) = ImageButton(this).apply { setImageResource(resId); setColorFilter(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.85f; layoutParams = LinearLayout.LayoutParams(100, 100); setOnClickListener { action(); updateSidebarVisuals() } }
+        cameraSettingsPanel.addView(createSideBtn(android.R.drawable.ic_menu_camera) { currentSelector = if (currentSelector == CameraSelector.DEFAULT_BACK_CAMERA) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA; startCamera() })
         cameraSettingsPanel.addView(createSideBtn(android.R.drawable.ic_menu_gallery) {
-            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                addCategory(Intent.CATEGORY_OPENABLE)
-                type = "*/*"
-                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
-            }
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "*/*"; putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*")) }
             mediaPickerLauncher.launch(intent)
         })
-
-        // RTSP Dialog
         cameraSettingsPanel.addView(createSideBtn(android.R.drawable.ic_menu_compass) { showRtspDialog() })
-
         return cameraSettingsPanel
     }
 
     private fun createRecordControls(): LinearLayout {
-        // Initialize with default params, orientation will be set in setupOverlayHUD
-        recordControls = LinearLayout(this).apply {
-            gravity = Gravity.CENTER
-            setPadding(10, 10, 10, 10)
-        }
-
-        photoBtn = ImageButton(this).apply {
-            setImageDrawable(textToIcon("[ ]", 50f))
-            setBackgroundColor(Color.TRANSPARENT)
-            setColorFilter(Color.WHITE)
-            alpha = 0.8f
-            scaleX = 1.5f; scaleY = 1.5f
-            layoutParams = LinearLayout.LayoutParams(150, 150)
-            setOnClickListener { renderer.capturePhoto(); triggerFlashPulse() }
-        }
-
-        recordBtn = ImageButton(this).apply {
-            setImageDrawable(textToIcon("REC", 40f))
-            setBackgroundColor(Color.TRANSPARENT)
-            setColorFilter(Color.WHITE)
-            alpha = 0.5f
-            layoutParams = LinearLayout.LayoutParams(150, 150)
-            setOnClickListener { toggleRecording() }
-        }
-
-        recordControls.addView(photoBtn)
-        recordControls.addView(recordBtn)
+        recordControls = LinearLayout(this).apply { gravity = Gravity.CENTER; setPadding(10, 10, 10, 10) }
+        photoBtn = ImageButton(this).apply { setImageDrawable(textToIcon("[ ]", 50f)); setBackgroundColor(Color.TRANSPARENT); setColorFilter(Color.WHITE); alpha = 0.8f; scaleX = 1.5f; scaleY = 1.5f; layoutParams = LinearLayout.LayoutParams(150, 150); setOnClickListener { renderer.capturePhoto(); triggerFlashPulse() } }
+        recordBtn = ImageButton(this).apply { setImageDrawable(textToIcon("REC", 40f)); setBackgroundColor(Color.TRANSPARENT); setColorFilter(Color.WHITE); alpha = 0.5f; layoutParams = LinearLayout.LayoutParams(150, 150); setOnClickListener { toggleRecording() } }
+        recordControls.addView(photoBtn); recordControls.addView(recordBtn)
         return recordControls
     }
 
     private fun createPresetPanel(): LinearLayout {
-        presetPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(15, 10, 15, 30)
-        }
-
-        val transContainer = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(10, 0, 10, 10)
-        }
-        val timeLabel = TextView(this).apply {
-            text = "1.0s"; setTextColor(Color.WHITE); textSize = 9f; setPadding(4, 0, 8, 0)
-        }
+        presetPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(15, 10, 15, 30) }
+        val transContainer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(10, 0, 10, 10) }
+        val timeLabel = TextView(this).apply { text = "1.0s"; setTextColor(Color.WHITE); textSize = 9f; setPadding(4, 0, 8, 0) }
         val transSeekBar = SeekBar(this).apply {
-            max = 1000; progress = 333
-            layoutParams = LinearLayout.LayoutParams(500, 45)
-            thumb = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setSize(30, 30)      // Size of the circle
-                cornerRadius = 15f   // Half of size = perfect circle
-            }
+            max = 1000; progress = 333; layoutParams = LinearLayout.LayoutParams(500, 45)
+            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
                     transitionMs = ((p / 1000f).pow(3.0f) * 30000).toLong()
                     timeLabel.text = "%.1fs".format(transitionMs / 1000f)
-                    Log.d("Value changed", "Slider $p")
                 }
                 override fun onStartTrackingTouch(s: SeekBar?) {}
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
         }
-        transContainer.addView(ImageView(this).apply {
-            setImageDrawable(createClockDrawable()); alpha = 0.5f
-            layoutParams = LinearLayout.LayoutParams(45, 45).apply { rightMargin = 10 }
-        })
-        transContainer.addView(timeLabel)
-        transContainer.addView(transSeekBar)
-
+        transContainer.addView(ImageView(this).apply { setImageDrawable(createClockDrawable()); alpha = 0.5f; layoutParams = LinearLayout.LayoutParams(45, 45).apply { rightMargin = 10 } })
+        transContainer.addView(timeLabel); transContainer.addView(transSeekBar)
         val presetRow = FrameLayout(this)
         val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-
         (8 downTo 1).forEach { idx ->
             val b = Button(this).apply {
-                text = idx.toString()
-                setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.8f
-                textSize = 16f; layoutParams = LinearLayout.LayoutParams(80, 140)
-                setPadding(0, 0, 0, 20)
+                text = idx.toString(); setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.8f; textSize = 16f; layoutParams = LinearLayout.LayoutParams(80, 140); setPadding(0, 0, 0, 20)
                 setOnClickListener { applyPreset(idx) }
-                setOnLongClickListener {
-                    pendingSaveIndex = idx
-                    saveConfirmBtn.visibility = View.VISIBLE
-                    saveConfirmBtn.text = "SAVE $idx?"
-                    true
-                }
+                setOnLongClickListener { pendingSaveIndex = idx; saveConfirmBtn.visibility = View.VISIBLE; saveConfirmBtn.text = "SAVE $idx?"; true }
             }
-            presetButtons[idx] = b
-            btnRow.addView(b)
+            presetButtons[idx] = b; btnRow.addView(b)
         }
-
-        saveConfirmBtn = Button(this).apply {
-            visibility = View.GONE
-            setTextColor(Color.BLACK); textSize = 12f; setTypeface(null, Typeface.BOLD)
-            background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = 8f }
-            layoutParams = FrameLayout.LayoutParams(250, 100, Gravity.CENTER)
-            setOnClickListener { pendingSaveIndex?.let { savePreset(it) }; visibility = View.GONE }
-        }
-
-        presetRow.addView(btnRow)
-        presetRow.addView(saveConfirmBtn)
-        presetPanel.addView(transContainer)
-        presetPanel.addView(presetRow)
-
+        saveConfirmBtn = Button(this).apply { visibility = View.GONE; setTextColor(Color.BLACK); textSize = 12f; setTypeface(null, Typeface.BOLD); background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = 8f }; layoutParams = FrameLayout.LayoutParams(250, 100, Gravity.CENTER); setOnClickListener { pendingSaveIndex?.let { savePreset(it) }; visibility = View.GONE } }
+        presetRow.addView(btnRow); presetRow.addView(saveConfirmBtn)
+        presetPanel.addView(transContainer); presetPanel.addView(presetRow)
         return presetPanel
     }
 
-    private fun createFlashView() = View(this).apply {
-        setBackgroundColor(Color.WHITE)
-        alpha = 0f
-        layoutParams = FrameLayout.LayoutParams(-1, -1)
-    }
-
-    private fun createLogoView() = ImageView(this).apply {
-        setImageDrawable(createLogoDrawable())
-        alpha = 0.4f
-        layoutParams = FrameLayout.LayoutParams(180, 180).apply {
-            gravity = Gravity.TOP or Gravity.START; topMargin = 40; leftMargin = 40
-        }
-    }
-
+    private fun createFlashView() = View(this).apply { setBackgroundColor(Color.WHITE); alpha = 0f; layoutParams = FrameLayout.LayoutParams(-1, -1) }
+    private fun createLogoView() = ImageView(this).apply { setImageDrawable(createLogoDrawable()); alpha = 0.4f; layoutParams = FrameLayout.LayoutParams(180, 180).apply { gravity = Gravity.TOP or Gravity.START; topMargin = 40; leftMargin = 40 } }
     private fun createMenuUtilityButton() = Button(this).apply {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-
-        // Initial text
-        text = if (isPortrait) {
-            if (isMenuExpanded) "v" else "^"
-        } else {
-            if (isMenuExpanded) "<" else ">"
-        }
-
-        textSize = 22f
-        typeface = Typeface.DEFAULT_BOLD
-        setTextColor(Color.WHITE)
-        stateListAnimator = null
-        background = null
-        alpha = 0.85f
-
-        gravity = Gravity.CENTER
-        setPadding(0, 0, 0, 12)
-
-        menuBtn = this
-
-        layoutParams = FrameLayout.LayoutParams(120, 120)
-
-        setOnClickListener { toggleMenu() }
+        text = if (isPortrait) (if (isMenuExpanded) "v" else "^") else (if (isMenuExpanded) "<" else ">")
+        textSize = 22f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE); stateListAnimator = null; background = null; alpha = 0.85f; gravity = Gravity.CENTER; setPadding(0, 0, 0, 12); menuBtn = this; layoutParams = FrameLayout.LayoutParams(120, 120); setOnClickListener { toggleMenu() }
     }
-
-    private fun createReadabilityButton() = ImageButton(this).apply {
-        setImageResource(android.R.drawable.ic_menu_view)
-        setColorFilter(Color.WHITE)
-
-        // Increased alpha
-        alpha = 0.85f
-
-        readabilityBtn = this
-        layoutParams = FrameLayout.LayoutParams(120, 120).apply {
-            gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 140; rightMargin = 35
-        }
-        setOnClickListener { toggleReadability() }
-    }
-
-    private fun createResetButton() = ImageButton(this).apply {
-        setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
-        setColorFilter(Color.WHITE)
-
-        alpha = 0.85f
-
-        resetBtn = this
-        layoutParams = FrameLayout.LayoutParams(120, 120).apply {
-            gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 30; rightMargin = 35
-        }
-        setOnClickListener { globalReset() }
-    }
+    private fun createReadabilityButton() = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_view); setColorFilter(Color.WHITE); alpha = 0.85f; readabilityBtn = this; layoutParams = FrameLayout.LayoutParams(120, 120).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 140; rightMargin = 35 }; setOnClickListener { toggleReadability() } }
+    private fun createResetButton() = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_close_clear_cancel); setColorFilter(Color.WHITE); alpha = 0.85f; resetBtn = this; layoutParams = FrameLayout.LayoutParams(120, 120).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 30; rightMargin = 35 }; setOnClickListener { globalReset() } }
 
     private fun createCollapsibleGroupView(title: String, startOpen: Boolean): Pair<LinearLayout, LinearLayout> {
-        val groupContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8 }
-            layoutTransition = LayoutTransition()
-        }
-
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(15, 12, 15, 12)
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#33FFFFFF"))
-                cornerRadius = 8f
-                setStroke(1, Color.parseColor("#44FFFFFF"))
-            }
-        }
-
-        val arrow = TextView(this).apply {
-            text = "▶"; textSize = 9f; setTextColor(Color.LTGRAY)
-            layoutParams = LinearLayout.LayoutParams(50, -2)
-            rotation = if (startOpen) 90f else 0f
-        }
-
-        val label = TextView(this).apply {
-            text = title; textSize = 10f; setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.WHITE); letterSpacing = 0.15f
-        }
+        val groupContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8 }; layoutTransition = LayoutTransition() }
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(15, 12, 15, 12); background = GradientDrawable().apply { setColor(Color.parseColor("#33FFFFFF")); cornerRadius = 8f; setStroke(1, Color.parseColor("#44FFFFFF")) } }
+        val arrow = TextView(this).apply { text = "▶"; textSize = 9f; setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(50, -2); rotation = if (startOpen) 90f else 0f }
+        val label = TextView(this).apply { text = title; textSize = 10f; setTypeface(null, Typeface.BOLD); setTextColor(Color.WHITE); letterSpacing = 0.15f }
         header.addView(arrow); header.addView(label)
-
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = if (startOpen) View.VISIBLE else View.GONE
-            setPadding(6, 6, 6, 6)
-        }
-
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = if (startOpen) View.VISIBLE else View.GONE; setPadding(6, 6, 6, 6) }
         header.setOnClickListener {
             val isVisible = content.visibility == View.VISIBLE
-            if (isVisible) {
-                content.visibility = View.GONE
-                arrow.animate().rotation(0f).setDuration(200).start()
-            } else {
-                content.visibility = View.VISIBLE
-                arrow.animate().rotation(90f).setDuration(200).start()
-            }
+            if (isVisible) { content.visibility = View.GONE; arrow.animate().rotation(0f).setDuration(200).start() }
+            else { content.visibility = View.VISIBLE; arrow.animate().rotation(90f).setDuration(200).start() }
         }
-
-        groupContainer.addView(header)
-        groupContainer.addView(content)
+        groupContainer.addView(header); groupContainer.addView(content)
         return Pair(groupContainer, content)
     }
 
-    // Custom drawing logic for Camera Transform icons
     private fun createCustomIcon(type: Int): BitmapDrawable {
-        val size = 100
-        val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val c = Canvas(b)
-        val paint = Paint().apply {
-            color = Color.WHITE; style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; isAntiAlias = true
-        }
+        val size = 100; val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888); val c = Canvas(b)
+        val paint = Paint().apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; isAntiAlias = true }
         val center = size / 2f
         when (type) {
-            0 -> { // FLIP X
-                paint.strokeWidth = 9f
-                val range = 20f
-                c.drawLine(center - range, center, center + range, center, paint)
-                val p = Path().apply {
-                    moveTo(center - 8, center - 12); lineTo(center - range - 4, center); lineTo(center - 8, center + 12)
-                    moveTo(center + 8, center - 12); lineTo(center + range + 4, center); lineTo(center + 8, center + 12)
-                }
-                c.drawPath(p, paint)
-            }
-            1 -> { // FLIP Y
-                paint.strokeWidth = 9f
-                val range = 20f
-                c.drawLine(center, center - range, center, center + range, paint)
-                val p = Path().apply {
-                    moveTo(center - 12, center - 8); lineTo(center, center - range - 4); lineTo(center + 12, center - 8)
-                    moveTo(center - 12, center + 8); lineTo(center, center + range + 4); lineTo(center + 12, center + 8)
-                }
-                c.drawPath(p, paint)
-            }
-            2 -> { // ROTATE
-                paint.strokeWidth = 9f
-                val r = 24f
-                val box = RectF(center - r, center - r, center + r, center + r)
-                c.drawArc(box, 180f + 20f, 140f, false, paint)
-                c.drawArc(box, 0f + 20f, 140f, false, paint)
-                val p = Path()
-                // Simplified arrow drawing for brevity
-                val endX1 = center + (r * cos(Math.toRadians(340.0))).toFloat()
-                val endY1 = center + (r * sin(Math.toRadians(340.0))).toFloat()
-                p.moveTo(endX1 - 5f, endY1 - 15f); p.lineTo(endX1, endY1); p.lineTo(endX1 - 18f, endY1 - 2f)
-                val endX2 = center + (r * cos(Math.toRadians(160.0))).toFloat()
-                val endY2 = center + (r * sin(Math.toRadians(160.0))).toFloat()
-                p.moveTo(endX2 + 5f, endY2 + 15f); p.lineTo(endX2, endY2); p.lineTo(endX2 + 18f, endY2 + 2f)
-                paint.style = Paint.Style.STROKE
-                c.drawPath(p, paint)
-            }
+            0 -> { paint.strokeWidth = 9f; val range = 20f; c.drawLine(center - range, center, center + range, center, paint); val p = Path().apply { moveTo(center - 8, center - 12); lineTo(center - range - 4, center); lineTo(center - 8, center + 12); moveTo(center + 8, center - 12); lineTo(center + range + 4, center); lineTo(center + 8, center + 12) }; c.drawPath(p, paint) }
+            1 -> { paint.strokeWidth = 9f; val range = 20f; c.drawLine(center, center - range, center, center + range, paint); val p = Path().apply { moveTo(center - 12, center - 8); lineTo(center, center - range - 4); lineTo(center + 12, center - 8); moveTo(center - 12, center + 8); lineTo(center, center + range + 4); lineTo(center + 12, center + 8) }; c.drawPath(p, paint) }
+            2 -> { paint.strokeWidth = 9f; val r = 24f; val box = RectF(center - r, center - r, center + r, center + r); c.drawArc(box, 180f + 20f, 140f, false, paint); c.drawArc(box, 0f + 20f, 140f, false, paint); val p = Path(); val endX1 = center + (r * cos(Math.toRadians(340.0))).toFloat(); val endY1 = center + (r * sin(Math.toRadians(340.0))).toFloat(); p.moveTo(endX1 - 5f, endY1 - 15f); p.lineTo(endX1, endY1); p.lineTo(endX1 - 18f, endY1 - 2f); val endX2 = center + (r * cos(Math.toRadians(160.0))).toFloat(); val endY2 = center + (r * sin(Math.toRadians(160.0))).toFloat(); p.moveTo(endX2 + 5f, endY2 + 15f); p.lineTo(endX2, endY2); p.lineTo(endX2 + 18f, endY2 + 2f); paint.style = Paint.Style.STROKE; c.drawPath(p, paint) }
         }
         return BitmapDrawable(resources, b)
     }
 
-
     private fun showRtspDialog() {
-        // 1. History laden (Max 20 Einträge)
         val prefs = getSharedPreferences("SpaceBeam_RTSP", Context.MODE_PRIVATE)
         val historyKey = "RTSP_HISTORY"
         val rawSet = prefs.getStringSet(historyKey, null)
         val historyList = rawSet?.toMutableList() ?: mutableListOf()
-        if (historyList.isEmpty()) {
-            historyList.add("rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4")
-        }
-
-        // Container für Input + Button
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(40, 20, 40, 0)
-        }
-
-        // 2. Das Textfeld
-        val input = AutoCompleteTextView(this).apply {
-            setText(lastRtspUrl)
-            setTextColor(Color.BLACK)
-            textSize = 16f
-            setPadding(20, 30, 20, 30)
-            threshold = 1
-            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE or
-                    android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                    android.text.InputType.TYPE_TEXT_VARIATION_URI
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            val adapter = ArrayAdapter(context, android.R.layout.simple_dropdown_item_1line, historyList)
-            setAdapter(adapter)
-        }
-
-        // 3. Der "Dropdown" Pfeil Button
-        val arrowBtn = ImageButton(this).apply {
-            setImageResource(android.R.drawable.arrow_down_float)
-            setBackgroundColor(Color.LTGRAY)
-            alpha = 0.7f
-            scaleType = ImageView.ScaleType.CENTER_INSIDE
-            layoutParams = LinearLayout.LayoutParams(120, 100).apply {
-                leftMargin = 10
-            }
-            setOnClickListener {
-                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-                imm.hideSoftInputFromWindow(input.windowToken, 0)
-                input.showDropDown()
-            }
-        }
-
-        row.addView(input)
-        row.addView(arrowBtn)
-
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Enter RTSP/Video URL")
-            .setView(row)
-            .setPositiveButton("Load", null)
-            .setNegativeButton("Cancel", null)
-            .create()
-
+        if (historyList.isEmpty()) historyList.add("rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4")
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(40, 20, 40, 0) }
+        val input = AutoCompleteTextView(this).apply { setText(lastRtspUrl); setTextColor(Color.BLACK); textSize = 16f; setPadding(20, 30, 20, 30); threshold = 1; imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE or android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI; inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f); setAdapter(ArrayAdapter(context, android.R.layout.simple_dropdown_item_1line, historyList)) }
+        val arrowBtn = ImageButton(this).apply { setImageResource(android.R.drawable.arrow_down_float); setBackgroundColor(Color.LTGRAY); alpha = 0.7f; scaleType = ImageView.ScaleType.CENTER_INSIDE; layoutParams = LinearLayout.LayoutParams(120, 100).apply { leftMargin = 10 }; setOnClickListener { val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager; imm.hideSoftInputFromWindow(input.windowToken, 0); input.showDropDown() } }
+        row.addView(input); row.addView(arrowBtn)
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Enter RTSP/Video URL").setView(row).setPositiveButton("Load", null).setNegativeButton("Cancel", null).create()
         fun performLoad() {
             val url = input.text.toString().trim()
             if (url.isNotEmpty()) {
-                if (historyList.contains(url)) {
-                    historyList.remove(url)
-                }
+                if (historyList.contains(url)) historyList.remove(url)
                 historyList.add(0, url)
-                while (historyList.size > 20) {
-                    historyList.removeAt(historyList.lastIndex)
-                }
+                while (historyList.size > 20) historyList.removeAt(historyList.lastIndex)
                 prefs.edit().putStringSet(historyKey, historyList.toHashSet()).apply()
-
                 startRtsp(url)
                 dialog.dismiss()
             }
         }
-
-        input.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
-                performLoad()
-                true
-            } else false
-        }
-
-        // --- IMMERSIVE MODE FIX START ---
+        input.setOnEditorActionListener { _, actionId, _ -> if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) { performLoad(); true } else false }
         dialog.window?.setFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-
         dialog.show()
-
-        dialog.window?.decorView?.systemUiVisibility = (
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        or View.SYSTEM_UI_FLAG_FULLSCREEN
-                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                )
-
+        dialog.window?.decorView?.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN)
         dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-        // --- IMMERSIVE MODE FIX END ---
-
-        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            performLoad()
-        }
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener { performLoad() }
     }
 
     private fun applyReadabilityStyle() {
-        val getBg = { alpha: Int ->
-            GradientDrawable().apply {
-                setColor(Color.argb(alpha, 10, 10, 10))
-                setStroke(2, Color.argb(120, 80, 80, 80))
-                cornerRadius = 25f
-                shape = GradientDrawable.RECTANGLE
-            }
-        }
-
-        // Helper for circular buttons - uses EXACT same color/alpha logic as panels
-        val getCircleBg = { alpha: Int ->
-            getBg(alpha).apply { shape = GradientDrawable.OVAL }
-        }
-
+        val getBg = { alpha: Int -> GradientDrawable().apply { setColor(Color.argb(alpha, 10, 10, 10)); setStroke(2, Color.argb(120, 80, 80, 80)); cornerRadius = 25f; shape = GradientDrawable.RECTANGLE } }
+        val getCircleBg = { alpha: Int -> getBg(alpha).apply { shape = GradientDrawable.OVAL } }
         val panels = listOf(leftHUDContainer, cameraSettingsPanel, presetPanel, recordControls)
         val utils = listOf(readabilityBtn, resetBtn, menuBtn)
-
-        // Reset state
-        panels.forEach {
-            it.background = null
-            it.setPadding(15, 15, 15, 15)
-            it.clipToOutline = true
-        }
-
+        panels.forEach { it.background = null; it.setPadding(15, 15, 15, 15); it.clipToOutline = true }
         when (readabilityLevel) {
-            1 -> {
-                // Darker glass
-                panels.forEach { it.background = getBg(180) }
-                // Match alpha (180) for buttons
-                utils.forEach { it.background = getCircleBg(180) }
-                applyRecursiveGlow(overlayHUD, false)
-            }
-            2 -> {
-                // Lighter glass
-                panels.forEach { it.background = getBg(120) }
-                // Match alpha (120) for buttons
-                utils.forEach { it.background = getCircleBg(120) }
-                applyRecursiveGlow(overlayHUD, true)
-            }
-            else -> {
-                panels.forEach { it.setPadding(0, 0, 0, 0); it.background = null }
-                utils.forEach { it.background = null }
-                applyRecursiveGlow(overlayHUD, false)
-            }
+            1 -> { panels.forEach { it.background = getBg(180) }; utils.forEach { it.background = getCircleBg(180) }; applyRecursiveGlow(overlayHUD, false) }
+            2 -> { panels.forEach { it.background = getBg(120) }; utils.forEach { it.background = getCircleBg(120) }; applyRecursiveGlow(overlayHUD, true) }
+            else -> { panels.forEach { it.setPadding(0, 0, 0, 0); it.background = null }; utils.forEach { it.background = null }; applyRecursiveGlow(overlayHUD, false) }
         }
     }
 
     private fun applyRecursiveGlow(view: View, enabled: Boolean) {
-        if (view is TextView) {
-            if (enabled) view.setShadowLayer(50f, 0f, 0f, Color.BLACK) else view.setShadowLayer(
-                0f,
-                0f,
-                0f,
-                Color.TRANSPARENT
-            )
-        } else if (view is ImageButton || view is Button) {
-            view.elevation = if (enabled) 50f else 0f
-        }
-        if (view is ViewGroup) (0 until view.childCount).forEach {
-            applyRecursiveGlow(
-                view.getChildAt(
-                    it
-                ), enabled
-            )
-        }
+        if (view is TextView) { if (enabled) view.setShadowLayer(50f, 0f, 0f, Color.BLACK) else view.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT) }
+        else if (view is ImageButton || view is Button) { view.elevation = if (enabled) 50f else 0f }
+        if (view is ViewGroup) (0 until view.childCount).forEach { applyRecursiveGlow(view.getChildAt(it), enabled) }
     }
-    private fun toggleReadability() {
-        readabilityLevel = (readabilityLevel + 1) % 3; applyReadabilityStyle()
-    }
+
+    private fun toggleReadability() { readabilityLevel = (readabilityLevel + 1) % 3; applyReadabilityStyle() }
+
     private fun toggleRecording() {
         if (!isRecording) {
             val fileName = "SB_${System.currentTimeMillis()}.mp4"
             val tempFile = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), fileName)
-            renderer.startRecording(tempFile); isRecording = true; recordingSeconds =
-                0; recordBtn.alpha = 1.0f
+            renderer.startRecording(tempFile); isRecording = true; recordingSeconds = 0; recordBtn.alpha = 1.0f
             recordTicker = object : Runnable {
                 override fun run() {
-                    recordingSeconds++;
-                    val m = recordingSeconds / 60;
-                    val s = recordingSeconds % 60
-                    recordBtn.setImageDrawable(
-                        textToIcon(
-                            "%d:%02d".format(m, s),
-                            38f,
-                            Color.RED
-                        )
-                    ); handler.postDelayed(this, 1000)
+                    recordingSeconds++; val m = recordingSeconds / 60; val s = recordingSeconds % 60
+                    recordBtn.setImageDrawable(textToIcon("%d:%02d".format(m, s), 38f, Color.RED)); handler.postDelayed(this, 1000)
                 }
             }; handler.post(recordTicker!!)
         } else {
             renderer.stopRecording { savedFile ->
                 isRecording = false; recordTicker?.let { handler.removeCallbacks(it) }
                 runOnUiThread {
-                    recordBtn.setImageDrawable(
-                        textToIcon(
-                            "REC",
-                            40f
-                        )
-                    ); recordBtn.alpha =
-                    0.5f; if (savedFile != null && savedFile.exists()) saveVideoToGallery(savedFile)
+                    recordBtn.setImageDrawable(textToIcon("REC", 40f)); recordBtn.alpha = 0.5f; if (savedFile != null && savedFile.exists()) saveVideoToGallery(savedFile)
                 }
             }
         }
     }
+
     private fun saveVideoToGallery(file: File) {
         if (file.length() == 0L) return
         val values = ContentValues().apply {
-            put(
-                MediaStore.Video.Media.DISPLAY_NAME,
-                file.name
-            ); put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(
-                    MediaStore.Video.Media.RELATIVE_PATH,
-                    Environment.DIRECTORY_MOVIES + "/SpaceBeam"
-                ); put(MediaStore.Video.Media.IS_PENDING, 1)
-            }
+            put(MediaStore.Video.Media.DISPLAY_NAME, file.name); put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) { put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SpaceBeam"); put(MediaStore.Video.Media.IS_PENDING, 1) }
         }
         try {
             val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
             uri?.let {
-                contentResolver.openOutputStream(it)
-                    ?.use { out -> file.inputStream().use { it.copyTo(out) } }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    values.clear(); values.put(
-                        MediaStore.Video.Media.IS_PENDING,
-                        0
-                    ); contentResolver.update(it, values, null, null)
-                }
-                MediaScannerConnection.scanFile(
-                    this,
-                    arrayOf(file.absolutePath),
-                    arrayOf("video/mp4"),
-                    null
-                )
+                contentResolver.openOutputStream(it)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) { values.clear(); values.put(MediaStore.Video.Media.IS_PENDING, 0); contentResolver.update(it, values, null, null) }
+                MediaScannerConnection.scanFile(this, arrayOf(file.absolutePath), arrayOf("video/mp4"), null)
                 file.delete(); Toast.makeText(this, "Video Saved", Toast.LENGTH_SHORT).show()
             }
-        } catch (e: Exception) {
-        }
+        } catch (e: Exception) {}
     }
-    private fun globalReset() {
-        // 1. Kill any ongoing preset animations immediately
-        currentAnimator?.cancel()
 
-        // 2. Reset the Renderer's continuous accumulators (Rotation & Flight)
-        // These are "physics" variables the sliders don't own directly
+    private fun globalReset() {
+        renderer.stopRotationAnim() // STOP GL ANIM
+        controls.forEach { it.stopAnimation() } // STOP GL ANIM
+
         renderer.mRotAccum = 0.0
         renderer.cRotAccum = 0.0
         renderer.lRotAccum = 0.0
         renderer.scrollAccum = 0.0f
-        renderer.resetPhases() // Reset LFO/Modulation positions
-
-        // 3. Reset Camera Flipping & Rotation
+        renderer.resetPhases()
         renderer.flipX = 1f
         renderer.flipY = -1f
         renderer.rot180 = false
-
-        // 4. Reset UI State
         activePreset = -1
         updatePresetHighlights()
-
-        // 5. AUTOMATED RESET: Loop through all sliders and restore their defaultValues
-        // This handles Zoom, Warp, Colors, 3D Mix, etc. automatically
         controls.forEach { it.reset() }
-
-        // 6. Specific Override: The AXIS slider
-        // We force this to 2 segments (Mirror mode) as the baseline
         renderer.axisCount = 2.0f
-        axisSb.progress = 1 // Index 1 = Count 2
+        axisSb.progress = 1
         controlsMap["AXIS"]?.setProgress(1)
-
-        // 7. Update sidebar button highlights (Alpha states)
         updateSidebarVisuals()
     }
 
     private fun updatePresetHighlights() {
-        presetButtons.forEach { (idx, btn) ->
-            btn.background = GradientDrawable().apply {
-                setColor(Color.TRANSPARENT); if (idx == activePreset) setStroke(
-                4,
-                Color.WHITE
-            ); cornerRadius = 12f
-            }
-        }
+        presetButtons.forEach { (idx, btn) -> btn.background = GradientDrawable().apply { setColor(Color.TRANSPARENT); if (idx == activePreset) setStroke(4, Color.WHITE); cornerRadius = 12f } }
     }
 
     private fun triggerFlashPulse() {
-        flashOverlay.alpha = 0.6f; flashOverlay.animate().alpha(0f).setDuration(400)
-            .start(); photoBtn.animate().scaleX(1.8f).scaleY(1.8f).setDuration(100)
-            .withEndAction { photoBtn.animate().scaleX(1.5f).scaleY(1.5f).setDuration(200).start() }
-            .start()
+        flashOverlay.alpha = 0.6f; flashOverlay.animate().alpha(0f).setDuration(400).start()
+        photoBtn.animate().scaleX(1.8f).scaleY(1.8f).setDuration(100).withEndAction { photoBtn.animate().scaleX(1.5f).scaleY(1.5f).setDuration(200).start() }.start()
     }
 
     private fun updateSidebarVisuals() {
-        flipXBtn.alpha = if (renderer.flipX < 0f) 1.0f else 0.3f; flipYBtn.alpha =
-            if (renderer.flipY > 0f) 1.0f else 0.3f; rot180Btn.alpha =
-            if (renderer.rot180) 1.0f else 0.3f
+        flipXBtn.alpha = if (renderer.flipX < 0f) 1.0f else 0.3f; flipYBtn.alpha = if (renderer.flipY > 0f) 1.0f else 0.3f; rot180Btn.alpha = if (renderer.rot180) 1.0f else 0.3f
     }
 
-    private fun addHeader(m: LinearLayout, t: String) = m.addView(TextView(this).apply {
-        text = t; setTextColor(Color.WHITE); textSize = 8f; alpha = 0.3f; setPadding(0, 45, 0, 5)
-    })
-
     private fun hideSystemUI() {
-        window.decorView.systemUiVisibility =
-            (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION)
+        window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION)
     }
 
     private fun applyPreset(idx: Int) {
         val p = presets[idx] ?: return
         activePreset = idx
         updatePresetHighlights()
-        currentAnimator?.cancel()
+
+        // FIXED: Use GL Thread Animation (No ValueAnimator)
+        val durationSec = transitionMs / 1000f
 
         if (!axisLocked) {
             renderer.axisCount = p.axis.toFloat()
@@ -2005,157 +1319,81 @@ class MainActivity : AppCompatActivity() {
             controlsMap["AXIS"]?.setProgress(p.axis - 1)
         }
 
-        // --- SNAPSHOT START VALUES ---
-        val startValues = controls.associate { it.id to it.preciseValue }
-        val startRates = controls.associate { it.id to it.preciseModRate }
-        val startDepths = controls.associate { it.id to it.preciseModDepth }
-
-        // --- INTELLIGENTER ROTATION RESET ---
-        // 1. Startwerte holen
+        // 1. Calculate Rotation Targets
         val startMRot = renderer.mRotAccum
         val startCRot = renderer.cRotAccum
-
-        // 2. Ziel berechnen: Das nächste Vielfache von 360 Grad
-        // Wir runden den aktuellen Wert geteilt durch 360.
-        // Beispiel: Stehen wir bei 370°, runden wir auf 1 -> Ziel 360°. Weg: -10°.
-        // Beispiel: Stehen wir bei 350°, runden wir auf 1 -> Ziel 360°. Weg: +10°.
         val targetMRot = round(startMRot / 360.0) * 360.0
         val targetCRot = round(startCRot / 360.0) * 360.0
 
-        currentAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = transitionMs
-            // Decelerate sieht bei Rotation natürlicher aus (bremst sanft ab)
-            interpolator = android.view.animation.DecelerateInterpolator()
+        // 2. Trigger Renderer Rotation Animation
+        renderer.animateRotationTo(targetMRot, targetCRot, durationSec)
 
-            addUpdateListener { anim ->
-                val t = anim.animatedValue as Float
-
-                // 1. Slider Werte animieren
-                controls.forEach { control ->
-                    if (control.id == "AXIS") return@forEach
-                    val target = p.controlSnapshots[control.id]
-                    if (target != null) {
-                        val sVal = startValues[control.id] ?: 0f
-                        val newVal = sVal + (target.value - sVal) * t
-                        control.setAnimatedValue(newVal)
-
-                        if (control.hasModulation) {
-                            val sRate = startRates[control.id] ?: 0f
-                            val newRate = sRate + (target.rate - sRate) * t
-                            control.setAnimatedModRate(newRate)
-
-                            val sDepth = startDepths[control.id] ?: 0f
-                            val newDepth = sDepth + (target.depth - sDepth) * t
-                            control.setAnimatedModDepth(newDepth)
-                        }
-                    }
+        // 3. Trigger Control Animations
+        controls.forEach { control ->
+            if (control.id == "AXIS") return@forEach
+            val snap = p.controlSnapshots[control.id]
+            if (snap != null) {
+                control.animateTo(snap.value.toFloat(), durationSec)
+                if (control.hasModulation) {
+                    control.updateModRate(snap.rate)
+                    control.updateModDepth(snap.depth)
+                    // Optional: Restore shape from snapshot if you wish,
+                    // though usually shape isn't interpolated, just switched.
+                    try { control.modShape = PropertyControl.WaveShape.valueOf(snap.shape) } catch(e: Exception){}
                 }
-
-                // 2. Rotation sanft zur nächsten geraden Position drehen
-                // Lerp Formel: start + (ziel - start) * t
-                renderer.mRotAccum = startMRot + (targetMRot - startMRot) * t.toDouble()
-                renderer.cRotAccum = startCRot + (targetCRot - startCRot) * t.toDouble()
-
-                // LFO Rotation setzen wir hart auf 0 zurück (Fade out wäre komplexer)
-                renderer.lRotAccum = renderer.lRotAccum * (1.0 - t.toDouble())
-
-                // 3. Flags setzen
-                renderer.flipX = p.flipX
-                renderer.flipY = p.flipY
-                renderer.rot180 = p.rot180
-                updateSidebarVisuals()
             }
-            start()
         }
+
+        renderer.flipX = p.flipX
+        renderer.flipY = p.flipY
+        renderer.rot180 = p.rot180
+        updateSidebarVisuals()
     }
 
     private fun savePreset(idx: Int) {
-        // 1. Capture current state
         val snapshots = controls.filter { it.id != "AXIS" }.associate { it.id to it.getSnapshot() }
         val axisVal = controlsMap["AXIS"]?.value ?: 0
-
-        val newPreset = Preset(
-            snapshots,
-            renderer.flipX, renderer.flipY, renderer.rot180,
-            axisVal + 1
-        )
-
-        // 2. Update Memory
+        val newPreset = Preset(snapshots, renderer.flipX, renderer.flipY, renderer.rot180, axisVal + 1)
         presets[idx] = newPreset
         activePreset = idx
         updatePresetHighlights()
-
-        // 3. SERIALIZE TO JSON & SAVE TO DISK
         try {
             val rootObj = JSONObject()
             rootObj.put("axis", newPreset.axis)
             rootObj.put("flipX", newPreset.flipX.toDouble())
             rootObj.put("flipY", newPreset.flipY.toDouble())
             rootObj.put("rot180", newPreset.rot180)
-
             val controlsObj = JSONObject()
             newPreset.controlSnapshots.forEach { (key, snap) ->
                 val snapObj = JSONObject()
-                snapObj.put("v", snap.value)
-                snapObj.put("r", snap.rate)
-                snapObj.put("d", snap.depth)
+                snapObj.put("v", snap.value); snapObj.put("r", snap.rate); snapObj.put("d", snap.depth); snapObj.put("shape", snap.shape)
                 controlsObj.put(key, snapObj)
             }
             rootObj.put("controls", controlsObj)
-
-            val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
-            prefs.edit().putString("PRESET_$idx", rootObj.toString()).apply()
-
+            getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE).edit().putString("PRESET_$idx", rootObj.toString()).apply()
             Toast.makeText(this, "Preset $idx Saved", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Log.e("PRESET", "Failed to save preset", e)
-            Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show()
-        }
-    }
-    private fun logPresetCode(idx: Int, p: Preset) {
-        val sb = StringBuilder()
-        sb.append("presets[$idx] = p(ax=${p.axis}, mRot=${p.controlSnapshots["M_ROT"]?.value ?: 500}")
-
-        p.controlSnapshots.forEach { (id, snap) ->
-            if (id != "M_ROT" && id != "AXIS") {
-                if (snap.value != 500 || snap.rate != 0 || snap.depth != 0) {
-                    sb.append(", \"$id\", ${snap.value}, ${snap.rate}, ${snap.depth}")
-                }
-            }
-        }
-        sb.append(")")
-        android.util.Log.d("PRESET_STUDIO", sb.toString())
+        } catch (e: Exception) { Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show() }
     }
 
     private fun initDefaultPresets() {
-        // --- PART 1: Hardcoded Defaults (Factory Settings) ---
         fun p(ax: Int = 1, mRot: Int = 500, vararg overrides: Any): Preset {
             val baseSnapshots = controls.associate { it.id to it.getSnapshot() }.toMutableMap()
-            // Reset M_ROT specifically with defaults
             baseSnapshots["M_ROT"] = PropertyControl.Snapshot(mRot, false, 0, 0, "SINE")
-
             var i = 0
             while (i < overrides.size) {
                 val key = overrides[i] as String
                 val value = overrides[i + 1] as Int
-
-                // Check if modulation args follow (Value, Rate, Depth)
                 if (i + 3 < overrides.size && overrides[i + 2] is Int && overrides[i + 3] is Int) {
-                    val rate = overrides[i + 2] as Int
-                    val depth = overrides[i + 3] as Int
-                    // If rate/depth provided, assume Active = true and shape = SINE
+                    val rate = overrides[i + 2] as Int; val depth = overrides[i + 3] as Int
                     baseSnapshots[key] = PropertyControl.Snapshot(value, true, rate, depth, "SINE")
                     i += 4
                 } else {
-                    // Just value provided
                     baseSnapshots[key] = PropertyControl.Snapshot(value, false, 0, 0, "SINE")
                     i += 2
                 }
             }
             return Preset(baseSnapshots, 1f, -1f, false, ax)
         }
-
-        // Load Factory Defaults
         presets[1] = p(ax = 2, mRot = 500, "M_ZOOM", 300, 139, 307, "WARP", 1000, 0, 0)
         presets[2] = p(ax = 2, mRot = 615, "M_ZOOM", 248, 293, 383, "WARP", 1000, 0, 0)
         presets[3] = p(ax = 2, mRot = 673, "M_ZOOM", 268, 293, 559, "M_TILTX", 553, 305, 880, "M_TILTY", 500, 353, 1000, "WARP", 1000, 0, 0)
@@ -2165,9 +1403,7 @@ class MainActivity : AppCompatActivity() {
         presets[7] = p(ax = 2, mRot = 673, "M_ZOOM", 912, 293, 740, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 1000, "M_TILTY", 500, 353, 1000, "C_ROT", 657, 0, 0, "WARP", 0, 0, 0, "C_TX", 500, 389, 739, "C_TY", 500, 209, 763, "C_TILTX", 500, 287, 677, "C_TILTY", 500, 443, 557, "GLOW", 164, 395, 129)
         presets[8] = p(ax = 2, mRot = 673, "M_ZOOM", 268, 293, 517, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 1000, "M_TILTY", 500, 353, 1000, "C_ROT", 657, 0, 0, "WARP", 0, 0, 0, "C_TX", 500, 389, 739, "C_TY", 500, 209, 763, "C_TILTX", 500, 287, 677, "C_TILTY", 500, 443, 557, "RGB", 957, 0, 0, "GLOW", 164, 395, 129)
 
-        // --- PART 2: Load Saved User Overrides from Disk ---
         val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
-
         for (i in 1..8) {
             val jsonStr = prefs.getString("PRESET_$i", null)
             if (jsonStr != null) {
@@ -2177,67 +1413,41 @@ class MainActivity : AppCompatActivity() {
                     val loadedFlipX = rootObj.getDouble("flipX").toFloat()
                     val loadedFlipY = rootObj.getDouble("flipY").toFloat()
                     val loadedRot180 = rootObj.getBoolean("rot180")
-
                     val controlsObj = rootObj.getJSONObject("controls")
                     val loadedSnapshots = mutableMapOf<String, PropertyControl.Snapshot>()
-
-                    // Start with defaults to ensure missing keys don't crash
                     loadedSnapshots.putAll(presets[i]?.controlSnapshots ?: emptyMap())
-
                     val keysIterator = controlsObj.keys()
                     while (keysIterator.hasNext()) {
                         val key = keysIterator.next()
                         val snapObj = controlsObj.getJSONObject(key)
-                        // Update JSON parsing to include active/shape if available, or defaults
                         loadedSnapshots[key] = PropertyControl.Snapshot(
-                            snapObj.getInt("v"),
-                            snapObj.optBoolean("active", false), // Handle legacy JSON gracefully
-                            snapObj.optInt("r", 0),
-                            snapObj.optInt("d", 0),
-                            snapObj.optString("shape", "SINE")
+                            snapObj.getInt("v"), snapObj.optBoolean("active", false), snapObj.optInt("r", 0), snapObj.optInt("d", 0), snapObj.optString("shape", "SINE")
                         )
                     }
-
                     presets[i] = Preset(loadedSnapshots, loadedFlipX, loadedFlipY, loadedRot180, loadedAxis)
-                    Log.d("PRESETS", "Successfully loaded user preset $i")
-                } catch (e: Exception) {
-                    Log.e("PRESET", "Error loading preset $i", e)
-                }
+                } catch (e: Exception) { Log.e("PRESET", "Error loading preset $i", e) }
             }
         }
     }
 
-
     private fun toggleHud() {
-        isHudVisible = !isHudVisible; overlayHUD.visibility =
-            if (isHudVisible) View.VISIBLE else View.GONE; if (isHudVisible) hideSystemUI()
+        isHudVisible = !isHudVisible; overlayHUD.visibility = if (isHudVisible) View.VISIBLE else View.GONE; if (isHudVisible) hideSystemUI()
     }
 
     private fun toggleMenu() {
         PropertyControl.closeActiveMenu()
         isMenuExpanded = !isMenuExpanded
         leftHUDContainer.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
-
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-
-        if (isPortrait) {
-            // Arrow Down (Open) vs Arrow Up (Closed)
-            menuBtn.text = if (isMenuExpanded) "v" else "^"
-        } else {
-            // Arrow Left (Open) vs Arrow Right (Closed)
-            menuBtn.text = if (isMenuExpanded) "<" else ">"
-        }
+        menuBtn.text = if (isPortrait) (if (isMenuExpanded) "v" else "^") else (if (isMenuExpanded) "<" else ">")
     }
 
-
     inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
-        // --- Programs ---
         private var kaleidoProgram = 0
         private var simpleProgram = 0
         @Volatile private var isSurfaceReady = false
         private val mvpMatrix = FloatArray(16)
         private val identityMatrix = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
-        // --- Render State Variables (Restored) ---
         var scrollAccum = 0.0f
         var mRotAccum = 0.0
         var cRotAccum = 0.0
@@ -2248,19 +1458,13 @@ class MainActivity : AppCompatActivity() {
         var rot180 = false
         private var lastTime = System.nanoTime()
         private var deltaTime = 0.0f
-
-        // --- Textures & Buffers ---
         private var cameraTexId = -1
         private var surfaceTexture: SurfaceTexture? = null
         private var playerSurface: Surface? = null
-
-        // --- FBO ---
         private var fboId = 0
         private var fboTexId = 0
         private var fboWidth = 1920
         private var fboHeight = 1080
-
-        // --- Recording / Media ---
         private var captureRequested = false
         private var videoRecorder: VideoRecorder? = null
         private var recordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
@@ -2268,8 +1472,6 @@ class MainActivity : AppCompatActivity() {
         private var onStopCallback: ((File?) -> Unit)? = null
         private var isStopRequested = false
         private var recordStartTimeNs: Long = 0
-
-        // --- EGL / External Display ---
         private var mSavedDisplay = EGL14.EGL_NO_DISPLAY
         private var mSavedContext = EGL14.eglGetCurrentContext()
         private var mEglConfig: EGL14EGLConfig? = null
@@ -2277,278 +1479,145 @@ class MainActivity : AppCompatActivity() {
         private var extEglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
         private var extWidth = 0
         private var extHeight = 0
-
-        // --- GL Buffers ---
         private lateinit var pBuf: FloatBuffer
         private lateinit var tBuf: FloatBuffer
         private var uLocs = mutableMapOf<String, Int>()
         private var simpleULocs = mutableMapOf<String, Int>()
         private var viewWidth = 1
         private var viewHeight = 1
-
         private val FIXED_WIDTH = 1920
         private val FIXED_HEIGHT = 1080
 
-        fun resetPhases() {
-            ctx.controls.forEach { it.lfoPhase = 0.0 }
-            mRotAccum = 0.0; cRotAccum = 0.0; lRotAccum = 0.0
+        // --- NEW: Rotation Animation State ---
+        private var rotTargetM: Double? = null
+        private var rotStartM: Double = 0.0
+        private var rotTargetC: Double? = null
+        private var rotStartC: Double = 0.0
+        private var rotAnimDuration: Float = 0f
+        private var rotAnimTime: Float = 0f
+        private var isRotAnimating = false
+
+        fun animateRotationTo(targetM: Double, targetC: Double, duration: Float) {
+            rotTargetM = targetM
+            rotStartM = mRotAccum
+            rotTargetC = targetC
+            rotStartC = cRotAccum
+            rotAnimDuration = duration
+            rotAnimTime = 0f
+            isRotAnimating = true
         }
 
+        fun stopRotationAnim() { isRotAnimating = false }
+
+        fun resetPhases() { ctx.controls.forEach { it.lfoPhase = 0.0 }; mRotAccum = 0.0; cRotAccum = 0.0; lRotAccum = 0.0 }
         fun capturePhoto() { captureRequested = true }
-
-        fun stopRecording(callback: (File?) -> Unit) {
-            onStopCallback = callback
-            isStopRequested = true
-        }
-
-        fun getPlayerSurface(): Surface? {
-            if (surfaceTexture == null) return null
-            if (playerSurface == null) {
-                playerSurface = Surface(surfaceTexture)
-            }
-            return playerSurface
-        }
-
-        fun startRecording(file: File) {
-            pendingRecordFile = file
-            recordStartTimeNs = 0
-        }
-
+        fun stopRecording(callback: (File?) -> Unit) { onStopCallback = callback; isStopRequested = true }
+        fun getPlayerSurface(): Surface? { if (surfaceTexture == null) return null; if (playerSurface == null) { playerSurface = Surface(surfaceTexture) }; return playerSurface }
+        fun startRecording(file: File) { pendingRecordFile = file; recordStartTimeNs = 0 }
         fun resetVideoTexture() {
-            playerSurface?.release()
-            playerSurface = null
-            surfaceTexture?.release()
-            surfaceTexture = null
-            if (cameraTexId != -1) {
-                val t = IntArray(1)
-                t[0] = cameraTexId
-                GLES20.glDeleteTextures(1, t, 0)
-                cameraTexId = -1
-            }
-            cameraTexId = createOESTex()
-            surfaceTexture = SurfaceTexture(cameraTexId)
-            surfaceTexture?.setDefaultBufferSize(viewWidth, viewHeight)
+            playerSurface?.release(); playerSurface = null; surfaceTexture?.release(); surfaceTexture = null
+            if (cameraTexId != -1) { val t = IntArray(1); t[0] = cameraTexId; GLES20.glDeleteTextures(1, t, 0); cameraTexId = -1 }
+            cameraTexId = createOESTex(); surfaceTexture = SurfaceTexture(cameraTexId); surfaceTexture?.setDefaultBufferSize(viewWidth, viewHeight)
         }
-
-        fun provideSurface(req: SurfaceRequest) {
-            glView.queueEvent {
-                surfaceTexture?.let { st ->
-                    st.setDefaultBufferSize(req.resolution.width, req.resolution.height)
-                    val s = Surface(st)
-                    req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() }
-                }
-            }
-        }
-
+        fun provideSurface(req: SurfaceRequest) { glView.queueEvent { surfaceTexture?.let { st -> st.setDefaultBufferSize(req.resolution.width, req.resolution.height); val s = Surface(st); req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() } } } }
         fun setExternalSurface(s: Surface, w: Int, h: Int) { extSurfaceArgs = Triple(s, w, h) }
         fun removeExternalSurface() { extSurfaceArgs = null }
-        fun updateTextureSize(width: Int, height: Int) {
-            glView.queueEvent { surfaceTexture?.setDefaultBufferSize(width, height) }
-        }
+        fun updateTextureSize(width: Int, height: Int) { glView.queueEvent { surfaceTexture?.setDefaultBufferSize(width, height) } }
 
         override fun onSurfaceCreated(gl: GL10?, config: GL10EGLConfig?) {
-            setupEGL()
-            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+            setupEGL(); GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
             val fSrc = """#extension GL_OES_EGL_image_external : require
-            precision highp float;
-            varying vec2 v;
-            uniform samplerExternalOES uTex;
-            
-            // --- UNIFORMS ---
+            precision highp float; varying vec2 v; uniform samplerExternalOES uTex;
             uniform float uMR, uCR, uCZ, uA, uMZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB, uWarp;
             uniform float uBrit, uTHueStr, uTHuePos, uTWaveStr, uTWavePos;
             uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
-            uniform float uCurve, uTwist, uFlux;
-            uniform float uSShape, uSFov, uScroll, uMode;
-            
-            vec3 hueShift(vec3 color, float hue) {
-                const vec3 k = vec3(0.57735, 0.57735, 0.57735);
-                float cosAngle = cos(hue);
-                return vec3(color * cosAngle + cross(k, color) * sin(hue) + k * dot(k, color) * (1.0 - cosAngle));
-            }
-            
+            uniform float uCurve, uTwist, uFlux, uSShape, uSFov, uScroll, uMode;
+            vec3 hueShift(vec3 color, float hue) { const vec3 k = vec3(0.57735, 0.57735, 0.57735); float cosAngle = cos(hue); return vec3(color * cosAngle + cross(k, color) * sin(hue) + k * dot(k, color) * (1.0 - cosAngle)); }
             vec3 sampleCamera(vec2 uv, float rgbShift) {
                 vec2 centered = uv - 0.5;
-                float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y);
-                centered /= max(z, 0.1);
-                centered *= uCZ;
-                float aspectFactor = mix(uA, 1.0, uWarp);
-                centered.x *= aspectFactor;
-                float cr = uCR * 0.01745329; 
-                float c = cos(cr); float s = sin(cr);
+                float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y); centered /= max(z, 0.1); centered *= uCZ;
+                float aspectFactor = mix(uA, 1.0, uWarp); centered.x *= aspectFactor;
+                float cr = uCR * 0.01745329; float c = cos(cr); float s = sin(cr);
                 centered = vec2(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
-                centered.x /= aspectFactor;
-                centered += uCT;
-                vec2 rotatedUV = centered + 0.5;
-                rotatedUV.x += rgbShift;
-                rotatedUV = (rotatedUV - 0.5) * uF + 0.5;
+                centered.x /= aspectFactor; centered += uCT;
+                vec2 rotatedUV = centered + 0.5; rotatedUV.x += rgbShift; rotatedUV = (rotatedUV - 0.5) * uF + 0.5;
                 vec2 mirroredUV = abs(mod(rotatedUV + 1.0, 2.0) - 1.0);
                 return texture2D(uTex, mirroredUV).rgb;
             }
-            
             void main() {
                 vec3 finalColor = vec3(0.0);
-                float a1 = -uMR * 0.01745329; 
-                float cosA1 = cos(a1); float sinA1 = sin(a1);
-                
+                float a1 = -uMR * 0.01745329; float cosA1 = cos(a1); float sinA1 = sin(a1);
                 float modeBlend = smoothstep(0.0, 1.0, uMode);
                 vec2 effectiveTilt = mix(uMTilt, vec2(0.0), modeBlend);
                 vec2 effectiveTrans = uMT + mix(vec2(0.0), uMTilt * 2.0, modeBlend);
-            
                 for(int i=0; i<3; i++) {
                     float mOff = (i==0) ? uMRGB : (i==2) ? -uMRGB : 0.0;
                     vec2 uv = v - 0.5;
-                    
-                    float zM = 1.0 + (uv.x * effectiveTilt.x) + (uv.y * effectiveTilt.y);
-                    uv /= max(zM, 0.1);
-                    uv.x *= uA; 
-                    uv.x += mOff;
-                    
+                    float zM = 1.0 + (uv.x * effectiveTilt.x) + (uv.y * effectiveTilt.y); uv /= max(zM, 0.1); uv.x *= uA; uv.x += mOff;
                     uv = (uv + effectiveTrans) * uMZ * 4.0;
                     uv = vec2(uv.x * cosA1 - uv.y * sinA1, uv.x * sinA1 + uv.y * cosA1);
-                    
                     if(uAx > 1.1) {
-                        float r = length(uv);
-                        float slice = 6.2831853 / uAx;
-                        float angle = atan(uv.y, uv.x);
-                        float a = mod(angle, slice);
-                        if(mod(uAx, 2.0) < 0.1) a = abs(a - slice * 0.5);
+                        float r = length(uv); float slice = 6.2831853 / uAx; float angle = atan(uv.y, uv.x);
+                        float a = mod(angle, slice); if(mod(uAx, 2.0) < 0.1) a = abs(a - slice * 0.5);
                         uv = vec2(cos(a), sin(a)) * r;
                     }
-            
-                    float rCircle = length(uv);
-                    float rBox = max(abs(uv.x), abs(uv.y));
-                    float dist = mix(rCircle, rBox, uSShape);
-                    float angle = atan(uv.y, uv.x);
-                    dist += sin(angle * 4.0 + dist * 10.0) * uFlux * dist;
-                    float safeDist = max(dist, 0.01);
-                    
+                    float rCircle = length(uv); float rBox = max(abs(uv.x), abs(uv.y)); float dist = mix(rCircle, rBox, uSShape);
+                    float angle = atan(uv.y, uv.x); dist += sin(angle * 4.0 + dist * 10.0) * uFlux * dist; float safeDist = max(dist, 0.01);
                     float projection = (uSFov * 0.8 + 0.2) / safeDist;
-                    
-                    vec2 tunnelUV;
-                    tunnelUV.x = (angle + (1.0/safeDist) * uTwist) / 3.14159; 
-                    tunnelUV.y = projection + uScroll; 
-                    
+                    vec2 tunnelUV; tunnelUV.x = (angle + (1.0/safeDist) * uTwist) / 3.14159; tunnelUV.y = projection + uScroll; 
                     if(abs(uCurve - 1.0) > 0.01) tunnelUV *= 1.0 + (uCurve - 1.0) * (1.0 - safeDist);
-            
-                    vec2 flatUV = uv;
-                    flatUV.x /= uA;
-                    
+                    vec2 flatUV = uv; flatUV.x /= uA;
                     vec2 mixedUV = mix(flatUV, tunnelUV * 0.8, modeBlend);
-                    
                     vec2 cameraUV = abs(mod(mixedUV + 1.0, 2.0) - 1.0);
                     float sOff = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
                     vec3 smp = sampleCamera(cameraUV, sOff);
-
                     if (uMode > 0.01) {
-                        if (uTHueStr > 0.01) {
-                            float hueArg = (mixedUV.y * 0.5) + uTHuePos; 
-                            vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (hueArg + vec3(0.0, 0.33, 0.67)));
-                            smp = mix(smp, smp * rainbow * 2.0, uTHueStr * uMode);
-                        }
-                        if (uTWaveStr > 0.01) {
-                            float waveDomain = mixedUV.y - (uTWavePos * 10.0);
-                            float distFromWave = abs(fract(waveDomain) - 0.5); 
-                            float width = 0.15 + (uTWaveStr * 0.2); 
-                            float wavePulse = smoothstep(width, 0.0, distFromWave);
-                            wavePulse = wavePulse * wavePulse;
-                            float intensity = (uTWaveStr * uTWaveStr) * 0.8;
-                            vec3 waveColor = vec3(0.5, 0.8, 1.0) * wavePulse * intensity; 
-                            smp += waveColor;
-                        }
+                        if (uTHueStr > 0.01) { float hueArg = (mixedUV.y * 0.5) + uTHuePos; vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (hueArg + vec3(0.0, 0.33, 0.67))); smp = mix(smp, smp * rainbow * 2.0, uTHueStr * uMode); }
+                        if (uTWaveStr > 0.01) { float waveDomain = mixedUV.y - (uTWavePos * 10.0); float distFromWave = abs(fract(waveDomain) - 0.5); float width = 0.15 + (uTWaveStr * 0.2); float wavePulse = smoothstep(width, 0.0, distFromWave); wavePulse = wavePulse * wavePulse; float intensity = (uTWaveStr * uTWaveStr) * 0.8; vec3 waveColor = vec3(0.5, 0.8, 1.0) * wavePulse * intensity; smp += waveColor; }
                     }
-
-                    if(i==0) finalColor.r = smp.r; 
-                    else if(i==1) finalColor.g = smp.g; 
-                    else finalColor.b = smp.b;
+                    if(i==0) finalColor.r = smp.r; else if(i==1) finalColor.g = smp.g; else finalColor.b = smp.b;
                 }
-                
                 finalColor = abs(finalColor - uSol);
                 if(uHue > 0.01) finalColor = hueShift(finalColor, uHue * 6.28318);
                 finalColor = (finalColor - 0.5) * uC + 0.5;
-                float l = dot(finalColor, vec3(0.299, 0.587, 0.114));
-                finalColor = mix(vec3(l), finalColor, uS);
+                float l = dot(finalColor, vec3(0.299, 0.587, 0.114)); finalColor = mix(vec3(l), finalColor, uS);
                 if(uBloom > 0.01) finalColor += smoothstep(0.4, 1.0, l) * finalColor * uBloom * 2.0;
-                
                 finalColor *= uBrit; 
-
                 gl_FragColor = vec4(finalColor, 1.0);
             }""".trimIndent()
 
             kaleidoProgram = createProgram(vSrc, fSrc)
-            val activeUniforms = IntArray(1)
-            GLES20.glGetProgramiv(kaleidoProgram, GLES20.GL_ACTIVE_UNIFORMS, activeUniforms, 0)
-            val lenBuf = IntArray(1)
-            val sizeBuf = IntArray(1)
-            val typeBuf = IntArray(1)
-            val nameBuf = ByteArray(256)
-
+            val activeUniforms = IntArray(1); GLES20.glGetProgramiv(kaleidoProgram, GLES20.GL_ACTIVE_UNIFORMS, activeUniforms, 0)
+            val lenBuf = IntArray(1); val sizeBuf = IntArray(1); val typeBuf = IntArray(1); val nameBuf = ByteArray(256)
             for (i in 0 until activeUniforms[0]) {
                 GLES20.glGetActiveUniform(kaleidoProgram, i, 256, lenBuf, 0, sizeBuf, 0, typeBuf, 0, nameBuf, 0)
-                val name = String(nameBuf, 0, lenBuf[0])
-                val loc = GLES20.glGetUniformLocation(kaleidoProgram, name)
+                val name = String(nameBuf, 0, lenBuf[0]); val loc = GLES20.glGetUniformLocation(kaleidoProgram, name)
                 if (loc != -1) uLocs[name] = loc
             }
 
-            // Simple copy shader
-            val vSrcSimple = """
-        attribute vec4 p;
-        attribute vec2 t;
-        varying vec2 v;
-        uniform mat4 uMVPMatrix; 
-        void main() { 
-            gl_Position = uMVPMatrix * p; 
-            v = t; 
-        }
-    """.trimIndent()
-
-            val fSrcSimple = """
-        precision mediump float;
-        varying vec2 v;
-        uniform sampler2D uTex;
-        void main() { gl_FragColor = texture2D(uTex, v); }
-    """.trimIndent()
-
+            val vSrcSimple = "attribute vec4 p; attribute vec2 t; varying vec2 v; uniform mat4 uMVPMatrix; void main() { gl_Position = uMVPMatrix * p; v = t; }"
+            val fSrcSimple = "precision mediump float; varying vec2 v; uniform sampler2D uTex; void main() { gl_FragColor = texture2D(uTex, v); }"
             simpleProgram = createProgram(vSrcSimple, fSrcSimple)
-
             if (simpleProgram != 0) {
                 simpleULocs["uTex"] = GLES20.glGetUniformLocation(simpleProgram, "uTex")
-                // Get the new Matrix location
                 simpleULocs["uMVPMatrix"] = GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix")
             }
 
-            // Setup Textures & FBO
             cameraTexId = createOESTex()
             surfaceTexture = SurfaceTexture(cameraTexId)
             initFBO(FIXED_WIDTH, FIXED_HEIGHT)
-
-            // Init standard buffers
             GLES20.glUseProgram(kaleidoProgram)
             uLocs["uA"]?.let { GLES20.glUniform1f(it, FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat()) }
             pBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)).position(0) }
             tBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)).position(0) }
-
             ctx.runOnUiThread { ctx.startCamera() }
         }
 
         private fun initFBO(w: Int, h: Int) {
-            // Clean up old FBO/Texture if they exist to avoid memory leaks
-            if (fboId != 0) {
-                val fb = IntArray(1) { fboId }
-                val tx = IntArray(1) { fboTexId }
-                GLES20.glDeleteFramebuffers(1, fb, 0)
-                GLES20.glDeleteTextures(1, tx, 0)
-            }
-
-            fboWidth = w
-            fboHeight = h
-
-            val fb = IntArray(1); val tx = IntArray(1)
-            GLES20.glGenFramebuffers(1, fb, 0)
-            GLES20.glGenTextures(1, tx, 0)
+            if (fboId != 0) { val fb = IntArray(1) { fboId }; val tx = IntArray(1) { fboTexId }; GLES20.glDeleteFramebuffers(1, fb, 0); GLES20.glDeleteTextures(1, tx, 0) }
+            fboWidth = w; fboHeight = h; val fb = IntArray(1); val tx = IntArray(1); GLES20.glGenFramebuffers(1, fb, 0); GLES20.glGenTextures(1, tx, 0)
             fboId = fb[0]; fboTexId = tx[0]
-
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
             GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -2558,14 +1627,7 @@ class MainActivity : AppCompatActivity() {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         }
 
-        override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
-            // Prevent 0 dimension errors
-            if (w == 0 || h == 0) return
-
-            viewWidth = w
-            viewHeight = h
-            isSurfaceReady = true
-        }
+        override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) { if (w == 0 || h == 0) return; viewWidth = w; viewHeight = h; isSurfaceReady = true }
 
         override fun onDrawFrame(gl: GL10?) {
             if (!isSurfaceReady) return
@@ -2573,18 +1635,27 @@ class MainActivity : AppCompatActivity() {
             deltaTime = (now - lastTime) / 1e9f
             lastTime = now
 
-            // 1. UPDATE ALL CONTROLS (Physics step for LFOs)
+            // --- 1. Rotation Interpolation (GL Thread) ---
+            if (isRotAnimating && rotTargetM != null) {
+                rotAnimTime += deltaTime
+                if (rotAnimTime >= rotAnimDuration) {
+                    mRotAccum = rotTargetM!!
+                    cRotAccum = rotTargetC!!
+                    isRotAnimating = false
+                } else {
+                    val t = (rotAnimTime / rotAnimDuration).coerceIn(0f, 1f)
+                    val ease = 1f - (1f - t).pow(3f)
+                    mRotAccum = rotStartM + (rotTargetM!! - rotStartM) * ease
+                    cRotAccum = rotStartC + (rotTargetC!! - rotStartC) * ease
+                }
+            }
+
+            // --- 2. Update Controls (Physics + Animation) ---
             ctx.controls.forEach { it.update(deltaTime) }
 
-            // Safety checks
-            try {
-                surfaceTexture?.updateTexImage()
-            } catch (e: Exception) {
-                return
-            }
+            try { surfaceTexture?.updateTexImage() } catch (e: Exception) { return }
             manageSurfaces()
-
-            updateMovementPhysics(deltaTime) // Global flight physics
+            updateMovementPhysics(deltaTime)
             renderToFBO()
             renderToScreen()
             renderToExternal()
@@ -2598,156 +1669,53 @@ class MainActivity : AppCompatActivity() {
             val sign = sign(rawVal)
             val curvedSpeed = sign * (abs(rawVal) * 2.0f).pow(2.2f)
             scrollAccum += curvedSpeed * d * 0.6f
-
             val mRotCtrl = ctx.controlsMap["M_ROT"] ?: return
             mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
             val cRotCtrl = ctx.controlsMap["C_ROT"] ?: return
             cRotAccum += cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
         }
 
-// Inside KaleidoscopeRenderer class
-
         private fun renderToFBO() {
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-            GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            GLES20.glUseProgram(kaleidoProgram)
-
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId); GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT); GLES20.glUseProgram(kaleidoProgram)
             fun safeUni(name: String, v: Float) { uLocs[name]?.let { GLES20.glUniform1f(it, v) } }
             fun safeUni2(name: String, v1: Float, v2: Float) { uLocs[name]?.let { GLES20.glUniform2f(it, v1, v2) } }
-
-            val widthF = fboWidth.toFloat()
-            val heightF = fboHeight.toFloat()
-
-            // 1. Calculate Geometry Aspect Ratio (uA)
-            // This ensures the kaleidoscope circles remain circular, not ovals
-            val aspect = widthF / heightF
-            safeUni("uA", aspect) // CRITICAL FIX: This prevents the Division by Zero crash
-
-            // 2. Calculate Camera Image Scaling (uCamScale)
-            // This ensures the camera image fills the screen without stretching
-            val camRatio = 1.777f // 16:9 Standard Camera
-            val screenRatio = FIXED_WIDTH / FIXED_HEIGHT
-
-            var scaleX = 1.0f
-            var scaleY = 1.0f
-
-            if (screenRatio < camRatio) {
-                // Portrait (Tall): Zoom in on X to fill height
-                scaleX = screenRatio / camRatio
-                scaleY = 1.0f
-            } else {
-                // Landscape (Wide): Zoom in on Y to fill width
-                scaleX = 1.0f
-                scaleY = camRatio / screenRatio
-            }
+            val widthF = fboWidth.toFloat(); val heightF = fboHeight.toFloat(); val aspect = widthF / heightF
+            safeUni("uA", aspect)
+            val camRatio = 1.777f; val screenRatio = FIXED_WIDTH / FIXED_HEIGHT; var scaleX = 1.0f; var scaleY = 1.0f
+            if (screenRatio < camRatio) { scaleX = screenRatio.toFloat() / camRatio; scaleY = 1.0f } else { scaleX = 1.0f; scaleY = camRatio / screenRatio.toFloat() }
             safeUni2("uCamScale", scaleX, scaleY)
 
-            // --- Pass Control Values ---
-            val vMAngle = ctx.controlsMap["M_ANGLE"]?.computedValue ?: 0f
-            val vMZoom = ctx.controlsMap["M_ZOOM"]?.computedValue ?: 0f
-            val vMTx = ctx.controlsMap["M_TX"]?.computedValue ?: 0.5f
-            val vMTy = ctx.controlsMap["M_TY"]?.computedValue ?: 0.5f
-            val vMTiltX = ctx.controlsMap["M_TILTX"]?.computedValue ?: 0.5f
-            val vMTiltY = ctx.controlsMap["M_TILTY"]?.computedValue ?: 0.5f
-            val v3DMix = ctx.controlsMap["3D_MIX"]?.computedValue ?: 0f
-
-            safeUni("uAx", axisCount)
-            safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f)
-            safeUni("uMZ", 0.1f + (vMZoom * 2.5f))
-            safeUni2("uMT", (vMTx - 0.5f) * 2f, (vMTy - 0.5f) * 2f)
-            safeUni2("uMTilt", (vMTiltX - 0.5f) * 1.5f, (vMTiltY - 0.5f) * 1.5f)
-            safeUni("uMode", v3DMix.pow(2.0f))
-            safeUni("uScroll", scrollAccum)
-            safeUni("uSShape", ctx.controlsMap["S_SHAPE"]?.computedValue ?: 0f)
-            safeUni("uSFov", ctx.controlsMap["S_FOV"]?.computedValue ?: 0.5f)
-            safeUni("uTHueStr", ctx.controlsMap["T_HUE_STR"]?.computedValue ?: 0f)
-            safeUni("uTHuePos", ctx.controlsMap["T_HUE_POS"]?.computedValue ?: 0f)
-            safeUni("uTWaveStr", ctx.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f)
-            safeUni("uTWavePos", ctx.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
-
-            val cRaw = ctx.controlsMap["CURVE"]?.computedValue ?: 0.5f
-            safeUni("uCurve", if (cRaw > 0.5f) 1.0f + (cRaw - 0.5f) * 6.0f else 0.2f + (cRaw * 1.6f))
-            safeUni("uTwist", ctx.controlsMap["TWIST"]?.getMapped(-5.0f, 5.0f) ?: 0f)
-            safeUni("uFlux", (ctx.controlsMap["FLUX"]?.computedValue ?: 0f) * 0.2f)
-
-            val vCZoom = ctx.controlsMap["C_ZOOM"]?.computedValue ?: 0f
-            val vCAngle = ctx.controlsMap["C_ANGLE"]?.computedValue ?: 0f
-            val vCTx = ctx.controlsMap["C_TX"]?.computedValue ?: 0.5f
-            val vCTy = ctx.controlsMap["C_TY"]?.computedValue ?: 0.5f
-            val vCTiltX = ctx.controlsMap["C_TILTX"]?.computedValue ?: 0.5f
-            val vCTiltY = ctx.controlsMap["C_TILTY"]?.computedValue ?: 0.5f
-
-            safeUni("uCZ", 0.3f + (vCZoom * 2.0f))
-            safeUni("uCR", (vCAngle * 360f + cRotAccum).toFloat())
-            safeUni2("uCT", (vCTx - 0.5f), (vCTy - 0.5f))
-            safeUni2("uCTilt", (vCTiltX - 0.5f) * 1.2f, (vCTiltY - 0.5f) * 1.2f)
-            safeUni2("uF", if (rot180) -flipX else flipX, if (rot180) -flipY else flipY)
-            safeUni("uWarp", ctx.controlsMap["WARP"]?.computedValue ?: 0f)
-
-            safeUni("uC", ctx.controlsMap["CONTRAST"]?.getMapped(0f, 2f) ?: 1f)
-            safeUni("uS", ctx.controlsMap["VIBRANCE"]?.getMapped(0f, 2f) ?: 1f)
-            safeUni("uHue", ctx.controlsMap["HUE"]?.computedValue ?: 0f)
-            safeUni("uSol", ctx.controlsMap["NEG"]?.computedValue ?: 0f)
-            safeUni("uBloom", ctx.controlsMap["GLOW"]?.computedValue ?: 0f)
-            safeUni("uRGB", (ctx.controlsMap["RGB"]?.computedValue ?: 0f) * 0.05f)
-            safeUni("uMRGB", (ctx.controlsMap["M_RGB"]?.computedValue ?: 0f) * 0.1f)
-            safeUni("uBrit", ctx.controlsMap["BRIT"]?.getMapped(0.0f, 2.0f) ?: 1.0f)
-
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId)
-            uLocs["uTex"]?.let { GLES20.glUniform1i(it, 0) }
-            bindCommonAttribs(kaleidoProgram)
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            val vMAngle = ctx.controlsMap["M_ANGLE"]?.computedValue ?: 0f; val vMZoom = ctx.controlsMap["M_ZOOM"]?.computedValue ?: 0f; val vMTx = ctx.controlsMap["M_TX"]?.computedValue ?: 0.5f; val vMTy = ctx.controlsMap["M_TY"]?.computedValue ?: 0.5f; val vMTiltX = ctx.controlsMap["M_TILTX"]?.computedValue ?: 0.5f; val vMTiltY = ctx.controlsMap["M_TILTY"]?.computedValue ?: 0.5f; val v3DMix = ctx.controlsMap["3D_MIX"]?.computedValue ?: 0f
+            safeUni("uAx", axisCount); safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f); safeUni("uMZ", 0.1f + (vMZoom * 2.5f)); safeUni2("uMT", (vMTx - 0.5f) * 2f, (vMTy - 0.5f) * 2f); safeUni2("uMTilt", (vMTiltX - 0.5f) * 1.5f, (vMTiltY - 0.5f) * 1.5f); safeUni("uMode", v3DMix.pow(2.0f)); safeUni("uScroll", scrollAccum); safeUni("uSShape", ctx.controlsMap["S_SHAPE"]?.computedValue ?: 0f); safeUni("uSFov", ctx.controlsMap["S_FOV"]?.computedValue ?: 0.5f); safeUni("uTHueStr", ctx.controlsMap["T_HUE_STR"]?.computedValue ?: 0f); safeUni("uTHuePos", ctx.controlsMap["T_HUE_POS"]?.computedValue ?: 0f); safeUni("uTWaveStr", ctx.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f); safeUni("uTWavePos", ctx.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
+            val cRaw = ctx.controlsMap["CURVE"]?.computedValue ?: 0.5f; safeUni("uCurve", if (cRaw > 0.5f) 1.0f + (cRaw - 0.5f) * 6.0f else 0.2f + (cRaw * 1.6f)); safeUni("uTwist", ctx.controlsMap["TWIST"]?.getMapped(-5.0f, 5.0f) ?: 0f); safeUni("uFlux", (ctx.controlsMap["FLUX"]?.computedValue ?: 0f) * 0.2f)
+            val vCZoom = ctx.controlsMap["C_ZOOM"]?.computedValue ?: 0f; val vCAngle = ctx.controlsMap["C_ANGLE"]?.computedValue ?: 0f; val vCTx = ctx.controlsMap["C_TX"]?.computedValue ?: 0.5f; val vCTy = ctx.controlsMap["C_TY"]?.computedValue ?: 0.5f; val vCTiltX = ctx.controlsMap["C_TILTX"]?.computedValue ?: 0.5f; val vCTiltY = ctx.controlsMap["C_TILTY"]?.computedValue ?: 0.5f
+            safeUni("uCZ", 0.3f + (vCZoom * 2.0f)); safeUni("uCR", (vCAngle * 360f + cRotAccum).toFloat()); safeUni2("uCT", (vCTx - 0.5f), (vCTy - 0.5f)); safeUni2("uCTilt", (vCTiltX - 0.5f) * 1.2f, (vCTiltY - 0.5f) * 1.2f); safeUni2("uF", if (rot180) -flipX else flipX, if (rot180) -flipY else flipY); safeUni("uWarp", ctx.controlsMap["WARP"]?.computedValue ?: 0f)
+            safeUni("uC", ctx.controlsMap["CONTRAST"]?.getMapped(0f, 2f) ?: 1f); safeUni("uS", ctx.controlsMap["VIBRANCE"]?.getMapped(0f, 2f) ?: 1f); safeUni("uHue", ctx.controlsMap["HUE"]?.computedValue ?: 0f); safeUni("uSol", ctx.controlsMap["NEG"]?.computedValue ?: 0f); safeUni("uBloom", ctx.controlsMap["GLOW"]?.computedValue ?: 0f); safeUni("uRGB", (ctx.controlsMap["RGB"]?.computedValue ?: 0f) * 0.05f); safeUni("uMRGB", (ctx.controlsMap["M_RGB"]?.computedValue ?: 0f) * 0.1f); safeUni("uBrit", ctx.controlsMap["BRIT"]?.getMapped(0.0f, 2.0f) ?: 1.0f)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId); uLocs["uTex"]?.let { GLES20.glUniform1i(it, 0) }
+            bindCommonAttribs(kaleidoProgram); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4); GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         }
 
         private fun renderToScreen() {
             if (simpleProgram == 0) return
-
-            GLES20.glViewport(0, 0, viewWidth, viewHeight)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-
+            GLES20.glViewport(0, 0, viewWidth, viewHeight); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             val isPortrait = viewWidth < viewHeight
-
-            // 1. Reset Matrix
             android.opengl.Matrix.setIdentityM(mvpMatrix, 0)
-
             if (isPortrait) {
-                // 2. Rotate -90 degrees to make landscape image stand upright
                 android.opengl.Matrix.rotateM(mvpMatrix, 0, -90f, 0f, 0f, 1f)
-
-                // 3. Scale correction (Fill Screen / Center Crop)
-                val imageAspect = FIXED_HEIGHT.toFloat() / FIXED_WIDTH.toFloat() // 1080/1920
-                val screenAspect = viewWidth.toFloat() / viewHeight.toFloat()
-
-                // This math ensures the image covers the screen without squeezing
-                val scaleX = imageAspect / screenAspect
+                val imageAspect = FIXED_HEIGHT.toFloat() / FIXED_WIDTH.toFloat(); val screenAspect = viewWidth.toFloat() / viewHeight.toFloat(); val scaleX = imageAspect / screenAspect
                 android.opengl.Matrix.scaleM(mvpMatrix, 0, scaleX, 1f, 1f)
             }
-
-            GLES20.glUseProgram(simpleProgram)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
-
-            // SAFE uniform calls (no '!!')
-            GLES20.glUniform1i(simpleULocs["uTex"] ?: -1, 0)
-            GLES20.glUniformMatrix4fv(simpleULocs["uMVPMatrix"] ?: -1, 1, false, mvpMatrix, 0)
-
-            bindCommonAttribs(simpleProgram)
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glUseProgram(simpleProgram); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
+            GLES20.glUniform1i(simpleULocs["uTex"] ?: -1, 0); GLES20.glUniformMatrix4fv(simpleULocs["uMVPMatrix"] ?: -1, 1, false, mvpMatrix, 0)
+            bindCommonAttribs(simpleProgram); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
 
         private fun renderToExternal() {
             if (extEglSurface != EGL14.EGL_NO_SURFACE) {
-                val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
-                val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
+                val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW); val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
                 if (EGL14.eglMakeCurrent(mSavedDisplay, extEglSurface, extEglSurface, mSavedContext)) {
-                    GLES20.glViewport(0, 0, extWidth, extHeight)
-                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                    drawSimpleTexture(fboTexId)
-                    EGLExt.eglPresentationTimeANDROID(mSavedDisplay, extEglSurface!!, System.nanoTime())
-                    EGL14.eglSwapBuffers(mSavedDisplay, extEglSurface)
+                    GLES20.glViewport(0, 0, extWidth, extHeight); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT); drawSimpleTexture(fboTexId)
+                    EGLExt.eglPresentationTimeANDROID(mSavedDisplay, extEglSurface!!, System.nanoTime()); EGL14.eglSwapBuffers(mSavedDisplay, extEglSurface)
                 }
                 EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
             }
@@ -2755,151 +1723,63 @@ class MainActivity : AppCompatActivity() {
 
         private fun renderToRecorder() {
             if (recordSurface != EGL14.EGL_NO_SURFACE && videoRecorder != null) {
-                val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
-                val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
-
+                val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW); val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
                 if (EGL14.eglMakeCurrent(mSavedDisplay, recordSurface, recordSurface, mSavedContext)) {
-                    GLES20.glViewport(0, 0, videoRecorder!!.width, videoRecorder!!.height)
-                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                    drawSimpleTexture(fboTexId)
-
-                    val timeNow = System.nanoTime()
-                    if (recordStartTimeNs == 0L) recordStartTimeNs = timeNow
-                    EGLExt.eglPresentationTimeANDROID(mSavedDisplay, recordSurface!!, timeNow - recordStartTimeNs)
-                    EGL14.eglSwapBuffers(mSavedDisplay, recordSurface)
-                    videoRecorder?.drain(false)
+                    GLES20.glViewport(0, 0, videoRecorder!!.width, videoRecorder!!.height); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT); drawSimpleTexture(fboTexId)
+                    val timeNow = System.nanoTime(); if (recordStartTimeNs == 0L) recordStartTimeNs = timeNow
+                    EGLExt.eglPresentationTimeANDROID(mSavedDisplay, recordSurface!!, timeNow - recordStartTimeNs); EGL14.eglSwapBuffers(mSavedDisplay, recordSurface); videoRecorder?.drain(false)
                 }
-
-                EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
-                handleStopRecording()
+                EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext); handleStopRecording()
             }
         }
 
         private fun drawSimpleTexture(texId: Int) {
             if (simpleProgram == 0) return
-
-            GLES20.glUseProgram(simpleProgram)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
-
-            // SAFE uniform calls - Pass Identity Matrix (Normal orientation)
-            GLES20.glUniform1i(simpleULocs["uTex"] ?: -1, 0)
-            GLES20.glUniformMatrix4fv(simpleULocs["uMVPMatrix"] ?: -1, 1, false, identityMatrix, 0)
-
-            bindCommonAttribs(simpleProgram)
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glUseProgram(simpleProgram); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+            GLES20.glUniform1i(simpleULocs["uTex"] ?: -1, 0); GLES20.glUniformMatrix4fv(simpleULocs["uMVPMatrix"] ?: -1, 1, false, identityMatrix, 0)
+            bindCommonAttribs(simpleProgram); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
 
         private fun bindCommonAttribs(prog: Int) {
-            val pL = GLES20.glGetAttribLocation(prog, "p")
-            val tL = GLES20.glGetAttribLocation(prog, "t")
-            GLES20.glEnableVertexAttribArray(pL)
-            GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf)
-            GLES20.glEnableVertexAttribArray(tL)
-            GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
+            val pL = GLES20.glGetAttribLocation(prog, "p"); val tL = GLES20.glGetAttribLocation(prog, "t")
+            GLES20.glEnableVertexAttribArray(pL); GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf)
+            GLES20.glEnableVertexAttribArray(tL); GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
         }
-
         private fun createProgram(vSrc: String, fSrc: String): Int {
-            val vShader = compile(GLES20.GL_VERTEX_SHADER, vSrc)
-            val fShader = compile(GLES20.GL_FRAGMENT_SHADER, fSrc)
-            if (vShader == 0 || fShader == 0) return 0 // Failed
-
-            val prog = GLES20.glCreateProgram()
-            GLES20.glAttachShader(prog, vShader)
-            GLES20.glAttachShader(prog, fShader)
-            GLES20.glLinkProgram(prog)
-
-            // Check Link Status
-            val linkStatus = IntArray(1)
-            GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, linkStatus, 0)
-            if (linkStatus[0] == 0) {
-                Log.e("GL", "Link Failed: " + GLES20.glGetProgramInfoLog(prog))
-                GLES20.glDeleteProgram(prog)
-                return 0
-            }
+            val vShader = compile(GLES20.GL_VERTEX_SHADER, vSrc); val fShader = compile(GLES20.GL_FRAGMENT_SHADER, fSrc)
+            if (vShader == 0 || fShader == 0) return 0
+            val prog = GLES20.glCreateProgram(); GLES20.glAttachShader(prog, vShader); GLES20.glAttachShader(prog, fShader); GLES20.glLinkProgram(prog)
+            val linkStatus = IntArray(1); GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, linkStatus, 0)
+            if (linkStatus[0] == 0) { Log.e("GL", "Link Failed: " + GLES20.glGetProgramInfoLog(prog)); GLES20.glDeleteProgram(prog); return 0 }
             return prog
         }
-
         private fun compile(type: Int, src: String): Int {
-            val shader = GLES20.glCreateShader(type)
-            GLES20.glShaderSource(shader, src)
-            GLES20.glCompileShader(shader)
-            val compiled = IntArray(1)
-            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
-            if (compiled[0] == 0) {
-                Log.e("GL", "Compile Failed: " + GLES20.glGetShaderInfoLog(shader))
-                GLES20.glDeleteShader(shader)
-                return 0
-            }
+            val shader = GLES20.glCreateShader(type); GLES20.glShaderSource(shader, src); GLES20.glCompileShader(shader)
+            val compiled = IntArray(1); GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
+            if (compiled[0] == 0) { Log.e("GL", "Compile Failed: " + GLES20.glGetShaderInfoLog(shader)); GLES20.glDeleteShader(shader); return 0 }
             return shader
         }
         private fun createOESTex(): Int { val t=IntArray(1); GLES20.glGenTextures(1,t,0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,t[0]); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MIN_FILTER,GLES20.GL_LINEAR); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MAG_FILTER,GLES20.GL_LINEAR); return t[0] }
-
-        private fun setupEGL() {
-            mSavedDisplay = EGL14.eglGetCurrentDisplay()
-            mSavedContext = EGL14.eglGetCurrentContext()
-            val currentConfigId = IntArray(1)
-            EGL14.eglQueryContext(mSavedDisplay, mSavedContext, EGL14.EGL_CONFIG_ID, currentConfigId, 0)
-            val configs = arrayOfNulls<EGL14EGLConfig>(1); val num = IntArray(1)
-            EGL14.eglChooseConfig(mSavedDisplay, intArrayOf(EGL14.EGL_CONFIG_ID, currentConfigId[0], EGL14.EGL_NONE), 0, configs, 0, 1, num, 0)
-            mEglConfig = configs[0]
-        }
-
+        private fun setupEGL() { mSavedDisplay = EGL14.eglGetCurrentDisplay(); mSavedContext = EGL14.eglGetCurrentContext(); val currentConfigId = IntArray(1); EGL14.eglQueryContext(mSavedDisplay, mSavedContext, EGL14.EGL_CONFIG_ID, currentConfigId, 0); val configs = arrayOfNulls<EGL14EGLConfig>(1); val num = IntArray(1); EGL14.eglChooseConfig(mSavedDisplay, intArrayOf(EGL14.EGL_CONFIG_ID, currentConfigId[0], EGL14.EGL_NONE), 0, configs, 0, 1, num, 0); mEglConfig = configs[0] }
         private fun manageSurfaces() {
             val args = extSurfaceArgs
-            if (args != null && extEglSurface == EGL14.EGL_NO_SURFACE) {
-                // Manually extracting components to avoid ambiguity error
-                val rawSurf = args.first
-                extWidth = args.second
-                extHeight = args.third
-                extEglSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, rawSurf, intArrayOf(EGL14.EGL_NONE), 0)
-            }
-            if (args == null && extEglSurface != EGL14.EGL_NO_SURFACE) {
-                EGL14.eglDestroySurface(mSavedDisplay, extEglSurface); extEglSurface = EGL14.EGL_NO_SURFACE
-            }
-            if (pendingRecordFile != null) {
-                videoRecorder = VideoRecorder(ctx, viewWidth, viewHeight, pendingRecordFile!!)
-                recordSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, videoRecorder!!.inputSurface, intArrayOf(EGL14.EGL_NONE), 0)
-                pendingRecordFile = null
-            }
+            if (args != null && extEglSurface == EGL14.EGL_NO_SURFACE) { val rawSurf = args.first; extWidth = args.second; extHeight = args.third; extEglSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, rawSurf, intArrayOf(EGL14.EGL_NONE), 0) }
+            if (args == null && extEglSurface != EGL14.EGL_NO_SURFACE) { EGL14.eglDestroySurface(mSavedDisplay, extEglSurface); extEglSurface = EGL14.EGL_NO_SURFACE }
+            if (pendingRecordFile != null) { videoRecorder = VideoRecorder(ctx, viewWidth, viewHeight, pendingRecordFile!!); recordSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, videoRecorder!!.inputSurface, intArrayOf(EGL14.EGL_NONE), 0); pendingRecordFile = null }
         }
-
-        private fun handleStopRecording() {
-            if (isStopRequested) {
-                videoRecorder?.drain(true)
-                val out = videoRecorder?.file
-                if (recordSurface != EGL14.EGL_NO_SURFACE) {
-                    EGL14.eglDestroySurface(mSavedDisplay, recordSurface)
-                    recordSurface = EGL14.EGL_NO_SURFACE
-                }
-                videoRecorder?.release()
-                videoRecorder = null
-                isStopRequested = false
-                onStopCallback?.invoke(out)
-            }
-        }
-
+        private fun handleStopRecording() { if (isStopRequested) { videoRecorder?.drain(true); val out = videoRecorder?.file; if (recordSurface != EGL14.EGL_NO_SURFACE) { EGL14.eglDestroySurface(mSavedDisplay, recordSurface); recordSurface = EGL14.EGL_NO_SURFACE }; videoRecorder?.release(); videoRecorder = null; isStopRequested = false; onStopCallback?.invoke(out) } }
         private fun handleCapture() {
             if (captureRequested) {
-                captureRequested = false
-                val b = ByteBuffer.allocate(fboWidth * fboHeight * 4)
-                GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
+                captureRequested = false; val b = ByteBuffer.allocate(fboWidth * fboHeight * 4); GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
                 Thread {
                     val bmp = Bitmap.createBitmap(fboWidth, fboHeight, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
-                    val values = ContentValues().apply {
-                        put(MediaStore.Images.Media.DISPLAY_NAME, "SB_${System.currentTimeMillis()}.jpg")
-                        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SpaceBeam")
-                    }
-                    ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)?.let { uri ->
-                        ctx.contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
-                    }
+                    val values = ContentValues().apply { put(MediaStore.Images.Media.DISPLAY_NAME, "SB_${System.currentTimeMillis()}.jpg"); put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg"); put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SpaceBeam") }
+                    ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)?.let { uri -> ctx.contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) } }
                 }.start()
             }
         }
     }
 }
-
 class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeight: Int, val file: File) {
 
     private var muxer: MediaMuxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
