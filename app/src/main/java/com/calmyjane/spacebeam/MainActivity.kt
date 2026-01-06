@@ -646,6 +646,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cameraSettingsPanel: LinearLayout
     private lateinit var presetPanel: LinearLayout
     private lateinit var recordControls: LinearLayout
+    private lateinit var orientationBtn: ImageButton
+    private var isOrientationLocked = false
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -903,9 +905,13 @@ class MainActivity : AppCompatActivity() {
         val cameraPanel = createCameraSettingsPanel()
         val recordPanel = createRecordControls()
         val presetPanel = createPresetPanel()
+
+        // Utility Buttons
         val menuUtilBtn = createMenuUtilityButton()
         val readabilityBtn = createReadabilityButton()
         val resetBtn = createResetButton()
+        val orientationBtn = createOrientationButton() // NEW
+
         overlayHUD.addView(flashOverlay)
         overlayHUD.addView(logoView)
         overlayHUD.addView(leftHUDContainer)
@@ -930,16 +936,27 @@ class MainActivity : AppCompatActivity() {
         }
         overlayHUD.addView(presetPanel, presetParams)
 
+        // --- UPDATED LAYOUT FOR UTILITY BUTTONS ---
         val baseBottom = 30; val baseRight = 30
+
+        // 1. Reset (Bottom)
         resetBtn.layoutParams = (resetBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom; rightMargin = baseRight }
         overlayHUD.addView(resetBtn)
+
+        // 2. Readability (Above Reset)
         readabilityBtn.layoutParams = (readabilityBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 120; rightMargin = baseRight }
         overlayHUD.addView(readabilityBtn)
-        menuUtilBtn.layoutParams = (menuUtilBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 240; rightMargin = baseRight }
+
+        // 3. Orientation Lock (Above Readability) - NEW
+        orientationBtn.layoutParams = (orientationBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 240; rightMargin = baseRight }
+        overlayHUD.addView(orientationBtn)
+
+        // 4. Menu Toggle (Top of stack)
+        menuUtilBtn.layoutParams = (menuUtilBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 360; rightMargin = baseRight }
         overlayHUD.addView(menuUtilBtn)
 
         val cameraParams = FrameLayout.LayoutParams(-2, -2).apply {
-            if (isPortrait) { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 450; rightMargin = 20 }
+            if (isPortrait) { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 480; rightMargin = 20 }
             else { gravity = Gravity.TOP or Gravity.END; topMargin = 40; rightMargin = 40 }
         }
         overlayHUD.addView(cameraPanel, cameraParams)
@@ -1212,7 +1229,7 @@ class MainActivity : AppCompatActivity() {
         val getBg = { alpha: Int -> GradientDrawable().apply { setColor(Color.argb(alpha, 10, 10, 10)); setStroke(2, Color.argb(120, 80, 80, 80)); cornerRadius = 25f; shape = GradientDrawable.RECTANGLE } }
         val getCircleBg = { alpha: Int -> getBg(alpha).apply { shape = GradientDrawable.OVAL } }
         val panels = listOf(leftHUDContainer, cameraSettingsPanel, presetPanel, recordControls)
-        val utils = listOf(readabilityBtn, resetBtn, menuBtn)
+        val utils = listOf(readabilityBtn, resetBtn, menuBtn, orientationBtn)
         panels.forEach { it.background = null; it.setPadding(15, 15, 15, 15); it.clipToOutline = true }
         when (readabilityLevel) {
             1 -> { panels.forEach { it.background = getBg(180) }; utils.forEach { it.background = getCircleBg(180) }; applyRecursiveGlow(overlayHUD, false) }
@@ -1375,6 +1392,85 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show() }
     }
 
+    private fun createLockedIconDrawable(locked: Boolean): BitmapDrawable {
+        // 1. Create a canvas
+        val size = 120
+        val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(b)
+
+        // 2. Draw the standard System Rotate Icon
+        val icon = ContextCompat.getDrawable(this, android.R.drawable.ic_menu_rotate)?.mutate()
+        if (icon != null) {
+            // Add some padding so it looks nice (20px padding)
+            icon.setBounds(20, 20, size - 20, size - 20)
+            icon.setTint(Color.WHITE)
+            icon.draw(c)
+        }
+
+        // 3. If locked, draw a solid dot in the center
+        if (locked) {
+            val p = Paint().apply {
+                color = Color.WHITE
+                style = Paint.Style.FILL
+                isAntiAlias = true
+            }
+            // Draw circle at center (60, 60) with radius 10
+            c.drawCircle(size / 2f, size / 2f, 10f, p)
+        }
+
+        return BitmapDrawable(resources, b)
+    }
+
+    private fun createOrientationButton() = ImageButton(this).apply {
+        // Set initial icon
+        setImageDrawable(createLockedIconDrawable(isOrientationLocked))
+
+        // Initial visual state
+        background = null
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        setPadding(0, 0, 0, 0) // REMOVED PADDING to maximize icon size
+
+        // Set initial visuals based on current state
+        if (isOrientationLocked) {
+            setColorFilter(Color.WHITE)
+            alpha = 1.0f
+        } else {
+            setColorFilter(Color.WHITE)
+            alpha = 0.6f
+        }
+
+        orientationBtn = this
+        layoutParams = FrameLayout.LayoutParams(120, 120).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            bottomMargin = 260
+            rightMargin = 35
+        }
+
+        setOnClickListener {
+            isOrientationLocked = !isOrientationLocked
+
+            // Update the Icon (Add/Remove Dot)
+            setImageDrawable(createLockedIconDrawable(isOrientationLocked))
+
+            if (isOrientationLocked) {
+                // LOCK: Freezes the screen in the CURRENT orientation (Portrait or Landscape)
+                requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LOCKED
+
+                setColorFilter(Color.WHITE)
+                alpha = 1.0f
+                Toast.makeText(context, "Orientation Locked", Toast.LENGTH_SHORT).show()
+            } else {
+                // UNLOCK: Allow sensor rotation
+                requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+
+                // Visuals: White + Greyed out (0.6f)
+                setColorFilter(Color.WHITE)
+                alpha = 0.6f
+                Toast.makeText(context, "Orientation Unlocked", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     private fun initDefaultPresets() {
         fun p(ax: Int = 1, mRot: Int = 500, vararg overrides: Any): Preset {
             val baseSnapshots = controls.associate { it.id to it.getSnapshot() }.toMutableMap()
@@ -1523,6 +1619,7 @@ class MainActivity : AppCompatActivity() {
         fun setExternalSurface(s: Surface, w: Int, h: Int) { extSurfaceArgs = Triple(s, w, h) }
         fun removeExternalSurface() { extSurfaceArgs = null }
         fun updateTextureSize(width: Int, height: Int) { glView.queueEvent { surfaceTexture?.setDefaultBufferSize(width, height) } }
+
 
         override fun onSurfaceCreated(gl: GL10?, config: GL10EGLConfig?) {
             setupEGL(); GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
