@@ -257,13 +257,11 @@ class PropertyControl(
     private fun applyModulation(baseNorm: Float): Float {
         if (!hasModulation || modDepth == 0) return baseNorm
         val combined = baseNorm + lastComputedModulation
-        if (modMode == ModMode.WRAP) {
-            return combined - floor(combined)
-        } else {
-            val t = combined % 2.0f
-            val res = if (t < 0) t + 2.0f else t
-            return if (res > 1.0f) 2.0f - res else res
-        }
+
+        // This forces the result to stay between 0.0 and 1.0.
+        // If the sine wave pushes it above 1.0, it stays flat at 1.0.
+        // If it pushes below 0.0, it stays flat at 0.0.
+        return combined.coerceIn(0f, 1f)
     }
 
     // --- Setters ---
@@ -1061,46 +1059,44 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl(this, "S_SPEED", "SPEED", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "S_FOV", "FISHEYE", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "T_HUE_STR", "RAINBOW STR", defaultValue = 0))
-        addControl(PropertyControl(this, "T_HUE_POS", "RAINBOW POS", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl(this, "T_HUE_POS", "RAINBOW POS", defaultValue = 0, hasModulation = true))
         addControl(PropertyControl(this, "T_WAVE_STR", "WAVE STR", defaultValue = 0))
-        addControl(PropertyControl(this, "T_WAVE_POS", "WAVE POS", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl(this, "T_WAVE_POS", "WAVE POS", defaultValue = 0, hasModulation = true))
 
         // --- 3. MORPHING ---
         createGroup("MORPHING")
-        addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-        addControl(PropertyControl(this, "TWIST", "VORTEX", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 500, hasModulation = true))
+        addControl(PropertyControl(this, "TWIST", "VORTEX", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "FLUX", "FLUX", defaultValue = 0, hasModulation = true))
 
         // --- 4. MASTER TRANSFORM ---
         createGroup("MASTER TRANSFORM")
         addControl(PropertyControl(this, "M_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "M_ROT", "ROTATION", defaultValue = 500))
-        addControl(PropertyControl(this, "M_ZOOM", "ZOOM", defaultValue = 160, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-        addControl(PropertyControl(this, "M_TX", "MOVE X", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-        addControl(PropertyControl(this, "M_TY", "MOVE Y", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "M_ZOOM", "ZOOM", defaultValue = 160, hasModulation = true))
+        addControl(PropertyControl(this, "M_TX", "MOVE X", defaultValue = 500, hasModulation = true))
+        addControl(PropertyControl(this, "M_TY", "MOVE Y", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "M_TILTX", "TILT X", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "M_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "M_RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "M_RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true))
 
         // --- 5. CAMERA TRANSFORM ---
         createGroup("CAMERA TRANSFORM")
         setupCameraOrientationControls(currentGroupContent!!) // Flip/Rotate Icons
         addControl(PropertyControl(this, "C_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "C_ROT", "ROTATION", defaultValue = 500))
         addControl(PropertyControl(this, "WARP", "WARP DISTORT", defaultValue = 0))
-        addControl(PropertyControl(this, "C_ZOOM", "ZOOM", defaultValue = 300, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-        addControl(PropertyControl(this, "C_TX", "MOVE X", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-        addControl(PropertyControl(this, "C_TY", "MOVE Y", defaultValue = 500, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "C_ZOOM", "ZOOM", defaultValue = 300, hasModulation = true))
+        addControl(PropertyControl(this, "C_TX", "MOVE X", defaultValue = 500, hasModulation = true))
+        addControl(PropertyControl(this, "C_TY", "MOVE Y", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "C_TILTX", "TILT X", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "C_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true))
 
         // --- 6. COLOR ---
         createGroup("COLOR")
         addControl(PropertyControl(this, "BRIT", "BRIGHTNESS", defaultValue = 500))
         addControl(PropertyControl(this, "HUE", "HUE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "NEG", "NEGATIVE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
-        addControl(PropertyControl(this, "GLOW", "GLOW", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.MIRROR))
+        addControl(PropertyControl(this, "NEG", "NEGATIVE", defaultValue = 0, hasModulation = true))
+        addControl(PropertyControl(this, "GLOW", "GLOW", defaultValue = 0, hasModulation = true))
         addControl(PropertyControl(this, "CONTRAST", "CONTRAST", defaultValue = 500))
         addControl(PropertyControl(this, "VIBRANCE", "SATURATION", defaultValue = 500))
     }
