@@ -685,7 +685,7 @@ class MainActivity : AppCompatActivity() {
                 pendingSaveIndex = null
             }
             handleInteraction(event)
-            false
+            true // <--- CHANGE THIS FROM 'false' TO 'true'
         }
         setContentView(glView)
         setupOverlayHUD()
@@ -876,7 +876,8 @@ class MainActivity : AppCompatActivity() {
             lastFingerDist = dist; lastFingerAngle = angle; lastFingerFocusX =
                 focusX; lastFingerFocusY = focusY
         } else if (event.action == MotionEvent.ACTION_UP) {
-            if (event.eventTime - event.downTime < 200) toggleHud()
+            // CHANGE: Increased timeout from 200 to 400ms to make tapping easier
+            if (event.eventTime - event.downTime < 400) toggleHud()
         }
     }
 
