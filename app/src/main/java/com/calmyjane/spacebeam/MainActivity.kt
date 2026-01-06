@@ -906,8 +906,6 @@ class MainActivity : AppCompatActivity() {
         val recordPanel = createRecordControls()
         val presetPanel = createPresetPanel()
 
-        // Utility Buttons
-        val menuUtilBtn = createMenuUtilityButton()
         val readabilityBtn = createReadabilityButton()
         val resetBtn = createResetButton()
         val orientationBtn = createOrientationButton() // NEW
@@ -921,8 +919,8 @@ class MainActivity : AppCompatActivity() {
                 recordPanel.orientation = LinearLayout.VERTICAL; gravity = Gravity.BOTTOM or Gravity.START; bottomMargin = 450; leftMargin = 30
                 (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 40; leftMargin = 0 }
             } else {
-                recordPanel.orientation = LinearLayout.HORIZONTAL; gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30
-                (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 40 }
+                recordPanel.orientation = LinearLayout.HORIZONTAL; gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30; leftMargin = 250;
+                (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 30 }
             }
         }
         overlayHUD.addView(recordPanel, recordParams)
@@ -931,7 +929,7 @@ class MainActivity : AppCompatActivity() {
             if (isPortrait) {
                 gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; bottomMargin = 60; presetPanel.scaleX = 0.85f; presetPanel.scaleY = 0.85f
             } else {
-                gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 180; presetPanel.scaleX = 1.0f; presetPanel.scaleY = 1.0f
+                gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 400; presetPanel.scaleX = 1.0f; presetPanel.scaleY = 1.0f
             }
         }
         overlayHUD.addView(presetPanel, presetParams)
@@ -951,10 +949,6 @@ class MainActivity : AppCompatActivity() {
         orientationBtn.layoutParams = (orientationBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 240; rightMargin = baseRight }
         overlayHUD.addView(orientationBtn)
 
-        // 4. Menu Toggle (Top of stack)
-        menuUtilBtn.layoutParams = (menuUtilBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 360; rightMargin = baseRight }
-        overlayHUD.addView(menuUtilBtn)
-
         val cameraParams = FrameLayout.LayoutParams(-2, -2).apply {
             if (isPortrait) { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 480; rightMargin = 20 }
             else { gravity = Gravity.TOP or Gravity.END; topMargin = 40; rightMargin = 40 }
@@ -967,25 +961,70 @@ class MainActivity : AppCompatActivity() {
     private fun setupParameterMenu() {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
         val dm = resources.displayMetrics
+
+        // The root container remains transparent and doesn't clip
         leftHUDContainer = LinearLayout(this).apply {
-            if (isPortrait) { orientation = LinearLayout.VERTICAL; layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, (dm.heightPixels * 0.40).toInt()).apply { gravity = Gravity.TOP } }
-            else { orientation = LinearLayout.HORIZONTAL; layoutParams = FrameLayout.LayoutParams(-2, -1).apply { gravity = Gravity.START } }
+            if (isPortrait) {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = FrameLayout.LayoutParams(-1, -2).apply {
+                    gravity = Gravity.TOP
+                }
+            } else {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = FrameLayout.LayoutParams(-2, -1).apply {
+                    gravity = Gravity.START
+                }
+            }
+            clipChildren = false
+            clipToPadding = false
         }
+
+        // Move the background logic here so it disappears when this panel is GONE
         parameterPanel = ScrollView(this).apply {
-            if (isPortrait) layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            else layoutParams = LinearLayout.LayoutParams(850, ViewGroup.LayoutParams.MATCH_PARENT)
-            layoutDirection = View.LAYOUT_DIRECTION_RTL; isVerticalScrollBarEnabled = true; scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY; visibility = View.VISIBLE
+            if (isPortrait) {
+                layoutParams = LinearLayout.LayoutParams(-1, (dm.heightPixels * 0.40).toInt())
+            } else {
+                layoutParams = LinearLayout.LayoutParams(850, -1)
+            }
+
+            // This makes the background disappear with the menu
+            id = View.generateViewId()
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            isVerticalScrollBarEnabled = true
+            scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
+            visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
         }
+
         val menuLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; val bottomPad = if (isPortrait) 150 else 240
-            setPadding(25, 20, 10, bottomPad); layoutDirection = View.LAYOUT_DIRECTION_LTR
+            orientation = LinearLayout.VERTICAL
+            setPadding(25, 20, 10, if (isPortrait) 20 else 240)
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
             layoutTransition = LayoutTransition().apply { enableTransitionType(LayoutTransition.CHANGING) }
         }
         parameterPanel.addView(menuLayout)
-        leftHUDContainer.addView(parameterPanel)
+
+        val toggleBtn = createMenuUtilityButton()
+
+        if (isPortrait) {
+            // Portrait: Menu on top, Button floating below it on the RIGHT
+            leftHUDContainer.addView(parameterPanel)
+            leftHUDContainer.addView(toggleBtn, LinearLayout.LayoutParams(120, 120).apply {
+                gravity = Gravity.END
+                topMargin = 10
+                rightMargin = 30
+            })
+        } else {
+            // Landscape: Menu on left, Button floating on the TOP RIGHT of it
+            leftHUDContainer.addView(parameterPanel)
+            leftHUDContainer.addView(toggleBtn, LinearLayout.LayoutParams(120, 120).apply {
+                gravity = Gravity.TOP
+                leftMargin = 10
+                topMargin = 50
+            })
+        }
+
         populateParameterGroups(menuLayout)
     }
-
     private fun populateParameterGroups(menuLayout: LinearLayout) {
         var currentGroupContent: LinearLayout? = null
         fun createGroup(title: String, startOpen: Boolean = false) {
@@ -1161,8 +1200,24 @@ class MainActivity : AppCompatActivity() {
     private fun createLogoView() = ImageView(this).apply { setImageDrawable(createLogoDrawable()); alpha = 0.4f; layoutParams = FrameLayout.LayoutParams(180, 180).apply { gravity = Gravity.TOP or Gravity.START; topMargin = 40; leftMargin = 40 } }
     private fun createMenuUtilityButton() = Button(this).apply {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-        text = if (isPortrait) (if (isMenuExpanded) "v" else "^") else (if (isMenuExpanded) "<" else ">")
-        textSize = 22f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE); stateListAnimator = null; background = null; alpha = 0.85f; gravity = Gravity.CENTER; setPadding(0, 0, 0, 12); menuBtn = this; layoutParams = FrameLayout.LayoutParams(120, 120); setOnClickListener { toggleMenu() }
+
+        // Set initial icon based on current state
+        text = if (isPortrait) {
+            if (isMenuExpanded) "▲" else "▼"
+        } else {
+            if (isMenuExpanded) "◀" else "▶"
+        }
+
+        textSize = 22f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(Color.WHITE)
+        stateListAnimator = null
+        background = null
+        alpha = 0.85f
+        gravity = Gravity.CENTER
+        setPadding(0, 0, 10, 10)
+        menuBtn = this
+        setOnClickListener { toggleMenu() }
     }
     private fun createReadabilityButton() = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_view); setColorFilter(Color.WHITE); alpha = 0.85f; readabilityBtn = this; layoutParams = FrameLayout.LayoutParams(120, 120).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 140; rightMargin = 35 }; setOnClickListener { toggleReadability() } }
     private fun createResetButton() = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_close_clear_cancel); setColorFilter(Color.WHITE); alpha = 0.85f; resetBtn = this; layoutParams = FrameLayout.LayoutParams(120, 120).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 30; rightMargin = 35 }; setOnClickListener { globalReset() } }
@@ -1226,15 +1281,39 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyReadabilityStyle() {
-        val getBg = { alpha: Int -> GradientDrawable().apply { setColor(Color.argb(alpha, 10, 10, 10)); setStroke(2, Color.argb(120, 80, 80, 80)); cornerRadius = 25f; shape = GradientDrawable.RECTANGLE } }
+        val getBg = { alpha: Int -> GradientDrawable().apply {
+            setColor(Color.argb(alpha, 10, 10, 10))
+            setStroke(2, Color.argb(120, 80, 80, 80))
+            cornerRadius = 25f
+        } }
         val getCircleBg = { alpha: Int -> getBg(alpha).apply { shape = GradientDrawable.OVAL } }
-        val panels = listOf(leftHUDContainer, cameraSettingsPanel, presetPanel, recordControls)
+
+        // TARGET parameterPanel specifically for the background
+        val panels = listOf(cameraSettingsPanel, presetPanel, recordControls)
         val utils = listOf(readabilityBtn, resetBtn, menuBtn, orientationBtn)
+
         panels.forEach { it.background = null; it.setPadding(15, 15, 15, 15); it.clipToOutline = true }
+        parameterPanel.background = null // Clear parameter panel specifically
+
         when (readabilityLevel) {
-            1 -> { panels.forEach { it.background = getBg(180) }; utils.forEach { it.background = getCircleBg(180) }; applyRecursiveGlow(overlayHUD, false) }
-            2 -> { panels.forEach { it.background = getBg(120) }; utils.forEach { it.background = getCircleBg(120) }; applyRecursiveGlow(overlayHUD, true) }
-            else -> { panels.forEach { it.setPadding(0, 0, 0, 0); it.background = null }; utils.forEach { it.background = null }; applyRecursiveGlow(overlayHUD, false) }
+            1 -> {
+                panels.forEach { it.background = getBg(180) }
+                parameterPanel.background = getBg(180)
+                utils.forEach { it.background = getCircleBg(180) }
+                applyRecursiveGlow(overlayHUD, false)
+            }
+            2 -> {
+                panels.forEach { it.background = getBg(120) }
+                parameterPanel.background = getBg(120)
+                utils.forEach { it.background = getCircleBg(120) }
+                applyRecursiveGlow(overlayHUD, true)
+            }
+            else -> {
+                panels.forEach { it.setPadding(0, 0, 0, 0); it.background = null }
+                parameterPanel.background = null
+                utils.forEach { it.background = null }
+                applyRecursiveGlow(overlayHUD, false)
+            }
         }
     }
 
@@ -1533,9 +1612,17 @@ class MainActivity : AppCompatActivity() {
     private fun toggleMenu() {
         PropertyControl.closeActiveMenu()
         isMenuExpanded = !isMenuExpanded
-        leftHUDContainer.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
+
+        // Toggle visibility of the panel (and its background)
+        parameterPanel.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
+
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-        menuBtn.text = if (isPortrait) (if (isMenuExpanded) "v" else "^") else (if (isMenuExpanded) "<" else ">")
+
+        menuBtn.text = if (isPortrait) {
+            if (isMenuExpanded) "▲" else "▼" // Down to hide, Up to show
+        } else {
+            if (isMenuExpanded) "◀" else "▶" // Left to hide, Right to show
+        }
     }
 
     inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
