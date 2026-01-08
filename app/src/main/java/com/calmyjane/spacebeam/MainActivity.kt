@@ -158,12 +158,17 @@ class PropertyControl(
     val min: Int = 0,
     val max: Int = 1000,
     val defaultValue: Int = 0,
+    // NEW: Shader output range definitions
+    val outMin: Float = 0.0f,
+    val outMax: Float = 1.0f,
     val hasModulation: Boolean = false,
-    val modMode: ModMode = ModMode.MIRROR,
+    // NEW: ModMode determines math strategy (Wrap for angles, Clamp for sliders)
+    val modMode: ModMode = ModMode.CLAMP,
     private val onValueChanged: ((Int) -> Unit)? = null
 ) {
-    enum class ModMode { WRAP, MIRROR }
-    enum class WaveShape { SINE, WOBBLE_SINE, POLY_SINE, RAMP, TRIANGLE, SMOOTH_NOISE, ROUGH_NOISE }
+    enum class ModMode { WRAP, CLAMP }
+    // NEW: Added RAMP for continuous rotation, SQUARE, and RANDOM types
+    enum class WaveShape { SINE, TRIANGLE, RAMP, SQUARE, RANDOM_SMOOTH, RANDOM_STEP }
 
     companion object {
         var activeControl: PropertyControl? = null
@@ -188,13 +193,16 @@ class PropertyControl(
     // --- Modulation State ---
     var modRate: Int = 200
     var modDepth: Int = 0
-    var modShape: WaveShape = WaveShape.SINE
+    // Default to RAMP if we are in WRAP mode (perfect for angles), otherwise SINE
+    var modShape: WaveShape = if (modMode == ModMode.WRAP) WaveShape.RAMP else WaveShape.SINE
 
     // Physics / Internal
     var preciseModRate: Float = 200f
     var preciseModDepth: Float = 0f
     var lfoPhase: Double = 0.0
-    private var lastComputedModulation: Float = 0f
+
+    // This now stores the Normalized (0.0 - 1.0) value including LFO
+    private var lastComputedNormalized: Float = 0f
 
     // --- Snapshot Morphing Variables ---
     private var modSnapshotValue: Float = 0f
@@ -203,8 +211,9 @@ class PropertyControl(
     private var modDepthStart = 0f
     private var modDepthTarget: Float? = null
 
+    // NEW: Returns the final Float value scaled to the shader's specific range (outMin to outMax)
     val computedValue: Float
-        get() = applyModulation(getNormalized())
+        get() = outMin + (lastComputedNormalized * (outMax - outMin))
 
     // --- UI References ---
     private var mainSeekBar: SeekBar? = null
@@ -236,7 +245,7 @@ class PropertyControl(
 
     fun animateTo(target: Float, durationSec: Float, newShape: String? = null) {
         // Capture current state for blending
-        modSnapshotValue = lastComputedModulation
+        modSnapshotValue = lastComputedNormalized
 
         animTarget = target
         animStart = preciseValue
@@ -287,45 +296,66 @@ class PropertyControl(
             modPanelDepthSeekBar?.progress = preciseModDepth.toInt()
         }
 
-        // 2. LFO Physics
+        // 2. Base Value (Normalized 0.0 - 1.0)
+        val baseNorm = preciseValue / max.toFloat()
+
+        // 3. LFO Physics
         if (!hasModulation || (preciseModRate == 0f && preciseModDepth == 0f && modDepthTarget == null)) {
-            lastComputedModulation = 0f
+            lastComputedNormalized = baseNorm
             return
         }
 
         val baseSpeed = (preciseModRate / 1000f + 0.05f).pow(3f)
         lfoPhase += baseSpeed * deltaTime * 2.0 * Math.PI
+        if (lfoPhase > 2.0 * Math.PI) lfoPhase -= 2.0 * Math.PI // Keep phase stable
 
-        val currentWave = when (modShape) {
-            WaveShape.SINE -> sin(lfoPhase)
-            WaveShape.WOBBLE_SINE -> sin(lfoPhase) * sin(lfoPhase * 0.5 + 0.5)
-            WaveShape.POLY_SINE -> (sin(lfoPhase) + sin(lfoPhase * 1.5)) * 0.5
-            WaveShape.RAMP -> ((lfoPhase / (2.0 * Math.PI)) % 1.0 * 2.0 - 1.0)
+        // GENERATE UNIPOLAR WAVES (0.0 to 1.0)
+        val rawWave: Double = when (modShape) {
+            WaveShape.SINE -> sin(lfoPhase) * 0.5 + 0.5
             WaveShape.TRIANGLE -> {
-                val phase = (lfoPhase / (2.0 * Math.PI)) % 1.0
-                if (phase < 0.5) (phase * 4.0 - 1.0) else (3.0 - phase * 4.0)
+                val p = (lfoPhase / (2.0 * Math.PI))
+                if (p < 0.5) p * 2.0 else 2.0 - (p * 2.0)
             }
-            WaveShape.SMOOTH_NOISE -> (sin(lfoPhase) + sin(lfoPhase * 2.3) * 0.5 + sin(lfoPhase * 4.7) * 0.25) / 1.75
-            WaveShape.ROUGH_NOISE -> (Math.random() * 2.0 - 1.0)
+            WaveShape.RAMP -> (lfoPhase / (2.0 * Math.PI)) % 1.0 // 0 -> 1 Sawtooth (Perfect for rotation)
+            WaveShape.SQUARE -> if (sin(lfoPhase) > 0) 1.0 else 0.0
+            WaveShape.RANDOM_SMOOTH -> (sin(lfoPhase) * 0.5 + 0.5 + sin(lfoPhase * 2.3) * 0.2) / 1.4
+            WaveShape.RANDOM_STEP -> Math.random()
         }
 
-        val depthNorm = (preciseModDepth / 1000f).pow(3f)
-        val newModValue = (currentWave * depthNorm).toFloat()
+        // Depth is squared for smoother control at low values
+        val depthNorm = (preciseModDepth / 1000f).pow(2f)
 
-        // 3. Blending Logic (Handover)
-        lastComputedModulation = if (isAnimating) {
-            (modSnapshotValue * (1.0f - ease)) + (newModValue * ease)
+        // 4. COMBINE: The new Logic
+        val targetVal = if (modMode == ModMode.WRAP) {
+            // WRAP: Additive, loops around 1.0.
+            // Great for Angles. Ramp wave 0->1 will cause continuous perfect rotation.
+            (baseNorm + (rawWave * depthNorm)) % 1.0f
         } else {
-            newModValue
+            // CLAMP: "Added to low limit... percentage of left space"
+            // If base is 0.2, depth is 1.0, wave goes 0..1 -> Output goes 0.2 .. 1.0
+            // Logic: Base + (Wave * Depth * AvailableSpace)
+            baseNorm + (rawWave.toFloat() * depthNorm * (1.0f - baseNorm))
+        }
+
+        // 5. Blending Logic (Handover)
+        lastComputedNormalized = if (isAnimating) {
+            (modSnapshotValue * (1.0f - ease)) + (targetVal.toFloat() * ease)
+        } else {
+            targetVal.toFloat()
         }
 
         modIndicator?.postInvalidate()
     }
 
-    private fun applyModulation(baseNorm: Float): Float {
-        if (!hasModulation) return baseNorm
-        return (baseNorm + lastComputedModulation).coerceIn(0f, 1f)
-    }
+    // Used for backwards compatibility if needed, but computedValue is preferred
+    fun getNormalized(): Float = preciseValue / max.toFloat()
+
+    // Used for visual indicator sizing
+    fun getModDepthNormalized(): Float = (preciseModDepth / 1000f).pow(2f)
+
+    // Deprecated mapping helper (since mapping is now done internally via outMin/outMax)
+    // Kept to avoid breaking older calls if any exist, but updated to use new logic
+    fun getMapped(dummyMin: Float, dummyMax: Float): Float = computedValue
 
     fun setProgress(v: Int) {
         if (isAnimating) stopAnimation()
@@ -365,14 +395,11 @@ class PropertyControl(
         if (hasModulation) {
             updateModRate(200)
             updateModDepth(0)
-            modShape = WaveShape.SINE
+            // Reset to default shape for the mode
+            modShape = if (modMode == ModMode.WRAP) WaveShape.RAMP else WaveShape.SINE
             updateIndicatorVisuals()
         }
     }
-
-    fun getNormalized(): Float = preciseValue / max.toFloat()
-    fun getMapped(outMin: Float, outMax: Float): Float = outMin + (computedValue * (outMax - outMin))
-    fun getModDepthNormalized(): Float = (preciseModDepth / 1000f).pow(3f)
 
     fun attachTo(parent: ViewGroup) {
         mainSeekBar = null
@@ -458,10 +485,10 @@ class PropertyControl(
                     paint.alpha = if (active) 255 else 100
                     var dotRadius = r * 0.3f
                     if (active) {
-                        val depthN = getModDepthNormalized().coerceAtLeast(0.001f)
-                        val rawWave = lastComputedModulation / depthN
-                        val sizeFactor = ((rawWave + 1.0) / 2.0) * 0.8 + 0.1
-                        dotRadius = (r * sizeFactor).toFloat()
+                        // Visualize the unipolar LFO directly
+                        // We calculate the pure wave component for visualization
+                        val waveVal = if (preciseModDepth > 0) (lastComputedNormalized - (preciseValue/max)) / (preciseModDepth/1000f) else 0f
+                        dotRadius = (r * (0.3 + (abs(waveVal)*0.7))).toFloat()
                     }
                     canvas.drawCircle(cx, cy, dotRadius, paint)
                 }
@@ -1045,51 +1072,53 @@ class MainActivity : AppCompatActivity() {
                 currentGroupContent?.let { c.attachTo(it) } ?: c.attachTo(menuLayout)
             }
         }
+
         createGroup("GEOMETRY", startOpen = true)
         setupGeometrySpecifics(currentGroupContent!!)
 
         createGroup("3D")
-        addControl(PropertyControl(this, "3D_MIX", "STRENGTH", defaultValue = 0, hasModulation = true))
-        addControl(PropertyControl(this, "S_SHAPE", "SHAPE", defaultValue = 0, hasModulation = true))
-        addControl(PropertyControl(this, "S_SPEED", "SPEED", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "S_FOV", "FISHEYE", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "T_HUE_STR", "RAINBOW STR", defaultValue = 0))
-        addControl(PropertyControl(this, "T_HUE_POS", "RAINBOW POS", defaultValue = 0, hasModulation = true))
-        addControl(PropertyControl(this, "T_WAVE_STR", "WAVE STR", defaultValue = 0))
-        addControl(PropertyControl(this, "T_WAVE_POS", "WAVE POS", defaultValue = 0, hasModulation = true))
+        addControl(PropertyControl(this, "3D_MIX", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl(this, "S_SHAPE", "SHAPE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        // FOV 0.5 to 2.5 is a good range for Fisheye
+        addControl(PropertyControl(this, "S_FOV", "FISHEYE", defaultValue = 500, outMin=0.2f, outMax=1.5f, hasModulation = true))
+        addControl(PropertyControl(this, "S_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
+        addControl(PropertyControl(this, "T_HUE_STR", "RAINBOW STR", defaultValue = 0, outMin=0f, outMax=1f))
+        addControl(PropertyControl(this, "T_HUE_POS", "RAINBOW POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
 
         createGroup("MORPHING")
-        addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "TWIST", "VORTEX", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "FLUX", "FLUX", defaultValue = 0, hasModulation = true))
+        addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 500, outMin=0.2f, outMax=4.0f, hasModulation = true))
+        addControl(PropertyControl(this, "TWIST", "VORTEX", defaultValue = 500, outMin=-5.0f, outMax=5.0f, hasModulation = true))
+        addControl(PropertyControl(this, "FLUX", "FLUX", defaultValue = 0, outMin=0f, outMax=0.5f, hasModulation = true))
 
         createGroup("MASTER TRANSFORM")
-        addControl(PropertyControl(this, "M_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "M_ZOOM", "ZOOM", defaultValue = 160, hasModulation = true))
-        addControl(PropertyControl(this, "M_TX", "MOVE X", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "M_TY", "MOVE Y", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "M_TILTX", "TILT X", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "M_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "M_RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true))
+        // WRAP MODE for Angles (0 to 1 range, the shader handles the 360 mult, or we can do 0-360 here)
+        // Let's output 0.0 to 1.0 for Angle, and multiply by 360 in shader or renderer to keep WRAP logic clean.
+        addControl(PropertyControl(this, "M_ANGLE", "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl(this, "M_ZOOM", "ZOOM", defaultValue = 130, outMin=0.1f, outMax=4.0f, hasModulation = true))
+        addControl(PropertyControl(this, "M_TX", "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl(this, "M_TY", "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl(this, "M_TILTX", "TILT X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl(this, "M_TILTY", "TILT Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl(this, "M_RGB", "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.1f, hasModulation = true))
 
         createGroup("CAMERA TRANSFORM")
         setupCameraOrientationControls(currentGroupContent!!)
-        addControl(PropertyControl(this, "C_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "WARP", "WARP DISTORT", defaultValue = 0))
-        addControl(PropertyControl(this, "C_ZOOM", "ZOOM", defaultValue = 350, hasModulation = true))
-        addControl(PropertyControl(this, "C_TX", "MOVE X", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "C_TY", "MOVE Y", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "C_TILTX", "TILT X", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "C_TILTY", "TILT Y", defaultValue = 500, hasModulation = true))
-        addControl(PropertyControl(this, "RGB", "RGB SHIFT", defaultValue = 0, hasModulation = true))
+        addControl(PropertyControl(this, "C_ANGLE", "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl(this, "WARP", "WARP DISTORT", defaultValue = 0, outMin=0f, outMax=1f))
+        addControl(PropertyControl(this, "C_ZOOM", "ZOOM", defaultValue = 320, outMin=0.3f, outMax=2.5f, hasModulation = true))
+        addControl(PropertyControl(this, "C_TX", "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl(this, "C_TY", "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl(this, "C_TILTX", "TILT X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl(this, "C_TILTY", "TILT Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl(this, "RGB", "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.05f, hasModulation = true))
 
         createGroup("COLOR")
-        addControl(PropertyControl(this, "BRIT", "BRIGHTNESS", defaultValue = 500))
-        addControl(PropertyControl(this, "HUE", "HUE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "NEG", "NEGATIVE", defaultValue = 0, hasModulation = true))
-        addControl(PropertyControl(this, "GLOW", "GLOW", defaultValue = 0, hasModulation = true))
-        addControl(PropertyControl(this, "CONTRAST", "CONTRAST", defaultValue = 500))
-        addControl(PropertyControl(this, "VIBRANCE", "SATURATION", defaultValue = 500))
+        addControl(PropertyControl(this, "BRIT", "BRIGHTNESS", defaultValue = 500, outMin=0f, outMax=2f))
+        addControl(PropertyControl(this, "HUE", "HUE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl(this, "NEG", "NEGATIVE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl(this, "GLOW", "GLOW", defaultValue = 0, outMin=0f, outMax=2f, hasModulation = true))
+        addControl(PropertyControl(this, "CONTRAST", "CONTRAST", defaultValue = 500, outMin=0f, outMax=2f))
+        addControl(PropertyControl(this, "VIBRANCE", "SATURATION", defaultValue = 500, outMin=0f, outMax=2f))
     }
 
     private fun setupGeometrySpecifics(parent: LinearLayout) {
@@ -1924,19 +1953,69 @@ class MainActivity : AppCompatActivity() {
             val heightF = FIXED_HEIGHT.toFloat()
             val fboAspect = widthF / heightF
 
-            // --- Pass Texture Aspect Ratio ---
             val texAspect = if (texHeight > 0) texWidth.toFloat() / texHeight.toFloat() else 1.0f
             safeUni("uTexAspect", texAspect)
             safeUni("uA", fboAspect)
 
-            val vMAngle = ctx.controlsMap["M_ANGLE"]?.computedValue ?: 0f; val vMZoom = ctx.controlsMap["M_ZOOM"]?.computedValue ?: 0f; val vMTx = ctx.controlsMap["M_TX"]?.computedValue ?: 0.5f; val vMTy = ctx.controlsMap["M_TY"]?.computedValue ?: 0.5f; val vMTiltX = ctx.controlsMap["M_TILTX"]?.computedValue ?: 0.5f; val vMTiltY = ctx.controlsMap["M_TILTY"]?.computedValue ?: 0.5f; val v3DMix = ctx.controlsMap["3D_MIX"]?.computedValue ?: 0f
-            safeUni("uAx", axisCount); safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f); safeUni("uMZ", 0.1f + (vMZoom * 2.5f)); safeUni2("uMT", (vMTx - 0.5f) * 2f, (vMTy - 0.5f) * 2f); safeUni2("uMTilt", (vMTiltX - 0.5f) * 1.5f, (vMTiltY - 0.5f) * 1.5f); safeUni("uMode", v3DMix.pow(2.0f)); safeUni("uScroll", scrollAccum); safeUni("uSShape", ctx.controlsMap["S_SHAPE"]?.computedValue ?: 0f); safeUni("uSFov", ctx.controlsMap["S_FOV"]?.computedValue ?: 0.5f); safeUni("uTHueStr", ctx.controlsMap["T_HUE_STR"]?.computedValue ?: 0f); safeUni("uTHuePos", ctx.controlsMap["T_HUE_POS"]?.computedValue ?: 0f); safeUni("uTWaveStr", ctx.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f); safeUni("uTWavePos", ctx.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
-            val cRaw = ctx.controlsMap["CURVE"]?.computedValue ?: 0.5f; safeUni("uCurve", if (cRaw > 0.5f) 1.0f + (cRaw - 0.5f) * 6.0f else 0.2f + (cRaw * 1.6f)); safeUni("uTwist", ctx.controlsMap["TWIST"]?.getMapped(-5.0f, 5.0f) ?: 0f); safeUni("uFlux", (ctx.controlsMap["FLUX"]?.computedValue ?: 0f) * 0.2f)
-            val vCZoom = ctx.controlsMap["C_ZOOM"]?.computedValue ?: 0f; val vCAngle = ctx.controlsMap["C_ANGLE"]?.computedValue ?: 0f; val vCTx = ctx.controlsMap["C_TX"]?.computedValue ?: 0.5f; val vCTy = ctx.controlsMap["C_TY"]?.computedValue ?: 0.5f; val vCTiltX = ctx.controlsMap["C_TILTX"]?.computedValue ?: 0.5f; val vCTiltY = ctx.controlsMap["C_TILTY"]?.computedValue ?: 0.5f
-            safeUni("uCZ", 0.3f + (vCZoom * 2.0f)); safeUni("uCR", (vCAngle * 360f + cRotAccum).toFloat()); safeUni2("uCT", (vCTx - 0.5f), (vCTy - 0.5f)); safeUni2("uCTilt", (vCTiltX - 0.5f) * 1.2f, (vCTiltY - 0.5f) * 1.2f); safeUni2("uF", if (rot180) -flipX else flipX, if (rot180) -flipY else flipY); safeUni("uWarp", ctx.controlsMap["WARP"]?.computedValue ?: 0f)
-            safeUni("uC", ctx.controlsMap["CONTRAST"]?.getMapped(0f, 2f) ?: 1f); safeUni("uS", ctx.controlsMap["VIBRANCE"]?.getMapped(0f, 2f) ?: 1f); safeUni("uHue", ctx.controlsMap["HUE"]?.computedValue ?: 0f); safeUni("uSol", ctx.controlsMap["NEG"]?.computedValue ?: 0f); safeUni("uBloom", ctx.controlsMap["GLOW"]?.computedValue ?: 0f); safeUni("uRGB", (ctx.controlsMap["RGB"]?.computedValue ?: 0f) * 0.05f); safeUni("uMRGB", (ctx.controlsMap["M_RGB"]?.computedValue ?: 0f) * 0.1f); safeUni("uBrit", ctx.controlsMap["BRIT"]?.getMapped(0.0f, 2.0f) ?: 1.0f)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId); uLocs["uTex"]?.let { GLES20.glUniform1i(it, 0) }
-            bindCommonAttribs(kaleidoProgram); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4); GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            // GET COMPUTED VALUES DIRECTLY (Already Scaled by PropertyControl)
+            val vMAngle = ctx.controlsMap["M_ANGLE"]?.computedValue ?: 0f
+            val vMZoom = ctx.controlsMap["M_ZOOM"]?.computedValue ?: 1f
+            val vMTx = ctx.controlsMap["M_TX"]?.computedValue ?: 0f
+            val vMTy = ctx.controlsMap["M_TY"]?.computedValue ?: 0f
+            val vMTiltX = ctx.controlsMap["M_TILTX"]?.computedValue ?: 0f
+            val vMTiltY = ctx.controlsMap["M_TILTY"]?.computedValue ?: 0f
+            val v3DMix = ctx.controlsMap["3D_MIX"]?.computedValue ?: 0f
+
+            // Note: vMAngle is 0.0-1.0. We multiply by 360 here plus the accumulated physics rotation.
+            safeUni("uAx", axisCount)
+            safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f)
+            safeUni("uMZ", vMZoom)
+            safeUni2("uMT", vMTx * 2f, vMTy * 2f)
+            safeUni2("uMTilt", vMTiltX * 1.5f, vMTiltY * 1.5f)
+
+            safeUni("uMode", v3DMix.pow(2.0f))
+            safeUni("uScroll", scrollAccum)
+            safeUni("uSShape", ctx.controlsMap["S_SHAPE"]?.computedValue ?: 0f)
+            safeUni("uSFov", ctx.controlsMap["S_FOV"]?.computedValue ?: 0.5f)
+            safeUni("uTHueStr", ctx.controlsMap["T_HUE_STR"]?.computedValue ?: 0f)
+            safeUni("uTHuePos", ctx.controlsMap["T_HUE_POS"]?.computedValue ?: 0f)
+            safeUni("uTWaveStr", ctx.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f)
+            safeUni("uTWavePos", ctx.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
+
+            safeUni("uCurve", ctx.controlsMap["CURVE"]?.computedValue ?: 1.0f)
+            safeUni("uTwist", ctx.controlsMap["TWIST"]?.computedValue ?: 0f)
+            safeUni("uFlux", ctx.controlsMap["FLUX"]?.computedValue ?: 0f)
+
+            val vCZoom = ctx.controlsMap["C_ZOOM"]?.computedValue ?: 1f
+            val vCAngle = ctx.controlsMap["C_ANGLE"]?.computedValue ?: 0f
+            val vCTx = ctx.controlsMap["C_TX"]?.computedValue ?: 0f
+            val vCTy = ctx.controlsMap["C_TY"]?.computedValue ?: 0f
+            val vCTiltX = ctx.controlsMap["C_TILTX"]?.computedValue ?: 0f
+            val vCTiltY = ctx.controlsMap["C_TILTY"]?.computedValue ?: 0f
+
+            safeUni("uCZ", vCZoom)
+            safeUni("uCR", (vCAngle * 360f + cRotAccum).toFloat())
+            safeUni2("uCT", vCTx, vCTy)
+            safeUni2("uCTilt", vCTiltX * 1.2f, vCTiltY * 1.2f)
+
+            safeUni2("uF", if (rot180) -flipX else flipX, if (rot180) -flipY else flipY)
+            safeUni("uWarp", ctx.controlsMap["WARP"]?.computedValue ?: 0f)
+
+            safeUni("uC", ctx.controlsMap["CONTRAST"]?.computedValue ?: 1f)
+            safeUni("uS", ctx.controlsMap["VIBRANCE"]?.computedValue ?: 1f)
+            safeUni("uHue", ctx.controlsMap["HUE"]?.computedValue ?: 0f)
+            safeUni("uSol", ctx.controlsMap["NEG"]?.computedValue ?: 0f)
+            safeUni("uBloom", ctx.controlsMap["GLOW"]?.computedValue ?: 0f)
+            safeUni("uRGB", ctx.controlsMap["RGB"]?.computedValue ?: 0f)
+            safeUni("uMRGB", ctx.controlsMap["M_RGB"]?.computedValue ?: 0f)
+            safeUni("uBrit", ctx.controlsMap["BRIT"]?.computedValue ?: 1.0f)
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId)
+            uLocs["uTex"]?.let { GLES20.glUniform1i(it, 0) }
+            bindCommonAttribs(kaleidoProgram)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         }
 
         private fun renderToScreen() {
