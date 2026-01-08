@@ -1076,7 +1076,7 @@ class MainActivity : AppCompatActivity() {
         setupCameraOrientationControls(currentGroupContent!!)
         addControl(PropertyControl(this, "C_ANGLE", "ANGLE", defaultValue = 0, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
         addControl(PropertyControl(this, "WARP", "WARP DISTORT", defaultValue = 0))
-        addControl(PropertyControl(this, "C_ZOOM", "ZOOM", defaultValue = 300, hasModulation = true))
+        addControl(PropertyControl(this, "C_ZOOM", "ZOOM", defaultValue = 350, hasModulation = true))
         addControl(PropertyControl(this, "C_TX", "MOVE X", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "C_TY", "MOVE Y", defaultValue = 500, hasModulation = true))
         addControl(PropertyControl(this, "C_TILTX", "TILT X", defaultValue = 500, hasModulation = true))
@@ -1647,6 +1647,8 @@ class MainActivity : AppCompatActivity() {
         @Volatile private var isSurfaceReady = false
         private val mvpMatrix = FloatArray(16)
         private val identityMatrix = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
+
+        // State
         var scrollAccum = 0.0f
         var mRotAccum = 0.0
         var cRotAccum = 0.0
@@ -1655,8 +1657,16 @@ class MainActivity : AppCompatActivity() {
         var flipX = 1.0f
         var flipY = -1.0f
         var rot180 = false
+
+        // Resolution Tracking
+        private var texWidth = 1280
+        private var texHeight = 720
+
+        // Timing
         private var lastTime = System.nanoTime()
         private var deltaTime = 0.0f
+
+        // GL Surfaces & Textures
         private var cameraTexId = -1
         private var surfaceTexture: SurfaceTexture? = null
         private var playerSurface: Surface? = null
@@ -1664,6 +1674,8 @@ class MainActivity : AppCompatActivity() {
         private var fboTexId = 0
         private var fboWidth = 1920
         private var fboHeight = 1080
+
+        // Recorder / External
         private var captureRequested = false
         private var videoRecorder: VideoRecorder? = null
         private var recordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
@@ -1678,6 +1690,8 @@ class MainActivity : AppCompatActivity() {
         private var extEglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
         private var extWidth = 0
         private var extHeight = 0
+
+        // Buffers & Uniforms
         private lateinit var pBuf: FloatBuffer
         private lateinit var tBuf: FloatBuffer
         private var uLocs = mutableMapOf<String, Int>()
@@ -1687,7 +1701,7 @@ class MainActivity : AppCompatActivity() {
         private val FIXED_WIDTH = 1920
         private val FIXED_HEIGHT = 1080
 
-        // --- NEW: Rotation Animation State ---
+        // --- Rotation Animation State ---
         private var rotTargetM: Double? = null
         private var rotStartM: Double = 0.0
         private var rotTargetC: Double? = null
@@ -1716,35 +1730,62 @@ class MainActivity : AppCompatActivity() {
         fun resetVideoTexture() {
             playerSurface?.release(); playerSurface = null; surfaceTexture?.release(); surfaceTexture = null
             if (cameraTexId != -1) { val t = IntArray(1); t[0] = cameraTexId; GLES20.glDeleteTextures(1, t, 0); cameraTexId = -1 }
-            cameraTexId = createOESTex(); surfaceTexture = SurfaceTexture(cameraTexId); surfaceTexture?.setDefaultBufferSize(viewWidth, viewHeight)
+            cameraTexId = createOESTex(); surfaceTexture = SurfaceTexture(cameraTexId); surfaceTexture?.setDefaultBufferSize(texWidth, texHeight)
         }
-        fun provideSurface(req: SurfaceRequest) { glView.queueEvent { surfaceTexture?.let { st -> st.setDefaultBufferSize(req.resolution.width, req.resolution.height); val s = Surface(st); req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() } } } }
+        fun provideSurface(req: SurfaceRequest) {
+            glView.queueEvent {
+                surfaceTexture?.let { st ->
+                    texWidth = req.resolution.width
+                    texHeight = req.resolution.height
+                    st.setDefaultBufferSize(texWidth, texHeight)
+                    val s = Surface(st)
+                    req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() }
+                }
+            }
+        }
         fun setExternalSurface(s: Surface, w: Int, h: Int) { extSurfaceArgs = Triple(s, w, h) }
         fun removeExternalSurface() { extSurfaceArgs = null }
-        fun updateTextureSize(width: Int, height: Int) { glView.queueEvent { surfaceTexture?.setDefaultBufferSize(width, height) } }
 
+        fun updateTextureSize(width: Int, height: Int) {
+            texWidth = width
+            texHeight = height
+            glView.queueEvent { surfaceTexture?.setDefaultBufferSize(width, height) }
+        }
 
         override fun onSurfaceCreated(gl: GL10?, config: GL10EGLConfig?) {
             setupEGL(); GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
+
+            // --- SHADER (Includes Aspect Fill for Camera->FBO) ---
             val fSrc = """#extension GL_OES_EGL_image_external : require
             precision highp float; varying vec2 v; uniform samplerExternalOES uTex;
             uniform float uMR, uCR, uCZ, uA, uMZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB, uWarp;
             uniform float uBrit, uTHueStr, uTHuePos, uTWaveStr, uTWavePos;
             uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
+            uniform float uTexAspect; 
             uniform float uCurve, uTwist, uFlux, uSShape, uSFov, uScroll, uMode;
+
             vec3 hueShift(vec3 color, float hue) { const vec3 k = vec3(0.57735, 0.57735, 0.57735); float cosAngle = cos(hue); return vec3(color * cosAngle + cross(k, color) * sin(hue) + k * dot(k, color) * (1.0 - cosAngle)); }
+
             vec3 sampleCamera(vec2 uv, float rgbShift) {
                 vec2 centered = uv - 0.5;
-                float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y); centered /= max(z, 0.1); centered *= uCZ;
+                float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y); centered /= max(z, 0.1);
+                centered *= uCZ;
+
+                // Aspect Fill: Camera to FBO
+                if (uA > uTexAspect) { centered.y *= uTexAspect / uA; } 
+                else { centered.x *= uA / uTexAspect; }
+
                 float aspectFactor = mix(uA, 1.0, uWarp); centered.x *= aspectFactor;
                 float cr = uCR * 0.01745329; float c = cos(cr); float s = sin(cr);
                 centered = vec2(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
                 centered.x /= aspectFactor; centered += uCT;
                 vec2 rotatedUV = centered + 0.5; rotatedUV.x += rgbShift; rotatedUV = (rotatedUV - 0.5) * uF + 0.5;
+
                 vec2 mirroredUV = abs(mod(rotatedUV + 1.0, 2.0) - 1.0);
                 return texture2D(uTex, mirroredUV).rgb;
             }
+
             void main() {
                 vec3 finalColor = vec3(0.0);
                 float a1 = -uMR * 0.01745329; float cosA1 = cos(a1); float sinA1 = sin(a1);
@@ -1765,7 +1806,7 @@ class MainActivity : AppCompatActivity() {
                     float rCircle = length(uv); float rBox = max(abs(uv.x), abs(uv.y)); float dist = mix(rCircle, rBox, uSShape);
                     float angle = atan(uv.y, uv.x); dist += sin(angle * 4.0 + dist * 10.0) * uFlux * dist; float safeDist = max(dist, 0.01);
                     float projection = (uSFov * 0.8 + 0.2) / safeDist;
-                    vec2 tunnelUV; tunnelUV.x = (angle + (1.0/safeDist) * uTwist) / 3.14159; tunnelUV.y = projection + uScroll; 
+                    vec2 tunnelUV; tunnelUV.x = (angle + (1.0/safeDist) * uTwist) / 3.14159; tunnelUV.y = projection + uScroll;
                     if(abs(uCurve - 1.0) > 0.01) tunnelUV *= 1.0 + (uCurve - 1.0) * (1.0 - safeDist);
                     vec2 flatUV = uv; flatUV.x /= uA;
                     vec2 mixedUV = mix(flatUV, tunnelUV * 0.8, modeBlend);
@@ -1783,7 +1824,7 @@ class MainActivity : AppCompatActivity() {
                 finalColor = (finalColor - 0.5) * uC + 0.5;
                 float l = dot(finalColor, vec3(0.299, 0.587, 0.114)); finalColor = mix(vec3(l), finalColor, uS);
                 if(uBloom > 0.01) finalColor += smoothstep(0.4, 1.0, l) * finalColor * uBloom * 2.0;
-                finalColor *= uBrit; 
+                finalColor *= uBrit;
                 gl_FragColor = vec4(finalColor, 1.0);
             }""".trimIndent()
 
@@ -1806,6 +1847,7 @@ class MainActivity : AppCompatActivity() {
 
             cameraTexId = createOESTex()
             surfaceTexture = SurfaceTexture(cameraTexId)
+            surfaceTexture?.setDefaultBufferSize(texWidth, texHeight)
             initFBO(FIXED_WIDTH, FIXED_HEIGHT)
             GLES20.glUseProgram(kaleidoProgram)
             uLocs["uA"]?.let { GLES20.glUniform1f(it, FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat()) }
@@ -1835,7 +1877,6 @@ class MainActivity : AppCompatActivity() {
             deltaTime = (now - lastTime) / 1e9f
             lastTime = now
 
-            // --- 1. Rotation Interpolation (GL Thread) ---
             if (isRotAnimating && rotTargetM != null) {
                 rotAnimTime += deltaTime
                 if (rotAnimTime >= rotAnimDuration) {
@@ -1850,7 +1891,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // --- 2. Update Controls (Physics + Animation) ---
             ctx.controls.forEach { it.update(deltaTime) }
 
             try { surfaceTexture?.updateTexImage() } catch (e: Exception) { return }
@@ -1879,11 +1919,15 @@ class MainActivity : AppCompatActivity() {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId); GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT); GLES20.glUseProgram(kaleidoProgram)
             fun safeUni(name: String, v: Float) { uLocs[name]?.let { GLES20.glUniform1f(it, v) } }
             fun safeUni2(name: String, v1: Float, v2: Float) { uLocs[name]?.let { GLES20.glUniform2f(it, v1, v2) } }
-            val widthF = fboWidth.toFloat(); val heightF = fboHeight.toFloat(); val aspect = widthF / heightF
-            safeUni("uA", aspect)
-            val camRatio = 1.777f; val screenRatio = FIXED_WIDTH / FIXED_HEIGHT; var scaleX = 1.0f; var scaleY = 1.0f
-            if (screenRatio < camRatio) { scaleX = screenRatio.toFloat() / camRatio; scaleY = 1.0f } else { scaleX = 1.0f; scaleY = camRatio / screenRatio.toFloat() }
-            safeUni2("uCamScale", scaleX, scaleY)
+
+            val widthF = FIXED_WIDTH.toFloat()
+            val heightF = FIXED_HEIGHT.toFloat()
+            val fboAspect = widthF / heightF
+
+            // --- Pass Texture Aspect Ratio ---
+            val texAspect = if (texHeight > 0) texWidth.toFloat() / texHeight.toFloat() else 1.0f
+            safeUni("uTexAspect", texAspect)
+            safeUni("uA", fboAspect)
 
             val vMAngle = ctx.controlsMap["M_ANGLE"]?.computedValue ?: 0f; val vMZoom = ctx.controlsMap["M_ZOOM"]?.computedValue ?: 0f; val vMTx = ctx.controlsMap["M_TX"]?.computedValue ?: 0.5f; val vMTy = ctx.controlsMap["M_TY"]?.computedValue ?: 0.5f; val vMTiltX = ctx.controlsMap["M_TILTX"]?.computedValue ?: 0.5f; val vMTiltY = ctx.controlsMap["M_TILTY"]?.computedValue ?: 0.5f; val v3DMix = ctx.controlsMap["3D_MIX"]?.computedValue ?: 0f
             safeUni("uAx", axisCount); safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f); safeUni("uMZ", 0.1f + (vMZoom * 2.5f)); safeUni2("uMT", (vMTx - 0.5f) * 2f, (vMTy - 0.5f) * 2f); safeUni2("uMTilt", (vMTiltX - 0.5f) * 1.5f, (vMTiltY - 0.5f) * 1.5f); safeUni("uMode", v3DMix.pow(2.0f)); safeUni("uScroll", scrollAccum); safeUni("uSShape", ctx.controlsMap["S_SHAPE"]?.computedValue ?: 0f); safeUni("uSFov", ctx.controlsMap["S_FOV"]?.computedValue ?: 0.5f); safeUni("uTHueStr", ctx.controlsMap["T_HUE_STR"]?.computedValue ?: 0f); safeUni("uTHuePos", ctx.controlsMap["T_HUE_POS"]?.computedValue ?: 0f); safeUni("uTWaveStr", ctx.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f); safeUni("uTWavePos", ctx.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
@@ -1899,12 +1943,47 @@ class MainActivity : AppCompatActivity() {
             if (simpleProgram == 0) return
             GLES20.glViewport(0, 0, viewWidth, viewHeight); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             val isPortrait = viewWidth < viewHeight
+
+            // --- Aspect Fill Calculation (Screen vs FBO) ---
+            // The FBO is 16:9. The screen might be 21:9 or 4:3.
+            // We want to scale the quad so it fills the screen without stretching.
             android.opengl.Matrix.setIdentityM(mvpMatrix, 0)
+
+            val fboRatio = FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat() // ~1.77 (16:9)
+            val screenRatio = viewWidth.toFloat() / viewHeight.toFloat()
+
             if (isPortrait) {
+                // Rotate quad -90 degrees
                 android.opengl.Matrix.rotateM(mvpMatrix, 0, -90f, 0f, 0f, 1f)
-                val imageAspect = FIXED_HEIGHT.toFloat() / FIXED_WIDTH.toFloat(); val screenAspect = viewWidth.toFloat() / viewHeight.toFloat(); val scaleX = imageAspect / screenAspect
-                android.opengl.Matrix.scaleM(mvpMatrix, 0, scaleX, 1f, 1f)
+
+                // Effective FBO ratio after rotation (1080/1920 = ~0.56)
+                val rotatedFboRatio = 1f / fboRatio
+
+                if (screenRatio < rotatedFboRatio) {
+                    // Screen is taller/narrower (e.g. 0.45 vs 0.56)
+                    // We must scale the Long Dimension (which is Local Y / Screen X) to fill.
+                    val scale = rotatedFboRatio / screenRatio
+                    android.opengl.Matrix.scaleM(mvpMatrix, 0, 1f, scale, 1f)
+                } else {
+                    // Screen is wider/shorter
+                    val scale = screenRatio / rotatedFboRatio
+                    android.opengl.Matrix.scaleM(mvpMatrix, 0, scale, 1f, 1f)
+                }
+            } else {
+                // Landscape
+                if (screenRatio > fboRatio) {
+                    // Screen wider than 16:9 (e.g. 21:9)
+                    // Scale Y (Height) UP to fill width (Aspect Fill)
+                    val scale = screenRatio / fboRatio
+                    android.opengl.Matrix.scaleM(mvpMatrix, 0, 1f, scale, 1f)
+                } else {
+                    // Screen narrower than 16:9 (e.g. 4:3)
+                    // Scale X (Width) UP to fill height
+                    val scale = fboRatio / screenRatio
+                    android.opengl.Matrix.scaleM(mvpMatrix, 0, scale, 1f, 1f)
+                }
             }
+
             GLES20.glUseProgram(simpleProgram); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
             GLES20.glUniform1i(simpleULocs["uTex"] ?: -1, 0); GLES20.glUniformMatrix4fv(simpleULocs["uMVPMatrix"] ?: -1, 1, false, mvpMatrix, 0)
             bindCommonAttribs(simpleProgram); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -1925,25 +2004,16 @@ class MainActivity : AppCompatActivity() {
             if (recordSurface != EGL14.EGL_NO_SURFACE && videoRecorder != null) {
                 val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
                 val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
-
                 if (EGL14.eglMakeCurrent(mSavedDisplay, recordSurface, recordSurface, mSavedContext)) {
-                    // The recorder is fixed at 1920x1080
                     GLES20.glViewport(0, 0, videoRecorder!!.width, videoRecorder!!.height)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-
-                    // Use identityMatrix to match the stable Projector/FBO view
-                    // This ignores the phone's physical tilt (Portrait/Landscape)
                     GLES20.glUseProgram(simpleProgram)
                     GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
                     GLES20.glUniform1i(simpleULocs["uTex"] ?: -1, 0)
-
-                    // Critical: Use identityMatrix here, NOT a rotation matrix
                     GLES20.glUniformMatrix4fv(simpleULocs["uMVPMatrix"] ?: -1, 1, false, identityMatrix, 0)
-
                     bindCommonAttribs(simpleProgram)
                     GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
                     val timeNow = System.nanoTime()
                     if (recordStartTimeNs == 0L) recordStartTimeNs = timeNow
                     EGLExt.eglPresentationTimeANDROID(mSavedDisplay, recordSurface!!, timeNow - recordStartTimeNs)
