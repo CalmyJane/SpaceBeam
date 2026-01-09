@@ -1086,7 +1086,7 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl(this, "T_HUE_POS", "RAINBOW POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
 
         createGroup("MORPHING")
-        addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 500, outMin=0.2f, outMax=4.0f, hasModulation = true))
+        addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 250, outMin=0.0f, outMax=4.0f, hasModulation = true))
         addControl(PropertyControl(this, "TWIST", "VORTEX", defaultValue = 500, outMin=-5.0f, outMax=5.0f, hasModulation = true))
         addControl(PropertyControl(this, "FLUX", "FLUX", defaultValue = 0, outMin=0f, outMax=0.5f, hasModulation = true))
 
