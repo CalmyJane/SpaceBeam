@@ -56,12 +56,252 @@ import android.content.Intent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.marginRight
 import androidx.media3.common.C
+import kotlin.apply
+import kotlin.text.clear
+
 
 /**
- * Manages external displays (HDMI, Miracast/QuickShare).
- * When connected, it opens a clean SurfaceView on the external screen
- * and passes the Surface to the renderer.
+ * Handles the overlay Settings Menu and its confirmation dialogs.
+ * Updated: Lowercase labels, uniform button styling.
  */
+class SettingsMenu(private val activity: MainActivity, private val parentView: ViewGroup) {
+    private var overlay: FrameLayout? = null
+    private var confirmationOverlay: FrameLayout? = null
+
+    fun show() {
+        // Ensure menu doesn't stack if accidentally triggered twice quickly
+        if (overlay != null && overlay!!.parent != null) return
+
+        // 1. Main Dimmed Background Overlay (Covers entire screen, sits on top of HUD)
+        overlay = FrameLayout(activity).apply {
+            setBackgroundColor(Color.argb(160, 0, 0, 0))
+            isClickable = true
+            elevation = 100f // Ensure it's above everything else in the HUD
+            // Clicking outside the center panel dismisses the menu
+            setOnClickListener { dismiss() }
+            // Fade in
+            alpha = 0f
+            animate().alpha(1f).setDuration(200).start()
+        }
+
+        // 2. The Center Menu Panel (ScrollView to handle landscape/small screens)
+        val dm = activity.resources.displayMetrics
+        // Target width: 90% of the narrower screen dimension for a consistent look
+        val targetWidth = (min(dm.widthPixels, dm.heightPixels) * 0.9f).toInt()
+
+        val panelContainer = ScrollView(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(targetWidth, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER).apply {
+                setMargins(20, 50, 20, 50)
+            }
+            // Important: Stop clicks on the panel itself from propagating to the overlay and dismissing the menu
+            setOnClickListener { /* consume click */ }
+            background = getPanelBackground()
+            elevation = 110f // Sits on top of the overlay background
+        }
+
+        val contentLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(40, 50, 40, 50)
+        }
+
+        // --- MENU ITEMS ---
+
+        // Title
+        contentLayout.addView(TextView(activity).apply {
+            text = "SETTINGS"
+            textSize = 24f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 40)
+        })
+
+        // Buttons (Lowercase labels, uniform styling)
+        contentLayout.addView(createStyledButton("toggle background") {
+            activity.toggleReadability()
+        })
+
+        contentLayout.addView(createStyledDivider())
+
+        contentLayout.addView(createStyledButton("reset view") {
+            activity.globalReset()
+            dismiss()
+        })
+
+        contentLayout.addView(createStyledDivider())
+
+        // "Reset Presets" - Uniform color, triggers confirmation
+        contentLayout.addView(createStyledButton("reset presets") {
+            showConfirmation(
+                "RESET ALL PRESETS?",
+                "This cannot be undone. All saved presets in slots 1-9 will be permanently replaced with factory defaults."
+            ) {
+                activity.resetPresetsToDefault()
+                dismiss()
+            }
+        })
+
+        contentLayout.addView(createStyledDivider())
+
+        // Close Button
+        contentLayout.addView(Button(activity).apply {
+            text = "close"
+            setTextColor(Color.LTGRAY)
+            background = null // No border for the close button itself
+            textSize = 16f
+            setPadding(0, 30, 0, 0)
+            setOnClickListener { dismiss() }
+        })
+
+        panelContainer.addView(contentLayout)
+        overlay!!.addView(panelContainer)
+        // Add the whole menu overlay to the parent view (the HUD)
+        parentView.addView(overlay, ViewGroup.LayoutParams(-1, -1))
+    }
+
+    fun dismiss() {
+        // Fade out and remove
+        overlay?.animate()?.alpha(0f)?.setDuration(150)?.withEndAction {
+            parentView.removeView(overlay)
+            overlay = null
+            confirmationOverlay = null
+        }?.start()
+    }
+
+    private fun showConfirmation(titleStr: String, messageStr: String, onConfirm: () -> Unit) {
+        if (confirmationOverlay != null) return
+
+        // 1. Confirmation Dimmed Overlay (Covers the settings menu specifically)
+        confirmationOverlay = FrameLayout(activity).apply {
+            setBackgroundColor(Color.argb(180, 0, 0, 0))
+            isClickable = true
+            elevation = 120f // Sits on top of the settings menu panel
+            setOnClickListener { dismissConfirmation() } // Click outside dialog to cancel
+            // Fade in
+            alpha = 0f
+            animate().alpha(1f).setDuration(150).start()
+        }
+
+        val dm = activity.resources.displayMetrics
+        val targetWidth = (min(dm.widthPixels, dm.heightPixels) * 0.85f).toInt()
+
+        // 2. The Confirmation Dialog Panel
+        val dialogPanel = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = FrameLayout.LayoutParams(targetWidth, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            background = getPanelBackground()
+            setPadding(50, 50, 50, 50)
+            setOnClickListener { /* consume click */ }
+            elevation = 130f
+        }
+
+        // Warning Title (Red for emphasis in the dialog, though buttons are uniform)
+        dialogPanel.addView(TextView(activity).apply {
+            text = titleStr
+            textSize = 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.RED)
+            gravity = Gravity.CENTER
+        })
+
+        dialogPanel.addView(TextView(activity).apply {
+            text = messageStr
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, 30, 0, 50)
+        })
+
+        // Dialog Buttons
+        val buttonRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(-1, -2)
+        }
+
+        val cancelBtn = Button(activity).apply {
+            text = "CANCEL"
+            setTextColor(Color.LTGRAY)
+            background = null
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            setOnClickListener { dismissConfirmation() }
+        }
+
+        // Confirm Button (Red background for emphasis in dialog)
+        val confirmBtn = Button(activity).apply {
+            text = "CONFIRM"
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#AA2200")) // Dark Red
+                cornerRadius = 15f
+            }
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = 20 }
+            setOnClickListener {
+                onConfirm()
+                dismissConfirmation()
+            }
+        }
+
+        buttonRow.addView(cancelBtn)
+        buttonRow.addView(confirmBtn)
+        dialogPanel.addView(buttonRow)
+
+        confirmationOverlay!!.addView(dialogPanel)
+        // Add the confirmation overlay to the main menu overlay so it sits on top
+        overlay!!.addView(confirmationOverlay, ViewGroup.LayoutParams(-1, -1))
+    }
+
+    private fun dismissConfirmation() {
+        confirmationOverlay?.animate()?.alpha(0f)?.setDuration(100)?.withEndAction {
+            overlay?.removeView(confirmationOverlay)
+            confirmationOverlay = null
+        }?.start()
+    }
+
+    // --- STYLING HELPERS ---
+
+    private fun getPanelBackground(): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(Color.argb(240, 28, 28, 30)) // Very opaque dark gray
+            cornerRadius = 30f
+            setStroke(3, Color.argb(150, 70, 70, 70))
+        }
+    }
+
+    // Updated: Removed isDestructive parameter. All buttons are uniform gray.
+    private fun createStyledButton(textStr: String, action: () -> Unit): Button {
+        return Button(activity).apply {
+            text = textStr
+            textSize = 16f
+            setTextColor(Color.WHITE) // Always white text
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110).apply {
+                setMargins(0, 15, 0, 15)
+            }
+            background = GradientDrawable().apply {
+                setColor(Color.argb(255, 45, 45, 50)) // Standard gray background
+                cornerRadius = 15f
+                setStroke(2, Color.parseColor("#555555")) // Standard gray stroke
+            }
+            elevation = 10f
+            setOnClickListener { action() }
+        }
+    }
+
+    private fun createStyledDivider(): View {
+        return View(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 2).apply {
+                setMargins(20, 25, 20, 25)
+            }
+            setBackgroundColor(Color.argb(50, 255, 255, 255))
+        }
+    }
+}
+
 
 class ExternalDisplayHelper(
     private val context: Context,
@@ -671,8 +911,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var flipXBtn: ImageButton
     private lateinit var flipYBtn: ImageButton
     private lateinit var rot180Btn: ImageButton
-    private lateinit var readabilityBtn: ImageButton
-    private lateinit var resetBtn: ImageButton
+
+    private var settingsMenu: SettingsMenu? = null
     private lateinit var photoBtn: ImageButton
     private lateinit var recordBtn: ImageButton
     private lateinit var flashOverlay: View
@@ -710,6 +950,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var presetPanel: LinearLayout
     private lateinit var recordControls: LinearLayout
     private lateinit var orientationBtn: ImageButton
+    private lateinit var settingsBtn: ImageButton
     private var isOrientationLocked = false
     private val expandedGroups = mutableSetOf<String>()
     private var lastScrollY = 0
@@ -734,6 +975,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         isRebuildingHUD = false // End Rebuild
+    }
+
+
+    fun resetPresetsToDefault() {
+        // 1. Clear SharedPreferences
+        val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
+        prefs.edit().clear().apply()
+
+        // 2. Clear in-memory presets map
+        presets.clear()
+
+        // 3. Reload hardcoded defaults
+        initDefaultPresets()
+
+        // 4. Reset view to preset 1
+        globalReset()
+        applyPreset(1)
+
+        Toast.makeText(this, "All presets reset to factory defaults.", Toast.LENGTH_LONG).show()
     }
 
     private val mediaPickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -985,6 +1245,7 @@ class MainActivity : AppCompatActivity() {
         p.style = Paint.Style.FILL; c.drawRoundRect(RectF(25f, 50f, 75f, 85f), 8f, 8f, p); return BitmapDrawable(resources, b)
     }
 
+    // REPLACE the existing setupOverlayHUD method with this one:
     private fun setupOverlayHUD() {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
         overlayHUD = FrameLayout(this).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
@@ -995,9 +1256,30 @@ class MainActivity : AppCompatActivity() {
         val recordPanel = createRecordControls()
         val presetPanel = createPresetPanel()
 
-        val readabilityBtn = createReadabilityButton()
-        val resetBtn = createResetButton()
-        val orientationBtn = createOrientationButton() // NEW
+        // Create Orientation Button
+        val orientationBtnView = createOrientationButton()
+
+        // Create Settings Gear Button
+        // Using standard ic_menu_preferences for the gear icon.
+        // Background style will be handled by applyReadabilityStyle.
+        settingsBtn = ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_menu_preferences)
+            setColorFilter(Color.WHITE)
+            alpha = 0.85f
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(20,20,20,20) // Padding for the icon inside the click area
+            layoutParams = FrameLayout.LayoutParams(130, 130).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                bottomMargin = 30
+                rightMargin = 35
+            }
+            setOnClickListener {
+                if (settingsMenu == null) {
+                    settingsMenu = SettingsMenu(this@MainActivity, overlayHUD)
+                }
+                settingsMenu?.show()
+            }
+        }
 
         overlayHUD.addView(flashOverlay)
         overlayHUD.addView(logoView)
@@ -1019,33 +1301,29 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 bottomMargin = 50
                 rightMargin = 44
-                // No extra scaling needed with the new dimensions
-                presetPanel.scaleX = 1.0f
-                presetPanel.scaleY = 1.0f
+                presetPanel.scaleX = 1.0f; presetPanel.scaleY = 1.0f
             } else {
                 gravity = Gravity.BOTTOM or Gravity.END
                 bottomMargin = 15
                 rightMargin = 400
-                presetPanel.scaleX = 1.1f
-                presetPanel.scaleY = 1.1f
+                presetPanel.scaleX = 1.1f; presetPanel.scaleY = 1.1f
             }
         }
         overlayHUD.addView(presetPanel, presetParams)
 
-        // --- UPDATED LAYOUT FOR UTILITY BUTTONS ---
+        // --- UPDATED LAYOUT FOR UTILITY BUTTONS (Bottom Right) ---
         val baseBottom = 30; val baseRight = 30
 
-        // 1. Reset (Bottom)
-        resetBtn.layoutParams = (resetBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom; rightMargin = baseRight }
-        overlayHUD.addView(resetBtn)
+        // 1. Settings Button (Bottom)
+        overlayHUD.addView(settingsBtn)
 
-        // 2. Readability (Above Reset)
-        readabilityBtn.layoutParams = (readabilityBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 120; rightMargin = baseRight }
-        overlayHUD.addView(readabilityBtn)
-
-        // 3. Orientation Lock (Above Readability) - NEW
-        orientationBtn.layoutParams = (orientationBtn.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 240; rightMargin = baseRight }
-        overlayHUD.addView(orientationBtn)
+        // 2. Orientation Lock (Above Settings)
+        orientationBtnView.layoutParams = (orientationBtnView.layoutParams as FrameLayout.LayoutParams).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            bottomMargin = baseBottom + 150
+            rightMargin = baseRight
+        }
+        overlayHUD.addView(orientationBtnView)
 
         val cameraParams = FrameLayout.LayoutParams(-2, -2).apply {
             if (isPortrait) { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = baseBottom + 480; rightMargin = 20 }
@@ -1055,6 +1333,7 @@ class MainActivity : AppCompatActivity() {
         addContentView(overlayHUD, ViewGroup.LayoutParams(-1, -1))
         updateSidebarVisuals()
     }
+
 
     private fun setupParameterMenu() {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
@@ -1416,8 +1695,6 @@ class MainActivity : AppCompatActivity() {
         menuBtn = this
         setOnClickListener { toggleMenu() }
     }
-    private fun createReadabilityButton() = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_view); setColorFilter(Color.WHITE); alpha = 0.85f; readabilityBtn = this; layoutParams = FrameLayout.LayoutParams(120, 120).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 140; rightMargin = 35 }; setOnClickListener { toggleReadability() } }
-    private fun createResetButton() = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_close_clear_cancel); setColorFilter(Color.WHITE); alpha = 0.85f; resetBtn = this; layoutParams = FrameLayout.LayoutParams(120, 120).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 30; rightMargin = 35 }; setOnClickListener { globalReset() } }
 
     private fun createCollapsibleGroupView(title: String, startOpen: Boolean): Pair<LinearLayout, LinearLayout> {
         // Check if this group was previously expanded
@@ -1489,7 +1766,7 @@ class MainActivity : AppCompatActivity() {
         dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener { performLoad() }
     }
-
+    // REPLACE the existing applyReadabilityStyle method with this one:
     private fun applyReadabilityStyle() {
         val getBg = { alpha: Int -> GradientDrawable().apply {
             setColor(Color.argb(alpha, 10, 10, 10))
@@ -1500,7 +1777,8 @@ class MainActivity : AppCompatActivity() {
 
         // TARGET parameterPanel specifically for the background
         val panels = listOf(cameraSettingsPanel, presetPanel, recordControls)
-        val utils = listOf(readabilityBtn, resetBtn, menuBtn, orientationBtn)
+        // UPDATED: Added settingsBtn to this list
+        val utils = listOf(menuBtn, orientationBtn, settingsBtn)
 
         panels.forEach { it.background = null; it.setPadding(15, 15, 15, 15); it.clipToOutline = true }
         parameterPanel.background = null // Clear parameter panel specifically
@@ -1509,12 +1787,8 @@ class MainActivity : AppCompatActivity() {
             1, 2 -> {
                 val alpha = if (readabilityLevel == 1) 180 else 120
                 panels.forEach { it.background = getBg(alpha) }
-
-                // Target the panel
                 parameterPanel.background = getBg(alpha)
-                // Ensure the internal content respects the rounded corners of the background
                 parameterPanel.clipToOutline = true
-
                 utils.forEach { it.background = getCircleBg(alpha) }
                 applyRecursiveGlow(overlayHUD, readabilityLevel == 2)
             }
@@ -1533,7 +1807,7 @@ class MainActivity : AppCompatActivity() {
         if (view is ViewGroup) (0 until view.childCount).forEach { applyRecursiveGlow(view.getChildAt(it), enabled) }
     }
 
-    private fun toggleReadability() { readabilityLevel = (readabilityLevel + 1) % 3; applyReadabilityStyle() }
+    public fun toggleReadability() { readabilityLevel = (readabilityLevel + 1) % 3; applyReadabilityStyle() }
 
     private fun toggleRecording() {
         if (!isRecording) {
@@ -1573,7 +1847,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {}
     }
 
-    private fun globalReset() {
+    public fun globalReset() {
         renderer.stopRotationAnim() // STOP GL ANIM
         controls.forEach { it.stopAnimation() } // STOP GL ANIM
 
