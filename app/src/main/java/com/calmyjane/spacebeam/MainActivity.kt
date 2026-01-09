@@ -1082,10 +1082,12 @@ class MainActivity : AppCompatActivity() {
         // FOV 0.5 to 2.5 is a good range for Fisheye
         addControl(PropertyControl(this, "S_FOV", "FISHEYE", defaultValue = 500, outMin=0.2f, outMax=1.5f, hasModulation = true))
         addControl(PropertyControl(this, "S_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
-        addControl(PropertyControl(this, "T_HUE_STR", "RAINBOW STR", defaultValue = 0, outMin=0f, outMax=1f))
+        addControl(PropertyControl(this, "T_HUE_STR", "RAINBOW STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
         addControl(PropertyControl(this, "T_HUE_POS", "RAINBOW POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl(this, "T_WAVE_STR", "WAVE STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl(this, "T_WAVE_POS", "WAVE POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
 
-        createGroup("MORPHING")
+        createGroup("MORPH (Careful)")
         addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 250, outMin=0.0f, outMax=4.0f, hasModulation = true))
         addControl(PropertyControl(this, "TWIST", "VORTEX", defaultValue = 500, outMin=-5.0f, outMax=5.0f, hasModulation = true))
         addControl(PropertyControl(this, "FLUX", "FLUX", defaultValue = 0, outMin=0f, outMax=0.5f, hasModulation = true))
@@ -1938,6 +1940,7 @@ class MainActivity : AppCompatActivity() {
             val sign = sign(rawVal)
             val curvedSpeed = sign * (abs(rawVal) * 2.0f).pow(2.2f)
             scrollAccum += curvedSpeed * d * 0.6f
+            scrollAccum %= 2.5f
             val mRotCtrl = ctx.controlsMap["M_ROT"] ?: return
             mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
             val cRotCtrl = ctx.controlsMap["C_ROT"] ?: return
