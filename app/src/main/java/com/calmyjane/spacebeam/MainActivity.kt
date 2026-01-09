@@ -1628,6 +1628,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initDefaultPresets() {
+        // Robust Helper Function
         fun p(ax: Int, vararg overrides: Any): Preset {
             val baseSnapshots = controls.associate { it.id to it.getSnapshot() }.toMutableMap()
 
@@ -1641,7 +1642,7 @@ class MainActivity : AppCompatActivity() {
                 val key = overrides[i] as String
                 val value = overrides[i + 1] as Int
 
-                // Check if next args are Modulation (Rate/Depth)
+                // Check for Modulation (Rate/Depth)
                 if (i + 3 < overrides.size && overrides[i + 2] is Int && overrides[i + 3] is Int) {
                     val rate = overrides[i + 2] as Int
                     val depth = overrides[i + 3] as Int
@@ -1649,23 +1650,22 @@ class MainActivity : AppCompatActivity() {
                     var shape = "SINE"
                     var step = 4
 
-                    // FIX: Check if the next argument is a String AND if it is a valid WaveShape.
-                    // If it's just the next Key (like "M_ZOOM"), we must NOT consume it here.
+                    // Check for Shape String safely
                     if (i + 4 < overrides.size && overrides[i + 4] is String) {
                         val potentialShape = overrides[i + 4] as String
-                        val isValidShape = try {
+                        // Verify it is a valid WaveShape enum
+                        val isValid = try {
                             PropertyControl.WaveShape.valueOf(potentialShape)
                             true
-                        } catch (e: IllegalArgumentException) {
+                        } catch (e: Exception) {
                             false
                         }
 
-                        if (isValidShape) {
+                        if (isValid) {
                             shape = potentialShape
                             step = 5
                         }
                     }
-
                     baseSnapshots[key] = PropertyControl.Snapshot(value, true, rate, depth, shape)
                     i += step
                 } else {
@@ -1677,14 +1677,35 @@ class MainActivity : AppCompatActivity() {
             return Preset(baseSnapshots, 1f, -1f, false, ax)
         }
 
-        // 1. Standard Mirror
-        presets[1] = p(2, "M_ZOOM", 49, "M_TX", 689, "M_TY", 608, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
+        // --- PRESET DEFINITIONS (From Logs) ---
 
-        // 2. Simple Zoom
-        presets[2] = p(2, "M_ZOOM", 130, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
+        presets[1] = p(2,
+            "M_ZOOM", 130,
+            "M_TX", 500,
+            "M_TY", 500,
+            "C_ZOOM", 320,
+            "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500
+        )
 
-        // 3. Complex Modulation A
+        presets[2] = p(2,
+            "M_ZOOM", 49,
+            "M_TX", 688, "M_TY", 609,
+            "C_ZOOM", 320,
+            "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500
+        )
+
         presets[3] = p(2,
+            "M_ANGLE", 0, 169, 1000, "RAMP",
+            "M_ZOOM", 168,
+            "M_TX", 500, 480, 378,
+            "M_TY", 546, 340, 698,
+            "M_TILTX", 500, 268, 788,
+            "M_TILTY", 500, 241, 732,
+            "C_ZOOM", 320,
+            "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500
+        )
+
+        presets[4] = p(2,
             "M_ANGLE", 172, 262, 287,
             "M_ZOOM", 160, 531, 316,
             "M_TX", 500, 235, 184,
@@ -1692,44 +1713,38 @@ class MainActivity : AppCompatActivity() {
             "M_TILTX", 500, 242, 305,
             "M_TILTY", 500, 318, 343,
             "C_ZOOM", 500, 583, 365,
-            "HUE", 184, 298, 505,
+            "HUE", 184, 298, 505, "RAMP",
             "GLOW", 172,
-            "CONTRAST", 718,
-            "VIBRANCE", 899
+            "CONTRAST", 718, "VIBRANCE", 899
         )
 
-        // 4. Complex Modulation B
-        presets[4] = p(2,
+        presets[5] = p(2,
             "M_ANGLE", 172, 262, 287,
             "M_ZOOM", 518, 531, 576,
             "M_TX", 500, 431, 525,
-            "M_TY", 500, 217, 644,
+            "M_TY", 500, 217, 644, "RANDOM_SMOOTH",
             "M_TILTX", 500, 498, 1000,
             "M_TILTY", 500, 318, 1000,
             "C_ZOOM", 500, 583, 365,
             "GLOW", 485,
-            "CONTRAST", 788,
-            "VIBRANCE", 899
+            "CONTRAST", 788, "VIBRANCE", 899
         )
 
-        // 5. 3D Tunnel Entry
-        presets[5] = p(2,
+        presets[6] = p(2,
             "3D_MIX", 1000,
             "S_FOV", 884,
             "M_ANGLE", 172, 262, 287,
             "M_ZOOM", 130, 200, 0,
             "M_TX", 500, 431, 40,
-            "M_TY", 500, 217, 34, "RANDOM_SMOOTH",
+            "M_TY", 500, 217, 34,
             "M_TILTX", 500, 498, 303,
-            "M_TILTY", 500, 318, 345,
+            "M_TILTY", 500, 318, 345, "RANDOM_SMOOTH",
             "C_ZOOM", 500, 583, 365,
             "GLOW", 178,
-            "CONTRAST", 522,
-            "VIBRANCE", 853
+            "CONTRAST", 522, "VIBRANCE", 853
         )
 
-        // 6. 3D Tunnel Wave
-        presets[6] = p(2,
+        presets[7] = p(2,
             "3D_MIX", 1000,
             "S_SHAPE", 0, 343, 0,
             "S_SPEED", 206,
@@ -1740,15 +1755,13 @@ class MainActivity : AppCompatActivity() {
             "M_ZOOM", 77,
             "M_TX", 500, 320, 328,
             "M_TY", 500, 323, 343,
-            "M_TILTY", 500, 318, 0, "RANDOM_SMOOTH",
+            "M_TILTY", 500, 318, 0,
             "C_ZOOM", 500, 583, 0,
             "GLOW", 178,
-            "CONTRAST", 522,
-            "VIBRANCE", 853
+            "CONTRAST", 522, "VIBRANCE", 853
         )
 
-        // 7. 3D Tunnel Chaos
-        presets[7] = p(2,
+        presets[8] = p(2,
             "3D_MIX", 1000,
             "S_SHAPE", 1000, 343, 785,
             "S_FOV", 481, 496, 704,
@@ -1762,26 +1775,10 @@ class MainActivity : AppCompatActivity() {
             "C_ZOOM", 500, 583, 365,
             "RGB", 490, 534, 634,
             "GLOW", 285,
-            "CONTRAST", 786,
-            "VIBRANCE", 828
+            "CONTRAST", 786, "VIBRANCE", 828
         )
 
-        // 8. Variation of Chaos
-        presets[8] = p(2,
-            "3D_MIX", 1000,
-            "S_SHAPE", 1000, 343, 785,
-            "S_FOV", 481, 496, 704,
-            "S_SPEED", 800,
-            "M_ANGLE", 500, 262, 287,
-            "M_ZOOM", 160,
-            "HUE", 500, 200, 1000, "RAMP",
-            "C_ZOOM", 500, 583, 365,
-            "GLOW", 285,
-            "CONTRAST", 786,
-            "VIBRANCE", 828
-        )
-
-        // Load saved overrides
+        // Load saved overrides from SharedPreferences
         val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
         for (i in 1..8) {
             val jsonStr = prefs.getString("PRESET_$i", null)
