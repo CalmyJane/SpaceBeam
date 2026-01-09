@@ -54,6 +54,7 @@ import javax.microedition.khronos.egl.EGLConfig as GL10EGLConfig
 import android.opengl.EGLConfig as EGL14EGLConfig
 import android.content.Intent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.marginRight
 import androidx.media3.common.C
 
 /**
@@ -150,7 +151,6 @@ class ExternalDisplayHelper(
         }
     }
 }
-
 class PropertyControl(
     private val context: Context,
     val id: String,
@@ -158,17 +158,15 @@ class PropertyControl(
     val min: Int = 0,
     val max: Int = 1000,
     val defaultValue: Int = 0,
-    // NEW: Shader output range definitions
     val outMin: Float = 0.0f,
     val outMax: Float = 1.0f,
     val hasModulation: Boolean = false,
-    // NEW: ModMode determines math strategy (Wrap for angles, Clamp for sliders)
     val modMode: ModMode = ModMode.CLAMP,
     private val onValueChanged: ((Int) -> Unit)? = null
 ) {
     enum class ModMode { WRAP, CLAMP }
-    // NEW: Added RAMP for continuous rotation, SQUARE, and RANDOM types
-    enum class WaveShape { SINE, TRIANGLE, RAMP, SQUARE, RANDOM_SMOOTH, RANDOM_STEP }
+    // CHANGED: Removed SQUARE, Added WOBBLE_SINE
+    enum class WaveShape { SINE, TRIANGLE, RAMP, WOBBLE_SINE, RANDOM_SMOOTH, RANDOM_STEP }
 
     companion object {
         var activeControl: PropertyControl? = null
@@ -193,7 +191,6 @@ class PropertyControl(
     // --- Modulation State ---
     var modRate: Int = 200
     var modDepth: Int = 0
-    // Default to RAMP if we are in WRAP mode (perfect for angles), otherwise SINE
     var modShape: WaveShape = if (modMode == ModMode.WRAP) WaveShape.RAMP else WaveShape.SINE
 
     // Physics / Internal
@@ -201,7 +198,6 @@ class PropertyControl(
     var preciseModDepth: Float = 0f
     var lfoPhase: Double = 0.0
 
-    // This now stores the Normalized (0.0 - 1.0) value including LFO
     private var lastComputedNormalized: Float = 0f
 
     // --- Snapshot Morphing Variables ---
@@ -211,7 +207,6 @@ class PropertyControl(
     private var modDepthStart = 0f
     private var modDepthTarget: Float? = null
 
-    // NEW: Returns the final Float value scaled to the shader's specific range (outMin to outMax)
     val computedValue: Float
         get() = outMin + (lastComputedNormalized * (outMax - outMin))
 
@@ -219,12 +214,14 @@ class PropertyControl(
     private var mainSeekBar: SeekBar? = null
     private var modIndicator: View? = null
     private var mainRowLayout: LinearLayout? = null
-    private var floatingPanel: LinearLayout? = null
 
-    // UI References for the open modulation menu
+    // --- Menu UI References ---
+    private var floatingPanel: LinearLayout? = null
     private var modPanelSpeedSeekBar: SeekBar? = null
     private var modPanelDepthSeekBar: SeekBar? = null
-    private var modPanelShapeSpinner: Spinner? = null
+    private var liveValueDisplay: TextView? = null
+    private var baseValueInput: EditText? = null
+    private var shapeBtn: Button? = null
 
     data class Snapshot(
         val value: Int,
@@ -244,9 +241,7 @@ class PropertyControl(
     }
 
     fun animateTo(target: Float, durationSec: Float, newShape: String? = null) {
-        // Capture current state for blending
         modSnapshotValue = lastComputedNormalized
-
         animTarget = target
         animStart = preciseValue
         animDuration = durationSec
@@ -257,8 +252,7 @@ class PropertyControl(
             try {
                 val targetShape = WaveShape.valueOf(newShape)
                 modShape = targetShape
-                // Sync the spinner if the menu is open
-                modPanelShapeSpinner?.setSelection(targetShape.ordinal)
+                updateShapeButtonText()
             } catch (e: Exception) {}
         }
     }
@@ -278,94 +272,117 @@ class PropertyControl(
         if (isAnimating && animTarget != null) {
             animTime += deltaTime
             if (animTime >= animDuration) {
+                // End of Animation
                 preciseValue = animTarget!!
                 value = preciseValue.toInt()
                 modRateTarget?.let { preciseModRate = it; modRate = it.toInt() }
                 modDepthTarget?.let { preciseModDepth = it; modDepth = it.toInt() }
                 modRateTarget = null; modDepthTarget = null
                 isAnimating = false
-                mainSeekBar?.post { if (mainSeekBar?.progress != value) mainSeekBar?.progress = value }
+
+                // Final UI Sync
+                syncUiElements()
             } else {
+                // In Progress Animation
                 preciseValue = animStart + (animTarget!! - animStart) * ease
+                value = preciseValue.toInt() // Update Integer value for UI
+
                 modRateTarget?.let { preciseModRate = modRateStart + (it - modRateStart) * ease }
                 modDepthTarget?.let { preciseModDepth = modDepthStart + (it - modDepthStart) * ease }
-            }
 
-            // Sync the open modulation panel UI elements
-            modPanelSpeedSeekBar?.progress = preciseModRate.toInt()
-            modPanelDepthSeekBar?.progress = preciseModDepth.toInt()
+                // CHANGED: Live Sync during transition
+                syncUiElements()
+            }
         }
 
-        // 2. Base Value (Normalized 0.0 - 1.0)
+        // 2. Base Value
         val baseNorm = preciseValue / max.toFloat()
 
         // 3. LFO Physics
         if (!hasModulation || (preciseModRate == 0f && preciseModDepth == 0f && modDepthTarget == null)) {
             lastComputedNormalized = baseNorm
+            updateLiveValueUI(value) // Show base value if no mod
             return
         }
 
         val baseSpeed = (preciseModRate / 1000f + 0.05f).pow(3f)
         lfoPhase += baseSpeed * deltaTime * 2.0 * Math.PI
-        if (lfoPhase > 2.0 * Math.PI) lfoPhase -= 2.0 * Math.PI // Keep phase stable
+        if (lfoPhase > 2.0 * Math.PI) lfoPhase -= 2.0 * Math.PI
 
-        // GENERATE UNIPOLAR WAVES (0.0 to 1.0)
         val rawWave: Double = when (modShape) {
             WaveShape.SINE -> sin(lfoPhase) * 0.5 + 0.5
-            WaveShape.TRIANGLE -> {
-                val p = (lfoPhase / (2.0 * Math.PI))
-                if (p < 0.5) p * 2.0 else 2.0 - (p * 2.0)
+            WaveShape.TRIANGLE -> { val p = (lfoPhase / (2.0 * Math.PI)); if (p < 0.5) p * 2.0 else 2.0 - (p * 2.0) }
+            WaveShape.RAMP -> (lfoPhase / (2.0 * Math.PI)) % 1.0
+            WaveShape.WOBBLE_SINE -> {
+                // Phase distortion for wobble effect
+                val w = sin(lfoPhase + sin(lfoPhase))
+                w * 0.5 + 0.5
             }
-            WaveShape.RAMP -> (lfoPhase / (2.0 * Math.PI)) % 1.0 // 0 -> 1 Sawtooth (Perfect for rotation)
-            WaveShape.SQUARE -> if (sin(lfoPhase) > 0) 1.0 else 0.0
             WaveShape.RANDOM_SMOOTH -> (sin(lfoPhase) * 0.5 + 0.5 + sin(lfoPhase * 2.3) * 0.2) / 1.4
             WaveShape.RANDOM_STEP -> Math.random()
         }
 
-        // Depth is squared for smoother control at low values
         val depthNorm = (preciseModDepth / 1000f).pow(2f)
 
-        // 4. COMBINE: The new Logic
         val targetVal = if (modMode == ModMode.WRAP) {
-            // WRAP: Additive, loops around 1.0.
-            // Great for Angles. Ramp wave 0->1 will cause continuous perfect rotation.
             (baseNorm + (rawWave * depthNorm)) % 1.0f
         } else {
-            // CLAMP: "Added to low limit... percentage of left space"
-            // If base is 0.2, depth is 1.0, wave goes 0..1 -> Output goes 0.2 .. 1.0
-            // Logic: Base + (Wave * Depth * AvailableSpace)
             baseNorm + (rawWave.toFloat() * depthNorm * (1.0f - baseNorm))
         }
 
-        // 5. Blending Logic (Handover)
         lastComputedNormalized = if (isAnimating) {
             (modSnapshotValue * (1.0f - ease)) + (targetVal.toFloat() * ease)
         } else {
             targetVal.toFloat()
         }
 
+        // Visual Updates
         modIndicator?.postInvalidate()
+
+        // Calculate the actual integer value being represented by the modulation right now
+        val displayVal = (lastComputedNormalized * max).toInt()
+        updateLiveValueUI(displayVal)
     }
 
-    // Used for backwards compatibility if needed, but computedValue is preferred
-    fun getNormalized(): Float = preciseValue / max.toFloat()
+    private fun syncUiElements() {
+        // Sync main slider
+        mainSeekBar?.post { if (mainSeekBar?.progress != value) mainSeekBar?.progress = value }
 
-    // Used for visual indicator sizing
-    fun getModDepthNormalized(): Float = (preciseModDepth / 1000f).pow(2f)
+        // Sync menu elements if open
+        if (activeControl == this) {
+            baseValueInput?.post {
+                // Only update text if user isn't typing
+                if (baseValueInput?.hasFocus() == false) {
+                    baseValueInput?.setText(value.toString())
+                }
+            }
+            modPanelSpeedSeekBar?.post { modPanelSpeedSeekBar?.progress = preciseModRate.toInt() }
+            modPanelDepthSeekBar?.post { modPanelDepthSeekBar?.progress = preciseModDepth.toInt() }
+        }
+    }
 
-    // Deprecated mapping helper (since mapping is now done internally via outMin/outMax)
-    // Kept to avoid breaking older calls if any exist, but updated to use new logic
-    fun getMapped(dummyMin: Float, dummyMax: Float): Float = computedValue
+    private fun updateLiveValueUI(v: Int) {
+        if (activeControl == this && liveValueDisplay != null) {
+            liveValueDisplay?.post {
+                liveValueDisplay?.text = "$v"
+            }
+        }
+    }
 
     fun setProgress(v: Int) {
         if (isAnimating) stopAnimation()
-        if (activeControl != null && activeControl != this) closeActiveMenu()
         val clamped = v.coerceIn(min, max)
         value = clamped
         preciseValue = clamped.toFloat()
+
         if (mainSeekBar != null && mainSeekBar!!.progress != clamped) {
             mainSeekBar!!.progress = clamped
         }
+
+        if (activeControl == this && baseValueInput != null && !baseValueInput!!.hasFocus()) {
+            baseValueInput!!.setText("$clamped")
+        }
+
         onValueChanged?.invoke(clamped)
     }
 
@@ -380,122 +397,63 @@ class PropertyControl(
         updateIndicatorVisuals()
     }
 
-    fun setAnimatedValue(v: Float) {
-        preciseValue = v.coerceIn(min.toFloat(), max.toFloat())
-        val intVal = preciseValue.toInt()
-        if (intVal != value) {
-            value = intVal
-            mainSeekBar?.post { if (mainSeekBar?.progress != value) mainSeekBar?.progress = value }
-        }
-    }
-
     fun reset() {
         stopAnimation()
         setProgress(defaultValue)
         if (hasModulation) {
             updateModRate(200)
             updateModDepth(0)
-            // Reset to default shape for the mode
             modShape = if (modMode == ModMode.WRAP) WaveShape.RAMP else WaveShape.SINE
             updateIndicatorVisuals()
+            updateShapeButtonText()
         }
     }
 
     fun attachTo(parent: ViewGroup) {
-        mainSeekBar = null
-        modIndicator = null
-        mainRowLayout = null
-
-        val container = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 2, 0, 6)
-        }
-
-        val labelView = TextView(context).apply {
-            text = label
-            setTextColor(Color.WHITE)
-            textSize = 10f
-            setTypeface(null, Typeface.BOLD)
-            alpha = 0.85f
-            setOnClickListener { reset() }
-        }
+        mainSeekBar = null; modIndicator = null; mainRowLayout = null
+        val container = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 2, 0, 6) }
+        val labelView = TextView(context).apply { text = label; setTextColor(Color.WHITE); textSize = 10f; setTypeface(null, Typeface.BOLD); alpha = 0.85f; setOnClickListener { reset() } }
         container.addView(labelView)
-
-        val row = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 55)
-        }
+        val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 55) }
         this.mainRowLayout = row
 
         val sb = SeekBar(context).apply {
-            max = this@PropertyControl.max
-            progress = value
-            thumb = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setSize(30, 30)
-                cornerRadius = 15f
-            }
-            thumbOffset = 0
-            splitTrack = false
+            max = this@PropertyControl.max; progress = value; thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }; thumbOffset = 0; splitTrack = false
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         this.mainSeekBar = sb
-
         sb.setOnTouchListener { v, event ->
             v.parent.requestDisallowInterceptTouchEvent(true)
             if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_DOWN) {
                 stopAnimation()
-                if (activeControl != null && activeControl != this@PropertyControl) {
-                    closeActiveMenu()
-                }
+                if (activeControl != null && activeControl != this@PropertyControl) closeActiveMenu()
             }
-            if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_UP) {
-                v.parent.requestDisallowInterceptTouchEvent(false)
-            }
-            v.onTouchEvent(event)
-            true
+            if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_UP) v.parent.requestDisallowInterceptTouchEvent(false)
+            v.onTouchEvent(event); true
         }
-
         sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                if (fromUser) setProgress(p)
-            }
+            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { if (fromUser) setProgress(p) }
             override fun onStartTrackingTouch(s: SeekBar?) {}
             override fun onStopTrackingTouch(s: SeekBar?) {}
         })
-
         row.addView(sb)
 
         if (hasModulation) {
             modIndicator = object : View(context) {
                 private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
                 override fun onDraw(canvas: Canvas) {
-                    val cx = width / 2f
-                    val cy = height / 2f
-                    val r = (Math.min(width, height) / 2f) - 2f
-                    val active = modDepth > 0
-                    paint.style = Paint.Style.STROKE
-                    paint.strokeWidth = 3f
-                    paint.color = Color.WHITE
-                    paint.alpha = 255
+                    val cx = width / 2f; val cy = height / 2f; val r = (Math.min(width, height) / 2f) - 2f; val active = modDepth > 0
+                    paint.style = Paint.Style.STROKE; paint.strokeWidth = 3f; paint.color = Color.WHITE; paint.alpha = 255
                     canvas.drawCircle(cx, cy, r, paint)
-                    paint.style = Paint.Style.FILL
-                    paint.color = if (active) Color.WHITE else Color.LTGRAY
-                    paint.alpha = if (active) 255 else 100
+                    paint.style = Paint.Style.FILL; paint.color = if (active) Color.WHITE else Color.LTGRAY; paint.alpha = if (active) 255 else 100
                     var dotRadius = r * 0.3f
                     if (active) {
-                        // Visualize the unipolar LFO directly
-                        // We calculate the pure wave component for visualization
                         val waveVal = if (preciseModDepth > 0) (lastComputedNormalized - (preciseValue/max)) / (preciseModDepth/1000f) else 0f
                         dotRadius = (r * (0.3 + (abs(waveVal)*0.7))).toFloat()
                     }
                     canvas.drawCircle(cx, cy, dotRadius, paint)
                 }
-            }.apply {
-                layoutParams = LinearLayout.LayoutParams(55, 55).apply { leftMargin = 15 }
-                setOnClickListener { toggleMenu() }
-            }
+            }.apply { layoutParams = LinearLayout.LayoutParams(55, 55).apply { leftMargin = 15 }; setOnClickListener { toggleMenu() } }
             row.addView(modIndicator)
         }
         container.addView(row)
@@ -503,10 +461,11 @@ class PropertyControl(
     }
 
     private fun updateIndicatorVisuals() { modIndicator?.invalidate() }
-
-    fun toggleMenu() {
-        if (activeControl == this) closeMenu() else { activeControl?.closeMenu(); openMenu() }
+    private fun updateShapeButtonText() {
+        shapeBtn?.text = modShape.name
     }
+
+    fun toggleMenu() { if (activeControl == this) closeMenu() else { activeControl?.closeMenu(); openMenu() } }
 
     private fun openMenu() {
         val activity = context as? MainActivity ?: return
@@ -516,13 +475,13 @@ class PropertyControl(
 
         floatingPanel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(20, 20, 20, 20)
+            setPadding(30, 30, 30, 30)
             background = GradientDrawable().apply {
-                setColor(Color.argb(240, 20, 20, 20))
+                setColor(Color.argb(245, 15, 15, 15)) // Darker, opaque background
                 cornerRadius = 20f
                 setStroke(2, Color.GRAY)
             }
-            elevation = 30f
+            elevation = 40f
             isClickable = true
             layoutParams = if (isPortrait) {
                 val menuHeight = (dm.heightPixels * 0.40).toInt()
@@ -532,31 +491,127 @@ class PropertyControl(
             }
         }
 
+        // --- TITLE (Just Label) ---
         floatingPanel?.addView(TextView(context).apply {
-            text = "$label MODULATION"; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.WHITE); gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 15 }
+            text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY); gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 }
         })
 
-        val shapeRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 } }
-        shapeRow.addView(TextView(context).apply { text="SHAPE"; textSize=10f; setTextColor(Color.LTGRAY); layoutParams=LinearLayout.LayoutParams(120, -2) })
+        // --- NUMERIC CONTROL ROW ---
+        val numRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 140).apply { bottomMargin = 10 }
+        }
 
-        modPanelShapeSpinner = Spinner(context).apply {
-            adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, WaveShape.values())
-            setSelection(modShape.ordinal)
-            background.setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_ATOP)
-            layoutParams = LinearLayout.LayoutParams(0, 70, 1f)
-            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(p0: AdapterView<*>?, p1: View?, pos: Int, p3: Long) { modShape = WaveShape.values()[pos]; (p0?.getChildAt(0) as? TextView)?.setTextColor(Color.WHITE) }
-                override fun onNothingSelected(p0: AdapterView<*>?) {}
+        // Decrement Button (Weight 1)
+        val btnDec = createNumButton("-") { setProgress(value - 1) }
+
+        // Input Box (Weight 1.5, Centered)
+        baseValueInput = EditText(context).apply {
+            setText(value.toString())
+            textSize = 28f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            background = null
+            setPadding(0, 10, 0, 0) // Push text down a bit to ensure top isn't cropped
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            filters = arrayOf(android.text.InputFilter.LengthFilter(4))
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            // Use weight to fill space between buttons
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.5f)
+
+            setOnEditorActionListener { v, actionId, _ ->
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                    try {
+                        val num = v.text.toString().toIntOrNull() ?: value
+                        setProgress(num)
+                        v.clearFocus()
+                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                        imm.hideSoftInputFromWindow(v.windowToken, 0)
+                        (context as? MainActivity)?.hideSystemUI()
+                    } catch (e: Exception) {}
+                    true
+                } else false
             }
         }
-        shapeRow.addView(modPanelShapeSpinner)
-        floatingPanel?.addView(shapeRow)
+
+        // Increment Button (Weight 1)
+        val btnInc = createNumButton("+") { setProgress(value + 1) }
+
+        numRow.addView(btnDec); numRow.addView(baseValueInput); numRow.addView(btnInc)
+        floatingPanel?.addView(numRow)
+
+        // --- LIVE REALTIME VALUE (Just Number, Grey) ---
+        val liveRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 }
+        }
+        liveValueDisplay = TextView(context).apply {
+            text = "$value"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY) // Grey
+        }
+        liveRow.addView(liveValueDisplay)
+        floatingPanel?.addView(liveRow)
+
+        // --- SEPARATOR ---
+        floatingPanel?.addView(View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(-1, 2).apply { bottomMargin = 20 }
+            setBackgroundColor(Color.DKGRAY)
+        })
+
+        // --- SHAPE CYCLE BUTTON ---
+        // Just the name, bigger text, PERFECTLY CENTERED
+        shapeBtn = Button(context).apply {
+            text = modShape.name
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            includeFontPadding = false // Important for vertical centering
+            setPadding(0, 0, 0, 0)   // Important for vertical centering
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#444444"))
+                cornerRadius = 10f
+                setStroke(1, Color.GRAY)
+            }
+            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 25 }
+            setOnClickListener {
+                val nextOrdinal = (modShape.ordinal + 1) % WaveShape.values().size
+                modShape = WaveShape.values()[nextOrdinal]
+                text = modShape.name
+            }
+        }
+        floatingPanel?.addView(shapeBtn)
 
         modPanelSpeedSeekBar = addSliderToPanel("SPEED", modRate) { updateModRate(it) }
         modPanelDepthSeekBar = addSliderToPanel("DEPTH", modDepth) { updateModDepth(it); updateIndicatorVisuals() }
 
         rootLayout.addView(floatingPanel)
         activeControl = this
+    }
+
+    private fun createNumButton(txt: String, action: () -> Unit): Button {
+        return Button(context).apply {
+            text = txt
+            textSize = 24f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setPadding(0, 0, 0, 0)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#333333"))
+                cornerRadius = 15f
+                setStroke(1, Color.GRAY)
+            }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                setMargins(5, 5, 5, 5)
+            }
+            setOnClickListener { action() }
+        }
     }
 
     private fun addSliderToPanel(name: String, current: Int, onChange: (Int) -> Unit): SeekBar {
@@ -580,15 +635,23 @@ class PropertyControl(
 
     fun closeMenu() {
         if (floatingPanel != null) {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+            baseValueInput?.windowToken?.let { imm?.hideSoftInputFromWindow(it, 0) }
+
             (context as? MainActivity)?.overlayHUD?.removeView(floatingPanel)
             floatingPanel = null
             modPanelSpeedSeekBar = null
             modPanelDepthSeekBar = null
-            modPanelShapeSpinner = null
+            liveValueDisplay = null
+            baseValueInput = null
+            shapeBtn = null
+
+            (context as? MainActivity)?.hideSystemUI()
         }
         if (activeControl == this) activeControl = null
     }
 }
+
 
 
 // --- MAIN ACTIVITY ---
@@ -813,6 +876,13 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            hideSystemUI()
+        }
+    }
+
     private fun startRtsp(url: String) {
         val cpFuture = ProcessCameraProvider.getInstance(this)
         cpFuture.addListener({ try { cpFuture.get().unbindAll() } catch (e: Exception) {} }, ContextCompat.getMainExecutor(this))
@@ -946,9 +1016,18 @@ class MainActivity : AppCompatActivity() {
 
         val presetParams = FrameLayout.LayoutParams(-2, -2).apply {
             if (isPortrait) {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; bottomMargin = 60; presetPanel.scaleX = 0.85f; presetPanel.scaleY = 0.85f
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                bottomMargin = 50
+                rightMargin = 44
+                // No extra scaling needed with the new dimensions
+                presetPanel.scaleX = 1.0f
+                presetPanel.scaleY = 1.0f
             } else {
-                gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 15; rightMargin = 400; presetPanel.scaleX = 1.0f; presetPanel.scaleY = 1.0f
+                gravity = Gravity.BOTTOM or Gravity.END
+                bottomMargin = 15
+                rightMargin = 400
+                presetPanel.scaleX = 1.1f
+                presetPanel.scaleY = 1.1f
             }
         }
         overlayHUD.addView(presetPanel, presetParams)
@@ -1197,12 +1276,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createPresetPanel(): LinearLayout {
-        presetPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(15, 10, 15, 30) }
-        val transContainer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(10, 0, 10, 10) }
-        val timeLabel = TextView(this).apply { text = "1.0s"; setTextColor(Color.WHITE); textSize = 9f; setPadding(4, 0, 8, 0) }
+        presetPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(10, 10, 10, 10)
+            clipChildren = false
+            clipToPadding = false
+        }
+
+        // --- Transition Time Control ---
+        val transContainer = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(10, 0, 0, 15)
+        }
+        val timeLabel = TextView(this).apply {
+            text = "1.0s"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setPadding(4, 0, 8, 0)
+        }
         val transSeekBar = SeekBar(this).apply {
-            max = 1000; progress = 333; layoutParams = LinearLayout.LayoutParams(500, 45)
-            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
+            max = 1000
+            progress = 333
+            // INCREASED WIDTH to ~750px to match the target phone width feel
+            layoutParams = LinearLayout.LayoutParams(660, 55)
+            thumb = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setSize(38, 38)
+                cornerRadius = 19f
+            }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
                     transitionMs = ((p / 1000f).pow(3.0f) * 30000).toLong()
@@ -1212,21 +1314,82 @@ class MainActivity : AppCompatActivity() {
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
         }
-        transContainer.addView(ImageView(this).apply { setImageDrawable(createClockDrawable()); alpha = 0.5f; layoutParams = LinearLayout.LayoutParams(45, 45).apply { rightMargin = 10 } })
-        transContainer.addView(timeLabel); transContainer.addView(transSeekBar)
+        transContainer.addView(ImageView(this).apply {
+            setImageDrawable(createClockDrawable())
+            alpha = 0.5f
+            layoutParams = LinearLayout.LayoutParams(50, 50).apply { rightMargin = 10 }
+        })
+        transContainer.addView(timeLabel)
+        transContainer.addView(transSeekBar)
+
+
+        // --- Preset Buttons ---
         val presetRow = FrameLayout(this)
-        val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        (8 downTo 1).forEach { idx ->
-            val b = Button(this).apply {
-                text = idx.toString(); setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT); alpha = 0.8f; textSize = 16f; layoutParams = LinearLayout.LayoutParams(80, 140); setPadding(0, 0, 0, 20)
-                setOnClickListener { applyPreset(idx) }
-                setOnLongClickListener { pendingSaveIndex = idx; saveConfirmBtn.visibility = View.VISIBLE; saveConfirmBtn.text = "SAVE $idx?"; true }
-            }
-            presetButtons[idx] = b; btnRow.addView(b)
+
+        val scroller = HorizontalScrollView(this).apply {
+            isFillViewport = true
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-        saveConfirmBtn = Button(this).apply { visibility = View.GONE; setTextColor(Color.BLACK); textSize = 12f; setTypeface(null, Typeface.BOLD); background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = 8f }; layoutParams = FrameLayout.LayoutParams(250, 100, Gravity.CENTER); setOnClickListener { pendingSaveIndex?.let { savePreset(it) }; visibility = View.GONE } }
-        presetRow.addView(btnRow); presetRow.addView(saveConfirmBtn)
-        presetPanel.addView(transContainer); presetPanel.addView(presetRow)
+
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        // Loop 9 downTo 1
+        (9 downTo 1).forEach { idx ->
+            val b = Button(this).apply {
+                text = idx.toString()
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.TRANSPARENT)
+                alpha = 0.8f
+
+                // ADJUSTED SIZE: Slightly smaller than previous, but larger than original
+                textSize = 20f
+                typeface = Typeface.DEFAULT_BOLD
+                layoutParams = LinearLayout.LayoutParams(83, 160).apply {
+                    // TIGHTER SPACING: Only 2px margin
+                    setMargins(2, 0, 2, 0)
+                }
+                setPadding(0, 0, 0, 5)
+                setOnClickListener { applyPreset(idx) }
+                setOnLongClickListener {
+                    pendingSaveIndex = idx
+                    saveConfirmBtn.visibility = View.VISIBLE
+                    saveConfirmBtn.text = "SAVE $idx?"
+                    true
+                }
+            }
+            presetButtons[idx] = b
+            btnRow.addView(b)
+        }
+
+        scroller.addView(btnRow)
+        presetRow.addView(scroller)
+
+        // Save Confirm Button
+        saveConfirmBtn = Button(this).apply {
+            visibility = View.GONE
+            setTextColor(Color.BLACK)
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadius = 12f
+            }
+            layoutParams = FrameLayout.LayoutParams(280, 110, Gravity.CENTER)
+            setOnClickListener {
+                pendingSaveIndex?.let { savePreset(it) }
+                visibility = View.GONE
+            }
+        }
+        presetRow.addView(saveConfirmBtn)
+
+        presetPanel.addView(transContainer)
+        presetPanel.addView(presetRow)
+
         return presetPanel
     }
 
@@ -1444,8 +1607,16 @@ class MainActivity : AppCompatActivity() {
         flipXBtn.alpha = if (renderer.flipX < 0f) 1.0f else 0.3f; flipYBtn.alpha = if (renderer.flipY > 0f) 1.0f else 0.3f; rot180Btn.alpha = if (renderer.rot180) 1.0f else 0.3f
     }
 
-    private fun hideSystemUI() {
-        window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION)
+    fun hideSystemUI() {
+        // Enables "Immersive Sticky" mode.
+        // The layout is laid out as if the screen is full (LAYOUT_FULLSCREEN),
+        // preventing resizing/squeezing when bars appear briefly.
+        window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_FULLSCREEN)
     }
 
     private fun applyPreset(idx: Int) {
@@ -1778,13 +1949,41 @@ class MainActivity : AppCompatActivity() {
             "CONTRAST", 786, "VIBRANCE", 828
         )
 
+        presets[9] = p(6, // High Axis for complex geometry
+            "3D_MIX", 1000,          // Fully 3D
+            "S_FOV", 600,            // Moderate FOV
+            "S_SPEED", 150,          // Slow, graceful forward movement
+
+            // "Breathing" Geometry: Modulate Shape between Circle and Square slowly
+            "S_SHAPE", 0, 150, 600, "SINE",
+
+            // Subtle Zoom breathing synced roughly with shape
+            "M_ZOOM", 120, 150, 200, "SINE",
+
+            // Slow, constant rotation to keep it dynamic but not dizzying
+            "M_ANGLE", 0, 60, 1000, "RAMP",
+
+            // Deep Color Cycle
+            "HUE", 0, 80, 1000, "RAMP",
+            "VIBRANCE", 600,
+            "GLOW", 600,             // High glow for "Neon" look
+            "RGB", 150,              // Slight chromatic aberration for "Wild" edge
+
+            // Center the view
+            "M_TX", 500, "M_TY", 500,
+            "M_TILTX", 500, "M_TILTY", 500
+        )
+
         // Load saved overrides from SharedPreferences
         val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
-        for (i in 1..8) {
+        // UPDATED LOOP LIMIT TO 9
+        for (i in 1..9) {
             val jsonStr = prefs.getString("PRESET_$i", null)
             if (jsonStr != null) {
+                // ... (Keep existing loading logic) ...
                 try {
                     val rootObj = JSONObject(jsonStr)
+                    // ... (rest of parsing logic) ...
                     val loadedAxis = rootObj.getInt("axis")
                     val loadedFlipX = rootObj.getDouble("flipX").toFloat()
                     val loadedFlipY = rootObj.getDouble("flipY").toFloat()
