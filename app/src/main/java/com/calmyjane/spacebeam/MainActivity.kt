@@ -1837,10 +1837,11 @@ class MainActivity : AppCompatActivity() {
                     float rCircle = length(uv); float rBox = max(abs(uv.x), abs(uv.y)); float dist = mix(rCircle, rBox, uSShape);
                     float angle = atan(uv.y, uv.x); dist += sin(angle * 4.0 + dist * 10.0) * uFlux * dist; float safeDist = max(dist, 0.01);
                     float projection = (uSFov * 0.8 + 0.2) / safeDist;
-                    vec2 tunnelUV; tunnelUV.x = (angle + (1.0/safeDist) * uTwist) / 3.14159; tunnelUV.y = projection + uScroll;
+                    vec2 tunnelUV; tunnelUV.x = (angle + (1.0/safeDist) * uTwist) / 3.14159; tunnelUV.y = projection;
                     if(abs(uCurve - 1.0) > 0.01) tunnelUV *= 1.0 + (uCurve - 1.0) * (1.0 - safeDist);
                     vec2 flatUV = uv; flatUV.x /= uA;
                     vec2 mixedUV = mix(flatUV, tunnelUV * 0.8, modeBlend);
+                    mixedUV.y += uScroll;
                     vec2 cameraUV = abs(mod(mixedUV + 1.0, 2.0) - 1.0);
                     float sOff = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
                     vec3 smp = sampleCamera(cameraUV, sOff);
@@ -1940,7 +1941,7 @@ class MainActivity : AppCompatActivity() {
             val sign = sign(rawVal)
             val curvedSpeed = sign * (abs(rawVal) * 2.0f).pow(2.2f)
             scrollAccum += curvedSpeed * d * 0.6f
-            scrollAccum %= 2.5f
+            scrollAccum %= 2.0f
             val mRotCtrl = ctx.controlsMap["M_ROT"] ?: return
             mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
             val cRotCtrl = ctx.controlsMap["C_ROT"] ?: return
