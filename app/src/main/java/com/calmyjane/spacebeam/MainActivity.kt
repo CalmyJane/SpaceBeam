@@ -1453,7 +1453,6 @@ class MainActivity : AppCompatActivity() {
         activePreset = idx
         updatePresetHighlights()
 
-        // FIXED: Use GL Thread Animation (No ValueAnimator)
         val durationSec = transitionMs / 1000f
 
         if (!axisLocked) {
@@ -1486,11 +1485,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-
-        renderer.flipX = p.flipX
-        renderer.flipY = p.flipY
-        renderer.rot180 = p.rot180
         updateSidebarVisuals()
+
+        dumpPresetToLog("APPLIED_PRESET_\$idx")
+
     }
 
     private fun savePreset(idx: Int) {
@@ -1516,6 +1514,38 @@ class MainActivity : AppCompatActivity() {
             getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE).edit().putString("PRESET_$idx", rootObj.toString()).apply()
             Toast.makeText(this, "Preset $idx Saved", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) { Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show() }
+
+    }
+
+    // Add this helper function inside MainActivity
+    private fun dumpPresetToLog(source: String) {
+        val debugObj = JSONObject()
+        try {
+            debugObj.put("source", source)
+            debugObj.put("axis", renderer.axisCount.toInt())
+            debugObj.put("flipX", renderer.flipX.toDouble())
+            debugObj.put("flipY", renderer.flipY.toDouble())
+            debugObj.put("rot180", renderer.rot180)
+
+            val controlsObj = JSONObject()
+            controls.forEach { c ->
+                val snap = JSONObject()
+                snap.put("v", c.value)
+                if (c.hasModulation) {
+                    snap.put("r", c.modRate)
+                    snap.put("d", c.modDepth)
+                    snap.put("shape", c.modShape.name)
+                }
+                controlsObj.put(c.id, snap)
+            }
+            debugObj.put("controls", controlsObj)
+
+            // Single line, no formatting, red text for visibility
+            Log.e("PRESET_DUMP", debugObj.toString())
+
+        } catch (e: Exception) {
+            Log.e("PRESET_DUMP", "Failed to log preset", e)
+        }
     }
 
     private fun createLockedIconDrawable(locked: Boolean): BitmapDrawable {
@@ -1598,33 +1628,160 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initDefaultPresets() {
-        fun p(ax: Int = 1, mRot: Int = 500, vararg overrides: Any): Preset {
+        fun p(ax: Int, vararg overrides: Any): Preset {
             val baseSnapshots = controls.associate { it.id to it.getSnapshot() }.toMutableMap()
-            baseSnapshots["M_ROT"] = PropertyControl.Snapshot(mRot, false, 0, 0, "SINE")
+
+            // Default M_ANGLE to 0 if not specified
+            if (!overrides.contains("M_ANGLE")) {
+                baseSnapshots["M_ANGLE"] = PropertyControl.Snapshot(0, false, 0, 0, "SINE")
+            }
+
             var i = 0
             while (i < overrides.size) {
                 val key = overrides[i] as String
                 val value = overrides[i + 1] as Int
+
+                // Check if next args are Modulation (Rate/Depth)
                 if (i + 3 < overrides.size && overrides[i + 2] is Int && overrides[i + 3] is Int) {
-                    val rate = overrides[i + 2] as Int; val depth = overrides[i + 3] as Int
-                    baseSnapshots[key] = PropertyControl.Snapshot(value, true, rate, depth, "SINE")
-                    i += 4
+                    val rate = overrides[i + 2] as Int
+                    val depth = overrides[i + 3] as Int
+
+                    var shape = "SINE"
+                    var step = 4
+
+                    // FIX: Check if the next argument is a String AND if it is a valid WaveShape.
+                    // If it's just the next Key (like "M_ZOOM"), we must NOT consume it here.
+                    if (i + 4 < overrides.size && overrides[i + 4] is String) {
+                        val potentialShape = overrides[i + 4] as String
+                        val isValidShape = try {
+                            PropertyControl.WaveShape.valueOf(potentialShape)
+                            true
+                        } catch (e: IllegalArgumentException) {
+                            false
+                        }
+
+                        if (isValidShape) {
+                            shape = potentialShape
+                            step = 5
+                        }
+                    }
+
+                    baseSnapshots[key] = PropertyControl.Snapshot(value, true, rate, depth, shape)
+                    i += step
                 } else {
+                    // Static value
                     baseSnapshots[key] = PropertyControl.Snapshot(value, false, 0, 0, "SINE")
                     i += 2
                 }
             }
             return Preset(baseSnapshots, 1f, -1f, false, ax)
         }
-        presets[1] = p(ax = 2, mRot = 500, "M_ZOOM", 300, 139, 307, "WARP", 1000, 0, 0)
-        presets[2] = p(ax = 2, mRot = 615, "M_ZOOM", 248, 293, 383, "WARP", 1000, 0, 0)
-        presets[3] = p(ax = 2, mRot = 673, "M_ZOOM", 268, 293, 559, "M_TILTX", 553, 305, 880, "M_TILTY", 500, 353, 1000, "WARP", 1000, 0, 0)
-        presets[4] = p(ax = 2, mRot = 673, "M_ZOOM", 268, 293, 517, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 880, "M_TILTY", 500, 353, 1000, "WARP", 1000, 0, 0)
-        presets[5] = p(ax = 2, mRot = 673, "M_ZOOM", 359, 293, 517, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 577, "M_TILTY", 500, 353, 854, "C_ROT", 657, 0, 0, "WARP", 0, 0, 0)
-        presets[6] = p(ax = 2, mRot = 673, "M_ZOOM", 268, 293, 517, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 1000, "M_TILTY", 500, 353, 1000, "C_ROT", 657, 0, 0, "WARP", 0, 0, 0, "C_TX", 500, 389, 739, "C_TY", 500, 209, 763, "GLOW", 164, 395, 129)
-        presets[7] = p(ax = 2, mRot = 673, "M_ZOOM", 912, 293, 740, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 1000, "M_TILTY", 500, 353, 1000, "C_ROT", 657, 0, 0, "WARP", 0, 0, 0, "C_TX", 500, 389, 739, "C_TY", 500, 209, 763, "C_TILTX", 500, 287, 677, "C_TILTY", 500, 443, 557, "GLOW", 164, 395, 129)
-        presets[8] = p(ax = 2, mRot = 673, "M_ZOOM", 268, 293, 517, "M_TX", 500, 159, 624, "M_TY", 500, 309, 753, "M_TILTX", 553, 305, 1000, "M_TILTY", 500, 353, 1000, "C_ROT", 657, 0, 0, "WARP", 0, 0, 0, "C_TX", 500, 389, 739, "C_TY", 500, 209, 763, "C_TILTX", 500, 287, 677, "C_TILTY", 500, 443, 557, "RGB", 957, 0, 0, "GLOW", 164, 395, 129)
 
+        // 1. Standard Mirror
+        presets[1] = p(2, "M_ZOOM", 49, "M_TX", 689, "M_TY", 608, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
+
+        // 2. Simple Zoom
+        presets[2] = p(2, "M_ZOOM", 130, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
+
+        // 3. Complex Modulation A
+        presets[3] = p(2,
+            "M_ANGLE", 172, 262, 287,
+            "M_ZOOM", 160, 531, 316,
+            "M_TX", 500, 235, 184,
+            "M_TY", 500, 217, 218,
+            "M_TILTX", 500, 242, 305,
+            "M_TILTY", 500, 318, 343,
+            "C_ZOOM", 500, 583, 365,
+            "HUE", 184, 298, 505,
+            "GLOW", 172,
+            "CONTRAST", 718,
+            "VIBRANCE", 899
+        )
+
+        // 4. Complex Modulation B
+        presets[4] = p(2,
+            "M_ANGLE", 172, 262, 287,
+            "M_ZOOM", 518, 531, 576,
+            "M_TX", 500, 431, 525,
+            "M_TY", 500, 217, 644,
+            "M_TILTX", 500, 498, 1000,
+            "M_TILTY", 500, 318, 1000,
+            "C_ZOOM", 500, 583, 365,
+            "GLOW", 485,
+            "CONTRAST", 788,
+            "VIBRANCE", 899
+        )
+
+        // 5. 3D Tunnel Entry
+        presets[5] = p(2,
+            "3D_MIX", 1000,
+            "S_FOV", 884,
+            "M_ANGLE", 172, 262, 287,
+            "M_ZOOM", 130, 200, 0,
+            "M_TX", 500, 431, 40,
+            "M_TY", 500, 217, 34, "RANDOM_SMOOTH",
+            "M_TILTX", 500, 498, 303,
+            "M_TILTY", 500, 318, 345,
+            "C_ZOOM", 500, 583, 365,
+            "GLOW", 178,
+            "CONTRAST", 522,
+            "VIBRANCE", 853
+        )
+
+        // 6. 3D Tunnel Wave
+        presets[6] = p(2,
+            "3D_MIX", 1000,
+            "S_SHAPE", 0, 343, 0,
+            "S_SPEED", 206,
+            "S_FOV", 481,
+            "T_WAVE_STR", 454,
+            "T_WAVE_POS", 20, 375, 1000, "RAMP",
+            "M_ANGLE", 870,
+            "M_ZOOM", 77,
+            "M_TX", 500, 320, 328,
+            "M_TY", 500, 323, 343,
+            "M_TILTY", 500, 318, 0, "RANDOM_SMOOTH",
+            "C_ZOOM", 500, 583, 0,
+            "GLOW", 178,
+            "CONTRAST", 522,
+            "VIBRANCE", 853
+        )
+
+        // 7. 3D Tunnel Chaos
+        presets[7] = p(2,
+            "3D_MIX", 1000,
+            "S_SHAPE", 1000, 343, 785,
+            "S_FOV", 481, 496, 704,
+            "S_SPEED", 1000,
+            "M_ANGLE", 172, 262, 287,
+            "M_ZOOM", 160,
+            "M_TX", 500, 431, 40,
+            "M_TY", 500, 217, 34,
+            "M_TILTX", 500, 498, 303,
+            "M_TILTY", 500, 318, 469,
+            "C_ZOOM", 500, 583, 365,
+            "RGB", 490, 534, 634,
+            "GLOW", 285,
+            "CONTRAST", 786,
+            "VIBRANCE", 828
+        )
+
+        // 8. Variation of Chaos
+        presets[8] = p(2,
+            "3D_MIX", 1000,
+            "S_SHAPE", 1000, 343, 785,
+            "S_FOV", 481, 496, 704,
+            "S_SPEED", 800,
+            "M_ANGLE", 500, 262, 287,
+            "M_ZOOM", 160,
+            "HUE", 500, 200, 1000, "RAMP",
+            "C_ZOOM", 500, 583, 365,
+            "GLOW", 285,
+            "CONTRAST", 786,
+            "VIBRANCE", 828
+        )
+
+        // Load saved overrides
         val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
         for (i in 1..8) {
             val jsonStr = prefs.getString("PRESET_$i", null)
@@ -1636,14 +1793,20 @@ class MainActivity : AppCompatActivity() {
                     val loadedFlipY = rootObj.getDouble("flipY").toFloat()
                     val loadedRot180 = rootObj.getBoolean("rot180")
                     val controlsObj = rootObj.getJSONObject("controls")
+
                     val loadedSnapshots = mutableMapOf<String, PropertyControl.Snapshot>()
                     loadedSnapshots.putAll(presets[i]?.controlSnapshots ?: emptyMap())
+
                     val keysIterator = controlsObj.keys()
                     while (keysIterator.hasNext()) {
                         val key = keysIterator.next()
                         val snapObj = controlsObj.getJSONObject(key)
                         loadedSnapshots[key] = PropertyControl.Snapshot(
-                            snapObj.getInt("v"), snapObj.optBoolean("active", false), snapObj.optInt("r", 0), snapObj.optInt("d", 0), snapObj.optString("shape", "SINE")
+                            snapObj.getInt("v"),
+                            snapObj.optBoolean("active", false),
+                            snapObj.optInt("r", 0),
+                            snapObj.optInt("d", 0),
+                            snapObj.optString("shape", "SINE")
                         )
                     }
                     presets[i] = Preset(loadedSnapshots, loadedFlipX, loadedFlipY, loadedRot180, loadedAxis)
