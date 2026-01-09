@@ -2096,16 +2096,35 @@ class MainActivity : AppCompatActivity() {
         }
 
         private fun updateMovementPhysics(d: Float) {
-            val speedCtrl = ctx.controlsMap["S_SPEED"] ?: return
-            val rawVal = speedCtrl.getNormalized() - 0.5f
-            val sign = sign(rawVal)
-            val curvedSpeed = sign * (abs(rawVal) * 2.0f).pow(2.2f)
-            scrollAccum += curvedSpeed * d * 0.6f
-            scrollAccum %= 2.0f
-            val mRotCtrl = ctx.controlsMap["M_ROT"] ?: return
-            mRotAccum += mRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
-            val cRotCtrl = ctx.controlsMap["C_ROT"] ?: return
-            cRotAccum += cRotCtrl.getMapped(-1.5f, 1.5f).toDouble().pow(3.0) * 120.0 * d.toDouble()
+            // 1. Handle Scroll (Tunnel) Physics
+            val speedCtrl = ctx.controlsMap["S_SPEED"]
+            if (speedCtrl != null) {
+                // Get the raw speed (-2.0 to 2.0)
+                val rawSpeed = speedCtrl.computedValue
+
+                // Standard movement
+                // We use a power curve for the speed to make low speeds more precise
+                val sign = sign(rawSpeed)
+                val curvedSpeed = sign * (abs(rawSpeed)).pow(2.2f)
+
+                scrollAccum += curvedSpeed * d * 0.6f
+
+                // --- THE SOFT LANDING FIX ---
+                // If speed is very low (effectively stopped), gently pull towards the nearest integer
+                if (abs(rawSpeed) < 0.05f) {
+                    val nearestCenter = round(scrollAccum)
+                    val distToCenter = nearestCenter - scrollAccum
+
+                    // The factor '3.0f' determines how fast it snaps to center.
+                    // using deltaTime ensures it is smooth regardless of frame rate.
+                    scrollAccum += distToCenter * d * 3.0f
+                }
+
+                // Keep the accumulator within reasonable bounds to prevent float precision issues
+                // (Assuming texture repeats every 1.0 or 2.0 units)
+                if (abs(scrollAccum) > 1000.0f) scrollAccum %= 2.0f
+            }
+
         }
 
         private fun renderToFBO() {
