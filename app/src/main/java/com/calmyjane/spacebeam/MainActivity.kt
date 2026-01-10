@@ -1684,6 +1684,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         createGroup("GEOMETRY", startOpen = true)
+        setupCameraOrientationControls(currentGroupContent!!)
         setupGeometrySpecifics(currentGroupContent!!)
 
         createGroup("3D")
@@ -1711,7 +1712,6 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl("M_RGB", "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.1f, hasModulation = true))
 
         createGroup("CAMERA TRANSFORM")
-        setupCameraOrientationControls(currentGroupContent!!)
         addControl(PropertyControl("C_ANGLE", "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
         addControl(PropertyControl("WARP", "WARP DISTORT", defaultValue = 0, outMin=0f, outMax=1f))
         addControl(PropertyControl("C_ZOOM", "ZOOM", defaultValue = 320, outMin=0.3f, outMax=2.5f, hasModulation = true))
