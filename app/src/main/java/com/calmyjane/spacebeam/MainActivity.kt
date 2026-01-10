@@ -1,3 +1,21 @@
+//SpaceBeam - A Kaleidoscope Camera Visual Synthesizer
+//Copyright (C) 2026 Jan Goebel
+//
+//This program is free software: you can redistribute it and/or modify
+//it under the terms of the GNU General Public License as published by
+//the Free Software Foundation, either version 3 of the License, or
+//(at your option) any later version.
+//
+//This program is distributed in the hope that it will be useful,
+//but WITHOUT ANY WARRANTY; without even the implied warranty of
+//MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//GNU General Public License for more details.
+//
+//You should have received a copy of the GNU General Public License
+//along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//Contact: info@calmyjane.com
+
 package com.calmyjane.spacebeam
 
 
@@ -57,14 +75,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.media3.common.C
 import kotlin.apply
 import android.view.inputmethod.InputMethodManager
-import android.content.Context.INPUT_METHOD_SERVICE
 
 
 class SettingsMenu(private val activity: MainActivity, private val parentView: ViewGroup) {
     private var overlay: FrameLayout? = null
     private var confirmationOverlay: FrameLayout? = null
     private var scrollContainer: ScrollView? = null
-
     private var autoPlayDurationControl: PropertyControl? = null
 
     fun isOpen(): Boolean = overlay != null && overlay!!.parent != null
@@ -389,8 +405,7 @@ class ExternalDisplayHelper(
             val externalDisplay = displays[0]
             // If we are already showing on this display, do nothing
             if (presentation != null && presentation!!.display.displayId == externalDisplay.displayId) {
-                // Optional: You might want to update the renderer's surface size if the *external* display changed res
-                // but usually, we just return here to be safe.
+                // Optional: update the renderer's surface size if the *external* display changed resolution
                 return
             }
             // Dismiss old one if display changed
