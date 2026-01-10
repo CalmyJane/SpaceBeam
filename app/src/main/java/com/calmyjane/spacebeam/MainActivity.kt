@@ -62,24 +62,12 @@ import kotlin.text.clear
 
 /**
  * Handles the overlay Settings Menu and its confirmation dialogs.
- * Updated: Lowercase labels, uniform button styling.
- */
-/**
- * Handles the overlay Settings Menu and its confirmation dialogs.
- * Updated: High Elevation and bringToFront to ensure Z-Order dominance.
- */
-/**
- * Handles the overlay Settings Menu and its confirmation dialogs.
- * Updated: Added closeImmediately() to fix rotation Z-order issues.
- */
-/**
- * Handles the overlay Settings Menu and its confirmation dialogs.
- * Updated: Handles Rotation Persistence, Scroll Restoration, and Proper Z-Ordering.
+ * Updated: Added Auto-Play section (Random Checkbox + Duration Slider).
  */
 class SettingsMenu(private val activity: MainActivity, private val parentView: ViewGroup) {
     private var overlay: FrameLayout? = null
     private var confirmationOverlay: FrameLayout? = null
-    private var scrollContainer: ScrollView? = null // Reference to scrollview for saving state
+    private var scrollContainer: ScrollView? = null
 
     fun isOpen(): Boolean = overlay != null && overlay!!.parent != null
 
@@ -93,25 +81,18 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         }
     }
 
-    /**
-     * Instantly removes views and clears references.
-     * Call this BEFORE rotation or HUD rebuilds.
-     */
     fun cleanup() {
         overlay?.animate()?.cancel()
         confirmationOverlay?.animate()?.cancel()
-
         if (overlay != null && overlay!!.parent != null) {
             parentView.removeView(overlay)
         }
-
         overlay = null
         confirmationOverlay = null
         scrollContainer = null
     }
 
     fun show() {
-        // If already showing, bring to front and exit
         if (overlay != null) {
             if (overlay!!.parent == null) {
                 parentView.addView(overlay, ViewGroup.LayoutParams(-1, -1))
@@ -121,20 +102,16 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             return
         }
 
-        // 1. Main Dimmed Background Overlay
         overlay = FrameLayout(activity).apply {
             setBackgroundColor(Color.argb(160, 0, 0, 0))
             isClickable = true
-            elevation = 500f // High elevation to sit above everything
+            elevation = 500f
             setOnClickListener { dismiss() }
-            // Animate in
             alpha = 0f
             animate().alpha(1f).setDuration(200).start()
         }
 
-        // 2. The Center Menu Panel
         val dm = activity.resources.displayMetrics
-        // Calculate dynamic width based on CURRENT screen orientation
         val targetWidth = (min(dm.widthPixels, dm.heightPixels) * 0.9f).toInt()
 
         scrollContainer = ScrollView(activity).apply {
@@ -153,7 +130,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             setPadding(40, 50, 40, 50)
         }
 
-        // --- MENU ITEMS ---
+        // --- TITLE ---
         contentLayout.addView(TextView(activity).apply {
             text = "SETTINGS"
             textSize = 24f
@@ -163,6 +140,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             setPadding(0, 0, 0, 40)
         })
 
+        // --- GENERAL ITEMS ---
         contentLayout.addView(createStyledButton("toggle background") {
             activity.toggleReadability()
         })
@@ -184,6 +162,65 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 
         contentLayout.addView(createStyledDivider())
 
+        // --- AUTO-PLAY SECTION ---
+        contentLayout.addView(TextView(activity).apply {
+            text = "AUTO-PLAY"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 10, 0, 20)
+        })
+
+        // Random Toggle
+        val randomRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2).apply { bottomMargin = 20 }
+        }
+        randomRow.addView(TextView(activity).apply {
+            text = "RANDOM ORDER"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        })
+        val randomCheck = CheckBox(activity).apply {
+            isChecked = activity.autoPlayRandom
+            buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            setOnCheckedChangeListener { _, isChecked -> activity.autoPlayRandom = isChecked }
+        }
+        randomRow.addView(randomCheck)
+        contentLayout.addView(randomRow)
+
+        // Duration Slider
+        val durLabel = TextView(activity).apply {
+            text = "HOLD DURATION: ${(activity.autoPlayDurationMs / 1000f)}s"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 5 }
+        }
+        contentLayout.addView(durLabel)
+
+        val durSeek = SeekBar(activity).apply {
+            max = 1000 // 0 to 10 seconds
+            progress = (activity.autoPlayDurationMs / 10L).toInt()
+            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
+            layoutParams = LinearLayout.LayoutParams(-1, 60).apply { bottomMargin = 10 }
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
+                    val ms = p * 10L
+                    activity.autoPlayDurationMs = ms
+                    durLabel.text = "HOLD DURATION: %.1fs".format(ms / 1000f)
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+        contentLayout.addView(durSeek)
+
+        contentLayout.addView(createStyledDivider())
+
+        // --- CLOSE ---
         contentLayout.addView(Button(activity).apply {
             text = "close"
             setTextColor(Color.LTGRAY)
@@ -195,10 +232,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 
         scrollContainer!!.addView(contentLayout)
         overlay!!.addView(scrollContainer)
-
-        // Add to parent
         parentView.addView(overlay, ViewGroup.LayoutParams(-1, -1))
-        // CRITICAL: Ensure it is drawn on top of whatever currently exists in parentView
         overlay!!.bringToFront()
     }
 
@@ -331,6 +365,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         }
     }
 }
+
 
 class ExternalDisplayHelper(
     private val context: Context,
@@ -968,6 +1003,7 @@ class MainActivity : AppCompatActivity() {
     private val presets = mutableMapOf<Int, Preset>()
     private var pendingSaveIndex: Int? = null
     private var transitionMs: Long = 1000L
+    private var transitionStartTime: Long = 0L
     private var isHudVisible = true
     private var isMenuExpanded = true
     private var isRecording = false
@@ -986,43 +1022,73 @@ class MainActivity : AppCompatActivity() {
     private var lastScrollY = 0
     private var isRebuildingHUD = false
 
+    private var isAutoPlaying = false
+    var autoPlayRandom = false
+    var autoPlayDurationMs = 3000L // 3 seconds hold time by default
+    private val autoPlayRunnable = Runnable { triggerNextAutoPlay() }
+    private lateinit var playBtn: ImageButton
+
+    // For filling the button visual
+    private var presetAnimators = mutableMapOf<Int, ValueAnimator>()
+    private val presetDrawables = mutableMapOf<Int, ProgressButtonDrawable>()
+
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        isRebuildingHUD = true // Start Rebuild
+        isRebuildingHUD = true
 
+        // 1. Save State before destruction
         val activeControlId = PropertyControl.activeControl?.id
         PropertyControl.closeActiveMenu()
+
         var wasSettingsOpen = false
         var savedScrollY = 0
-
         if (settingsMenu != null && settingsMenu!!.isOpen()) {
             wasSettingsOpen = true
             savedScrollY = settingsMenu!!.getScrollY()
-            // IMPORTANT: Completely destroy the old view hierarchy.
-            // We need to rebuild it to fit the new landscape/portrait dimensions.
             settingsMenu!!.cleanup()
         }
 
+        // Save transient UI state
+        val savedTransProgress = if (::transSeekBar.isInitialized) transSeekBar.progress else 333
+        val savedIsAutoPlaying = isAutoPlaying // Keep playing status
+
+        // 2. Rebuild
         overlayHUD.removeAllViews()
+        presetButtons.clear() // Clear old references
         setupOverlayHUD()
 
+        // 3. Restore State
         overlayHUD.visibility = if (isHudVisible) View.VISIBLE else View.GONE
         applyReadabilityStyle()
         updateSidebarVisuals()
 
+        // Restore Slider
+        transSeekBar.progress = savedTransProgress
+
+        // Restore Active Preset Visuals (Highlight)
+        if (activePreset != -1) {
+            val drawable = presetDrawables[activePreset]
+            drawable?.isActive = true
+            drawable?.invalidateSelf()
+        }
+
+        // Restore Auto-Play Visuals
+        isAutoPlaying = savedIsAutoPlaying
+        playBtn.setImageDrawable(createPlayIcon(isAutoPlaying))
+        // Note: The runnable is still running on the handler, so logic continues automatically.
+
+        // Restore Menus
         if (activeControlId != null && controlsMap.containsKey(activeControlId)) {
             handler.postDelayed({ controlsMap[activeControlId]?.toggleMenu() }, 50)
         }
 
         if (wasSettingsOpen) {
-            // Re-instantiate to use new layout params (width/height)
             settingsMenu = SettingsMenu(this, overlayHUD)
             settingsMenu?.show()
-            // Restore scroll position after layout pass
             settingsMenu?.restoreScrollY(savedScrollY)
         }
 
-        isRebuildingHUD = false // End Rebuild
+        isRebuildingHUD = false
     }
 
 
@@ -1600,22 +1666,33 @@ class MainActivity : AppCompatActivity() {
             clipToPadding = false
         }
 
-        // --- Transition Time Control ---
+        // --- Transition Time Control + Play Button ---
         val transContainer = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(10, 0, 0, 15)
+            setPadding(10, 0, 0, 5)
         }
+
+        transContainer.addView(ImageView(this).apply {
+            setImageDrawable(createClockDrawable())
+            alpha = 0.5f
+            layoutParams = LinearLayout.LayoutParams(50, 50).apply { rightMargin = 10 }
+        })
+
         val timeLabel = TextView(this).apply {
-            text = "1.0s"
+            text = "%.1fs".format(transitionMs / 1000f)
             setTextColor(Color.WHITE)
             textSize = 12f
             setPadding(4, 0, 8, 0)
         }
+        transContainer.addView(timeLabel)
+
+        // Calculate progress, but don't let the listener screw up the exact MS value during rebuild
+        val currentProgress = ((transitionMs / 30000.0).pow(1.0/3.0) * 1000).toInt().coerceIn(0, 1000)
+
         transSeekBar = SeekBar(this).apply {
             max = 1000
-            progress = 333
-            // INCREASED WIDTH to ~750px to match the target phone width feel
-            layoutParams = LinearLayout.LayoutParams(660, 55)
+            progress = currentProgress
+            layoutParams = LinearLayout.LayoutParams(500, 55)
             thumb = GradientDrawable().apply {
                 setColor(Color.WHITE)
                 setSize(38, 38)
@@ -1623,25 +1700,32 @@ class MainActivity : AppCompatActivity() {
             }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
-                    transitionMs = ((p / 1000f).pow(3.0f) * 30000).toLong()
-                    timeLabel.text = "%.1fs".format(transitionMs / 1000f)
+                    // Only update logic if user touches or logic is running,
+                    // prevent rounding errors during rebuild
+                    if (f || !isRebuildingHUD) {
+                        transitionMs = ((p / 1000f).pow(3.0f) * 30000).toLong()
+                        timeLabel.text = "%.1fs".format(transitionMs / 1000f)
+                    }
                 }
                 override fun onStartTrackingTouch(s: SeekBar?) {}
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
         }
-        transContainer.addView(ImageView(this).apply {
-            setImageDrawable(createClockDrawable())
-            alpha = 0.5f
-            layoutParams = LinearLayout.LayoutParams(50, 50).apply { rightMargin = 10 }
-        })
-        transContainer.addView(timeLabel)
         transContainer.addView(transSeekBar)
 
+        // --- Play Button ---
+        playBtn = ImageButton(this).apply {
+            setImageDrawable(createPlayIcon(isAutoPlaying))
+            background = null
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams(110, 110).apply { leftMargin = 15 }
+            setPadding(10, 10, 10, 10)
+            setOnClickListener { toggleAutoPlay() }
+        }
+        transContainer.addView(playBtn)
 
         // --- Preset Buttons ---
         val presetRow = FrameLayout(this)
-
         val scroller = HorizontalScrollView(this).apply {
             isFillViewport = true
             isHorizontalScrollBarEnabled = false
@@ -1654,23 +1738,64 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
 
+        // Cleanup old animators/maps
+        presetButtons.clear() // Although not used for TextViews, good practice
+        presetDrawables.clear()
+        presetAnimators.values.forEach { it.cancel() }
+        presetAnimators.clear()
+
         // Loop 9 downTo 1
         (9 downTo 1).forEach { idx ->
-            val b = Button(this).apply {
-                text = idx.toString()
-                setTextColor(Color.WHITE)
-                setBackgroundColor(Color.TRANSPARENT)
-                alpha = 0.8f
+            val pd = ProgressButtonDrawable(idx.toString())
 
-                // ADJUSTED SIZE: Slightly smaller than previous, but larger than original
-                textSize = 20f
-                typeface = Typeface.DEFAULT_BOLD
-                layoutParams = LinearLayout.LayoutParams(83, 160).apply {
-                    // TIGHTER SPACING: Only 2px margin
+            // Logic to restore animation state if rotating during transition
+            if (idx == activePreset) {
+                pd.isActive = true
+
+                val timePassed = System.currentTimeMillis() - transitionStartTime
+
+                // If we are currently transitioning
+                if (timePassed < transitionMs && transitionMs > 0) {
+                    val startProgress = (timePassed.toFloat() / transitionMs).coerceIn(0f, 1f)
+
+                    // Set initial state so it doesn't blink empty
+                    pd.setProgress(startProgress)
+
+                    // Resume animation
+                    val anim = ValueAnimator.ofFloat(startProgress, 1f).apply {
+                        duration = (transitionMs - timePassed).coerceAtLeast(0)
+                        interpolator = android.view.animation.LinearInterpolator() // Important for smooth resume
+                        addUpdateListener { va ->
+                            pd.setProgress(va.animatedValue as Float)
+                            pd.invalidateSelf()
+                        }
+                        start()
+                    }
+                    presetAnimators[idx] = anim
+                } else {
+                    // Transition finished
+                    pd.setProgress(1f)
+                }
+            }
+
+            presetDrawables[idx] = pd
+
+            // Use TextView instead of Button to avoid default OS styling hiding the background
+            val b = TextView(this).apply {
+                text = "" // Text is drawn by Drawable
+                background = pd
+                alpha = 1.0f
+                isClickable = true
+                isFocusable = true
+
+                layoutParams = LinearLayout.LayoutParams(83, 110).apply {
                     setMargins(2, 0, 2, 0)
                 }
-                setPadding(0, 0, 0, 5)
-                setOnClickListener { applyPreset(idx) }
+
+                setOnClickListener {
+                    stopAutoPlay()
+                    applyPreset(idx)
+                }
                 setOnLongClickListener {
                     pendingSaveIndex = idx
                     saveConfirmBtn.visibility = View.VISIBLE
@@ -1678,14 +1803,12 @@ class MainActivity : AppCompatActivity() {
                     true
                 }
             }
-            presetButtons[idx] = b
             btnRow.addView(b)
         }
 
         scroller.addView(btnRow)
         presetRow.addView(scroller)
 
-        // Save Confirm Button
         saveConfirmBtn = Button(this).apply {
             visibility = View.GONE
             setTextColor(Color.BLACK)
@@ -1695,7 +1818,7 @@ class MainActivity : AppCompatActivity() {
                 setColor(Color.WHITE)
                 cornerRadius = 12f
             }
-            layoutParams = FrameLayout.LayoutParams(280, 110, Gravity.CENTER)
+            layoutParams = FrameLayout.LayoutParams(280, 90, Gravity.CENTER)
             setOnClickListener {
                 pendingSaveIndex?.let { savePreset(it) }
                 visibility = View.GONE
@@ -1707,6 +1830,135 @@ class MainActivity : AppCompatActivity() {
         presetPanel.addView(presetRow)
 
         return presetPanel
+    }
+
+
+    private fun toggleAutoPlay() {
+        if (isAutoPlaying) {
+            stopAutoPlay()
+        } else {
+            isAutoPlaying = true
+            playBtn.setImageDrawable(createPlayIcon(true)) // White
+            Toast.makeText(this, "Auto-Play Started", Toast.LENGTH_SHORT).show()
+            triggerNextAutoPlay()
+        }
+    }
+
+    private fun stopAutoPlay() {
+        isAutoPlaying = false
+        handler.removeCallbacks(autoPlayRunnable)
+        playBtn.setImageDrawable(createPlayIcon(false)) // Grey
+    }
+
+    private fun triggerNextAutoPlay() {
+        if (!isAutoPlaying) return
+
+        // Calculate next index
+        val nextIdx = if (autoPlayRandom) {
+            (1..9).random()
+        } else {
+            if (activePreset >= 9 || activePreset < 1) 1 else activePreset + 1
+        }
+
+        applyPreset(nextIdx)
+    }
+
+
+    inner class ProgressButtonDrawable(private val label: String) : android.graphics.drawable.Drawable() {
+        private var progress = 0f
+        var isActive = false
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 40f
+            typeface = Typeface.DEFAULT_BOLD
+            textAlign = Paint.Align.CENTER
+        }
+
+        fun setProgress(p: Float) {
+            progress = p.coerceIn(0f, 1f)
+        }
+
+        override fun onBoundsChange(bounds: Rect) {
+            super.onBoundsChange(bounds)
+            invalidateSelf()
+        }
+
+        // Providing intrinsic size helps the layout manager on startup
+        override fun getIntrinsicWidth(): Int = 83
+        override fun getIntrinsicHeight(): Int = 110
+
+        override fun draw(canvas: Canvas) {
+            val w = bounds.width().toFloat()
+            val h = bounds.height().toFloat()
+
+            //
+            // Fallback to intrinsic if bounds are 0 (e.g. during animation startup)
+            val drawW = if (w > 0) w else 83f
+            val drawH = if (h > 0) h else 110f
+
+            val r = 12f
+
+            // 1. Draw Border/Frame
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 3f
+            paint.color = if (isActive) Color.WHITE else Color.parseColor("#505050")
+
+            val box = RectF(2f, 2f, drawW - 2f, drawH - 2f)
+            canvas.drawRoundRect(box, r, r, paint)
+
+            // 2. Draw Fill
+            if (progress > 0) {
+                paint.style = Paint.Style.FILL
+                paint.color = Color.argb(100, 255, 255, 255)
+
+                canvas.save()
+                val fillHeight = drawH * progress
+                canvas.clipRect(0f, drawH - fillHeight, drawW, drawH)
+                canvas.drawRoundRect(box, r, r, paint)
+                canvas.restore()
+            }
+
+            // 3. Draw Text
+            val xPos = drawW / 2
+            val yPos = (drawH / 2) - ((textPaint.descent() + textPaint.ascent()) / 2)
+            textPaint.alpha = if (isActive) 255 else 180
+            canvas.drawText(label, xPos, yPos, textPaint)
+        }
+
+        override fun setAlpha(alpha: Int) {
+            paint.alpha = alpha
+            textPaint.alpha = alpha
+        }
+        override fun setColorFilter(colorFilter: ColorFilter?) {
+            paint.colorFilter = colorFilter
+            textPaint.colorFilter = colorFilter
+        }
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+    }
+
+    private fun createPlayIcon(playing: Boolean): BitmapDrawable {
+        // High resolution bitmap
+        val size = 200
+        val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(b)
+        val p = Paint().apply {
+            color = if (playing) Color.WHITE else Color.GRAY
+            style = Paint.Style.FILL
+            isAntiAlias = true
+        }
+
+        // Draw Triangle logic scaled to new size
+        val path = Path()
+        // Triangle coordinates: Left-Top, Left-Bottom, Right-Middle
+        path.moveTo(50f, 40f)
+        path.lineTo(50f, 160f)
+        path.lineTo(160f, 100f)
+        path.close()
+
+        c.drawPath(path, p)
+
+        return BitmapDrawable(resources, b)
     }
 
     private fun createFlashView() = View(this).apply { setBackgroundColor(Color.WHITE); alpha = 0f; layoutParams = FrameLayout.LayoutParams(-1, -1) }
@@ -1732,7 +1984,6 @@ class MainActivity : AppCompatActivity() {
         menuBtn = this
         setOnClickListener { toggleMenu() }
     }
-
     private fun createCollapsibleGroupView(title: String, startOpen: Boolean): Pair<LinearLayout, LinearLayout> {
         // Check if this group was previously expanded
         val effectivelyOpen = if (expandedGroups.contains(title)) true else startOpen
@@ -1761,7 +2012,6 @@ class MainActivity : AppCompatActivity() {
         groupContainer.addView(header); groupContainer.addView(content)
         return Pair(groupContainer, content)
     }
-
     private fun createCustomIcon(type: Int): BitmapDrawable {
         val size = 100; val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888); val c = Canvas(b)
         val paint = Paint().apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; isAntiAlias = true }
@@ -1937,46 +2187,73 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyPreset(idx: Int) {
         val p = presets[idx] ?: return
+
+        // 1. Cancel previous UI animations
+        presetAnimators.values.forEach { it.cancel() }
+        presetAnimators.clear()
+
+        // Reset all buttons
+        presetDrawables.forEach { (id, drawable) ->
+            drawable.setProgress(0f)
+            drawable.isActive = (id == idx)
+            drawable.invalidateSelf()
+        }
+
         activePreset = idx
-        updatePresetHighlights()
+        // Mark time for rotation persistence
+        transitionStartTime = System.currentTimeMillis()
 
         val durationSec = transitionMs / 1000f
 
+        // 2. Animate the Button Fill
+        val btnDrawable = presetDrawables[idx]
+        if (btnDrawable != null) {
+            val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = transitionMs
+                interpolator = android.view.animation.LinearInterpolator() // Matches time flow
+                addUpdateListener { va ->
+                    val progress = va.animatedValue as Float
+                    btnDrawable.setProgress(progress)
+                    btnDrawable.invalidateSelf()
+                }
+                start()
+            }
+            presetAnimators[idx] = anim
+        }
+
+        // 3. GL & Control Animations
         if (!axisLocked) {
             renderer.axisCount = p.axis.toFloat()
             axisSb.progress = p.axis - 1
             controlsMap["AXIS"]?.setProgress(p.axis - 1)
         }
 
-        // 1. Calculate Rotation Targets
         val startMRot = renderer.mRotAccum
         val startCRot = renderer.cRotAccum
         val targetMRot = round(startMRot / 360.0) * 360.0
         val targetCRot = round(startCRot / 360.0) * 360.0
 
-        // 2. Trigger Renderer Rotation Animation
         renderer.animateRotationTo(targetMRot, targetCRot, durationSec)
 
-        // 3. Trigger Control Animations
         controls.forEach { control ->
             if (control.id == "AXIS") return@forEach
             val snap = p.controlSnapshots[control.id]
             if (snap != null) {
-                // 1. Animate the main slider value AND the waveform shape
                 control.animateTo(snap.value.toFloat(), durationSec, snap.shape)
-
                 if (control.hasModulation) {
-                    // 2. FIX: Instead of calling updateModDepth instantly,
-                    // create new methods to animate these over time too.
                     control.animateModulation(snap.rate.toFloat(), snap.depth.toFloat(), durationSec)
                 }
             }
         }
         updateSidebarVisuals()
 
-        dumpPresetToLog("APPLIED_PRESET_\$idx")
-
+        // 4. Schedule next Auto-Play
+        if (isAutoPlaying) {
+            handler.removeCallbacks(autoPlayRunnable)
+            handler.postDelayed(autoPlayRunnable, transitionMs + autoPlayDurationMs)
+        }
     }
+
 
     private fun savePreset(idx: Int) {
         val snapshots = controls.filter { it.id != "AXIS" }.associate { it.id to it.getSnapshot() }
