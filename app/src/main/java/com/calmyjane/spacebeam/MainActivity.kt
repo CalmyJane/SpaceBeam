@@ -1457,10 +1457,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun textToIcon(t: String, size: Float = 60f, color: Int = Color.WHITE): BitmapDrawable {
-        val b = Bitmap.createBitmap(160, 160, Bitmap.Config.ARGB_8888)
+        // CHANGE 3: Increase bitmap resolution to 500x500 so text is crisp
+        val b = Bitmap.createBitmap(500, 500, Bitmap.Config.ARGB_8888)
         val c = Canvas(b)
-        val p = Paint().apply { this.color = color; textSize = size; textAlign = Paint.Align.CENTER; isFakeBoldText = true; isAntiAlias = true }
-        c.drawText(t, 80f, 80f + (size / 3f), p); return BitmapDrawable(resources, b)
+        val p = Paint().apply {
+            this.color = color
+            this.textSize = size
+            this.textAlign = Paint.Align.CENTER
+            isFakeBoldText = true
+            isAntiAlias = true
+        }
+
+        // CHANGE 4: Adjust center point to 250 (half of 500)
+        c.drawText(t, 250f, 250f + (size / 3f), p)
+
+        return BitmapDrawable(resources, b)
     }
 
     private fun createClockDrawable(): BitmapDrawable {
@@ -1768,8 +1779,27 @@ class MainActivity : AppCompatActivity() {
 
     private fun createRecordControls(): LinearLayout {
         recordControls = LinearLayout(this).apply { gravity = Gravity.CENTER; setPadding(10, 10, 10, 10) }
-        photoBtn = ImageButton(this).apply { setImageDrawable(textToIcon("[ ]", 50f)); setBackgroundColor(Color.TRANSPARENT); setColorFilter(Color.WHITE); alpha = 0.8f; scaleX = 1.5f; scaleY = 1.5f; layoutParams = LinearLayout.LayoutParams(150, 150); setOnClickListener { renderer.capturePhoto(); triggerFlashPulse() } }
-        recordBtn = ImageButton(this).apply { setImageDrawable(textToIcon("REC", 40f)); setBackgroundColor(Color.TRANSPARENT); setColorFilter(Color.WHITE); alpha = 0.5f; layoutParams = LinearLayout.LayoutParams(150, 150); setOnClickListener { toggleRecording() } }
+        photoBtn = ImageButton(this).apply {
+            setImageDrawable(ContextCompat.getDrawable(context, android.R.drawable.ic_menu_camera));
+            setBackgroundColor(Color.TRANSPARENT);
+            setColorFilter(Color.WHITE);
+            alpha = 0.8f;
+            scaleX = 1.2f; // Adjusted scale slightly as the icon is larger than text
+            scaleY = 1.2f;
+            layoutParams = LinearLayout.LayoutParams(150, 150);
+            setOnClickListener { renderer.capturePhoto(); triggerFlashPulse() }
+        }
+        recordBtn = ImageButton(this).apply {
+            // "presence_video_online" looks like a small video camera
+            setImageDrawable(ContextCompat.getDrawable(context, android.R.drawable.presence_video_online))
+
+            setBackgroundColor(Color.TRANSPARENT)
+            setColorFilter(Color.WHITE)
+            alpha = 0.5f
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams(150, 150)
+            setOnClickListener { toggleRecording() }
+        }
         recordControls.addView(photoBtn); recordControls.addView(recordBtn)
         return recordControls
     }
@@ -1911,6 +1941,41 @@ class MainActivity : AppCompatActivity() {
         presetPanel.addView(presetRow)
 
         return presetPanel
+    }
+
+    private fun createCameraIconDrawable(): BitmapDrawable {
+        val size = 140
+        val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(b)
+
+        // Paint setup
+        val p = Paint().apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = 8f
+            isAntiAlias = true
+        }
+
+        // 1. Draw Camera Body (Rounded Rectangle)
+        val bodyRect = RectF(20f, 45f, 120f, 110f)
+        c.drawRoundRect(bodyRect, 12f, 12f, p)
+
+        // 2. Draw Lens (Circle in center)
+        c.drawCircle(70f, 77.5f, 24f, p)
+
+        // 3. Draw Lens Glint/Inner Detail (Optional)
+        val pFill = Paint(p).apply { style = Paint.Style.FILL; alpha = 150 }
+        c.drawCircle(70f, 77.5f, 8f, pFill)
+
+        // 4. Draw Top Bump (Viewfinder/Shutter housing) - Filled
+        p.style = Paint.Style.FILL
+        val topRect = RectF(50f, 25f, 90f, 45f)
+        c.drawRoundRect(topRect, 6f, 6f, p)
+
+        // 5. Draw a small flash dot
+        c.drawCircle(105f, 60f, 5f, p)
+
+        return BitmapDrawable(resources, b)
     }
 
     private fun toggleAutoPlay() {
@@ -2186,14 +2251,14 @@ class MainActivity : AppCompatActivity() {
             recordTicker = object : Runnable {
                 override fun run() {
                     recordingSeconds++; val m = recordingSeconds / 60; val s = recordingSeconds % 60
-                    recordBtn.setImageDrawable(textToIcon("%d:%02d".format(m, s), 38f, Color.RED)); handler.postDelayed(this, 1000)
+                    recordBtn.setImageDrawable(textToIcon("%d:%02d".format(m, s), 250f, Color.RED)); handler.postDelayed(this, 1000)
                 }
             }; handler.post(recordTicker!!)
         } else {
             renderer.stopRecording { savedFile ->
                 isRecording = false; recordTicker?.let { handler.removeCallbacks(it) }
                 runOnUiThread {
-                    recordBtn.setImageDrawable(textToIcon("REC", 40f)); recordBtn.alpha = 0.5f; if (savedFile != null && savedFile.exists()) saveVideoToGallery(savedFile)
+                    recordBtn.setImageDrawable(ContextCompat.getDrawable(this, android.R.drawable.presence_video_online)); recordBtn.alpha = 0.5f; if (savedFile != null && savedFile.exists()) saveVideoToGallery(savedFile)
                 }
             }
         }
