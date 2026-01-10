@@ -754,7 +754,7 @@ class PropertyControl(
             val params = if (layoutStyle == LayoutStyle.STACKED) {
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 60).apply { bottomMargin = 5 }
             } else {
-                LinearLayout.LayoutParams(220, 70).apply { rightMargin = 15 }
+                LinearLayout.LayoutParams(220, 70).apply { rightMargin = 5 }
             }
             layoutParams = params
         }
@@ -796,7 +796,7 @@ class PropertyControl(
                 text = formatValue(value)
                 setTextColor(Color.LTGRAY)
                 textSize = 9f
-                minWidth = 50
+                minWidth = 90
                 gravity = Gravity.END or Gravity.CENTER_VERTICAL
                 setPadding(0,0,8,0)
             }
@@ -810,6 +810,7 @@ class PropertyControl(
             progress = (sliderT * 1000).toInt()
 
             thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
+            setPadding(0,0,0,0)
             thumbOffset = 0
             splitTrack = false
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -1854,7 +1855,7 @@ class MainActivity : AppCompatActivity() {
             setImageDrawable(createPlayIcon(isAutoPlaying))
             background = null
             scaleType = ImageView.ScaleType.FIT_CENTER
-            layoutParams = LinearLayout.LayoutParams(110, 110).apply { leftMargin = 5 }
+            layoutParams = LinearLayout.LayoutParams(110, 110).apply { leftMargin = 0 }
             setPadding(10, 10, 10, 10)
             setOnClickListener { toggleAutoPlay() }
         }
