@@ -54,20 +54,18 @@ import javax.microedition.khronos.egl.EGLConfig as GL10EGLConfig
 import android.opengl.EGLConfig as EGL14EGLConfig
 import android.content.Intent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.view.marginRight
 import androidx.media3.common.C
 import kotlin.apply
-import kotlin.text.clear
+import android.view.inputmethod.InputMethodManager
+import android.content.Context.INPUT_METHOD_SERVICE
 
 
-/**
- * Handles the overlay Settings Menu and its confirmation dialogs.
- * Updated: Added Auto-Play section (Random Checkbox + Duration Slider).
- */
 class SettingsMenu(private val activity: MainActivity, private val parentView: ViewGroup) {
     private var overlay: FrameLayout? = null
     private var confirmationOverlay: FrameLayout? = null
     private var scrollContainer: ScrollView? = null
+
+    private var autoPlayDurationControl: PropertyControl? = null
 
     fun isOpen(): Boolean = overlay != null && overlay!!.parent != null
 
@@ -84,6 +82,10 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
     fun cleanup() {
         overlay?.animate()?.cancel()
         confirmationOverlay?.animate()?.cancel()
+
+        PropertyControl.closeActiveMenu()
+        autoPlayDurationControl = null
+
         if (overlay != null && overlay!!.parent != null) {
             parentView.removeView(overlay)
         }
@@ -176,7 +178,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         val randomRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2).apply { bottomMargin = 20 }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2).apply { bottomMargin = 10 }
         }
         randomRow.addView(TextView(activity).apply {
             text = "RANDOM ORDER"
@@ -192,31 +194,23 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         randomRow.addView(randomCheck)
         contentLayout.addView(randomRow)
 
-        // Duration Slider
-        val durLabel = TextView(activity).apply {
-            text = "HOLD DURATION: ${(activity.autoPlayDurationMs / 1000f)}s"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 5 }
+        // Auto-Play Duration using PropertyControl
+        autoPlayDurationControl = PropertyControl(
+            "AUTO_DUR", "DURATION",
+            min = 0, max = 300000, sliderMax = 60000,
+            defaultValue = activity.autoPlayDurationMs.toInt(),
+            layoutStyle = PropertyControl.LayoutStyle.STACKED,
+            includeInPreset = false,
+            hasModulation = false,
+            logPower = 2,
+            showValue = true,
+            valueFormatter = { "%.1fs".format(it / 1000f) }
+        ) {
+            activity.autoPlayDurationMs = it.toLong()
         }
-        contentLayout.addView(durLabel)
 
-        val durSeek = SeekBar(activity).apply {
-            max = 1000 // 0 to 10 seconds
-            progress = (activity.autoPlayDurationMs / 10L).toInt()
-            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
-            layoutParams = LinearLayout.LayoutParams(-1, 60).apply { bottomMargin = 10 }
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
-                    val ms = p * 10L
-                    activity.autoPlayDurationMs = ms
-                    durLabel.text = "HOLD DURATION: %.1fs".format(ms / 1000f)
-                }
-                override fun onStartTrackingTouch(s: SeekBar?) {}
-                override fun onStopTrackingTouch(s: SeekBar?) {}
-            })
-        }
-        contentLayout.addView(durSeek)
+        autoPlayDurationControl?.popupElevation = 600f
+        autoPlayDurationControl?.attachTo(activity, contentLayout)
 
         contentLayout.addView(createStyledDivider())
 
@@ -366,7 +360,6 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
     }
 }
 
-
 class ExternalDisplayHelper(
     private val context: Context,
     private val renderer: MainActivity.KaleidoscopeRenderer
@@ -455,22 +448,33 @@ class ExternalDisplayHelper(
         }
     }
 }
+
 class PropertyControl(
-    private val context: Context,
     val id: String,
     val label: String,
     val min: Int = 0,
     val max: Int = 1000,
+    val sliderMax: Int = max,
     val defaultValue: Int = 0,
     val outMin: Float = 0.0f,
     val outMax: Float = 1.0f,
     val hasModulation: Boolean = false,
     val modMode: ModMode = ModMode.CLAMP,
+    val iconResId: Int? = null,
+    val layoutStyle: LayoutStyle = LayoutStyle.STACKED,
+    val includeInPreset: Boolean = true,
+    val logPower: Int = 1,
+    val showValue: Boolean = false,
+    val valueSuffix: String = "",
+    val valueFormatter: ((Int) -> String)? = null,
     private val onValueChanged: ((Int) -> Unit)? = null
 ) {
     enum class ModMode { WRAP, CLAMP }
-    // CHANGED: Removed SQUARE, Added WOBBLE_SINE
     enum class WaveShape { SINE, TRIANGLE, RAMP, WOBBLE_SINE, RANDOM_SMOOTH, RANDOM_STEP }
+    enum class LayoutStyle { STACKED, ROW }
+
+    // New property to control layering depth
+    var popupElevation: Float = 40f
 
     companion object {
         var activeControl: PropertyControl? = null
@@ -479,61 +483,52 @@ class PropertyControl(
         }
     }
 
-    // --- State Variables ---
     @Volatile var value: Int = defaultValue
         private set
     @Volatile var preciseValue: Float = defaultValue.toFloat()
         private set
 
-    // --- Animation State ---
     private var animTarget: Float? = null
     private var animStart: Float = 0f
     private var animDuration: Float = 0f
     private var animTime: Float = 0f
     private var isAnimating = false
 
-    // --- Modulation State ---
     var modRate: Int = 200
     var modDepth: Int = 0
     var modShape: WaveShape = if (modMode == ModMode.WRAP) WaveShape.RAMP else WaveShape.SINE
 
-    // Physics / Internal
     var preciseModRate: Float = 200f
     var preciseModDepth: Float = 0f
     var lfoPhase: Double = 0.0
 
     private var lastComputedNormalized: Float = 0f
-
-    // --- Snapshot Morphing Variables ---
     private var modSnapshotValue: Float = 0f
     private var modRateStart = 0f
     private var modRateTarget: Float? = null
     private var modDepthStart = 0f
     private var modDepthTarget: Float? = null
 
-    val computedValue: Float
-        get() = outMin + (lastComputedNormalized * (outMax - outMin))
-
-    // --- UI References ---
     private var mainSeekBar: SeekBar? = null
     private var modIndicator: View? = null
+    private var valueDisplay: TextView? = null
     private var mainRowLayout: LinearLayout? = null
 
-    // --- Menu UI References ---
     private var floatingPanel: LinearLayout? = null
     private var modPanelSpeedSeekBar: SeekBar? = null
     private var modPanelDepthSeekBar: SeekBar? = null
     private var liveValueDisplay: TextView? = null
     private var baseValueInput: EditText? = null
     private var shapeBtn: Button? = null
+    private var currentContext: Context? = null
 
-    data class Snapshot(
-        val value: Int,
-        val active: Boolean,
-        val rate: Int,
-        val depth: Int,
-        val shape: String
-    )
+    val computedValue: Float
+        get() {
+            val norm = lastComputedNormalized
+            return outMin + (norm * (outMax - outMin))
+        }
+
+    data class Snapshot(val value: Int, val active: Boolean, val rate: Int, val depth: Int, val shape: String)
 
     fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name)
 
@@ -551,12 +546,11 @@ class PropertyControl(
         animDuration = durationSec
         animTime = 0f
         isAnimating = true
-
         if (newShape != null) {
             try {
                 val targetShape = WaveShape.valueOf(newShape)
                 modShape = targetShape
-                updateShapeButtonText()
+                shapeBtn?.text = modShape.name
             } catch (e: Exception) {}
         }
     }
@@ -572,40 +566,31 @@ class PropertyControl(
         val t = if (isAnimating && animDuration > 0) (animTime / animDuration).coerceIn(0f, 1f) else 1f
         val ease = 1f - (1f - t).pow(3f)
 
-        // 1. Handle Parameter Transitions
         if (isAnimating && animTarget != null) {
             animTime += deltaTime
             if (animTime >= animDuration) {
-                // End of Animation
                 preciseValue = animTarget!!
                 value = preciseValue.toInt()
                 modRateTarget?.let { preciseModRate = it; modRate = it.toInt() }
                 modDepthTarget?.let { preciseModDepth = it; modDepth = it.toInt() }
                 modRateTarget = null; modDepthTarget = null
                 isAnimating = false
-
-                // Final UI Sync
                 syncUiElements()
             } else {
-                // In Progress Animation
                 preciseValue = animStart + (animTarget!! - animStart) * ease
-                value = preciseValue.toInt() // Update Integer value for UI
-
+                value = preciseValue.toInt()
                 modRateTarget?.let { preciseModRate = modRateStart + (it - modRateStart) * ease }
                 modDepthTarget?.let { preciseModDepth = modDepthStart + (it - modDepthStart) * ease }
-
-                // CHANGED: Live Sync during transition
                 syncUiElements()
             }
         }
 
-        // 2. Base Value
-        val baseNorm = preciseValue / max.toFloat()
+        val ratio = (preciseValue / sliderMax.toFloat()).coerceAtLeast(0f)
+        val curvedNorm = if (logPower > 1) ratio.pow(logPower) else ratio
 
-        // 3. LFO Physics
         if (!hasModulation || (preciseModRate == 0f && preciseModDepth == 0f && modDepthTarget == null)) {
-            lastComputedNormalized = baseNorm
-            updateLiveValueUI(value) // Show base value if no mod
+            lastComputedNormalized = curvedNorm
+            updateLiveValueUI(value)
             return
         }
 
@@ -617,21 +602,16 @@ class PropertyControl(
             WaveShape.SINE -> sin(lfoPhase) * 0.5 + 0.5
             WaveShape.TRIANGLE -> { val p = (lfoPhase / (2.0 * Math.PI)); if (p < 0.5) p * 2.0 else 2.0 - (p * 2.0) }
             WaveShape.RAMP -> (lfoPhase / (2.0 * Math.PI)) % 1.0
-            WaveShape.WOBBLE_SINE -> {
-                // Phase distortion for wobble effect
-                val w = sin(lfoPhase + sin(lfoPhase))
-                w * 0.5 + 0.5
-            }
+            WaveShape.WOBBLE_SINE -> { val w = sin(lfoPhase + sin(lfoPhase)); w * 0.5 + 0.5 }
             WaveShape.RANDOM_SMOOTH -> (sin(lfoPhase) * 0.5 + 0.5 + sin(lfoPhase * 2.3) * 0.2) / 1.4
             WaveShape.RANDOM_STEP -> Math.random()
         }
 
         val depthNorm = (preciseModDepth / 1000f).pow(2f)
-
         val targetVal = if (modMode == ModMode.WRAP) {
-            (baseNorm + (rawWave * depthNorm)) % 1.0f
+            (curvedNorm + (rawWave * depthNorm)) % 1.0f
         } else {
-            baseNorm + (rawWave.toFloat() * depthNorm * (1.0f - baseNorm))
+            curvedNorm + (rawWave.toFloat() * depthNorm * (1.0f - curvedNorm))
         }
 
         lastComputedNormalized = if (isAnimating) {
@@ -640,37 +620,65 @@ class PropertyControl(
             targetVal.toFloat()
         }
 
-        // Visual Updates
         modIndicator?.postInvalidate()
-
-        // Calculate the actual integer value being represented by the modulation right now
-        val displayVal = (lastComputedNormalized * max).toInt()
+        val displayVal = if (logPower > 1) {
+            (lastComputedNormalized.pow(1.0f/logPower) * sliderMax).toInt()
+        } else {
+            (lastComputedNormalized * sliderMax).toInt()
+        }
         updateLiveValueUI(displayVal)
     }
 
     private fun syncUiElements() {
-        // Sync main slider
-        mainSeekBar?.post { if (mainSeekBar?.progress != value) mainSeekBar?.progress = value }
+        val ratio = (value.toFloat() / sliderMax.toFloat()).coerceIn(0f, 1f)
+        val sliderT = if (logPower > 1) ratio.pow(1.0f / logPower) else ratio
+        val seekProgress = (sliderT * 1000).toInt()
 
-        // Sync menu elements if open
+        val sb = mainSeekBar
+        if (sb != null) {
+            sb.post {
+                if (sb.progress != seekProgress) {
+                    try { sb.progress = seekProgress } catch (e: Exception) {}
+                }
+            }
+        }
+
+        if (showValue && valueDisplay != null) {
+            valueDisplay?.post { valueDisplay?.text = formatValue(value) }
+        }
+
         if (activeControl == this) {
             baseValueInput?.post {
-                // Only update text if user isn't typing
-                if (baseValueInput?.hasFocus() == false) {
-                    baseValueInput?.setText(value.toString())
-                }
+                if (baseValueInput?.hasFocus() == false) baseValueInput?.setText(value.toString())
             }
             modPanelSpeedSeekBar?.post { modPanelSpeedSeekBar?.progress = preciseModRate.toInt() }
             modPanelDepthSeekBar?.post { modPanelDepthSeekBar?.progress = preciseModDepth.toInt() }
         }
     }
 
+    private fun formatValue(v: Int): String {
+        return if (valueFormatter != null) valueFormatter!!(v) else "$v$valueSuffix"
+    }
+
     private fun updateLiveValueUI(v: Int) {
         if (activeControl == this && liveValueDisplay != null) {
-            liveValueDisplay?.post {
-                liveValueDisplay?.text = "$v"
-            }
+            liveValueDisplay?.post { liveValueDisplay?.text = formatValue(v) }
         }
+    }
+
+    private fun setProgressFromSlider(p: Int) {
+        if (isAnimating) stopAnimation()
+        val t = p / 1000f
+        val curvedT = if (logPower > 1) t.pow(logPower) else t
+        val calcVal = (curvedT * sliderMax).toInt().coerceIn(min, max)
+        value = calcVal
+        preciseValue = calcVal.toFloat()
+
+        if (showValue && valueDisplay != null) valueDisplay?.text = formatValue(value)
+        if (activeControl == this && baseValueInput != null && !baseValueInput!!.hasFocus()) {
+            baseValueInput!!.setText("$calcVal")
+        }
+        onValueChanged?.invoke(calcVal)
     }
 
     fun setProgress(v: Int) {
@@ -678,15 +686,7 @@ class PropertyControl(
         val clamped = v.coerceIn(min, max)
         value = clamped
         preciseValue = clamped.toFloat()
-
-        if (mainSeekBar != null && mainSeekBar!!.progress != clamped) {
-            mainSeekBar!!.progress = clamped
-        }
-
-        if (activeControl == this && baseValueInput != null && !baseValueInput!!.hasFocus()) {
-            baseValueInput!!.setText("$clamped")
-        }
-
+        syncUiElements()
         onValueChanged?.invoke(clamped)
     }
 
@@ -709,20 +709,109 @@ class PropertyControl(
             updateModDepth(0)
             modShape = if (modMode == ModMode.WRAP) WaveShape.RAMP else WaveShape.SINE
             updateIndicatorVisuals()
-            updateShapeButtonText()
+            shapeBtn?.text = modShape.name
         }
     }
 
-    fun attachTo(parent: ViewGroup) {
-        mainSeekBar = null; modIndicator = null; mainRowLayout = null
-        val container = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 2, 0, 6) }
-        val labelView = TextView(context).apply { text = label; setTextColor(Color.WHITE); textSize = 10f; setTypeface(null, Typeface.BOLD); alpha = 0.85f; setOnClickListener { reset() } }
-        container.addView(labelView)
-        val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 55) }
-        this.mainRowLayout = row
+    fun stopAnimation() {
+        isAnimating = false; animTarget = null; modRateTarget = null; modDepthTarget = null
+    }
+
+    fun detach() {
+        mainSeekBar = null
+        modIndicator = null
+        valueDisplay = null
+        mainRowLayout = null
+        if (activeControl == this) closeMenu()
+        currentContext = null
+    }
+
+    fun attachTo(context: Context, parent: ViewGroup) {
+        detach()
+        currentContext = context
+
+        val container = LinearLayout(context).apply {
+            orientation = if (layoutStyle == LayoutStyle.STACKED) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 2, 0, 6)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val labelContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#222222"))
+                setStroke(2, Color.DKGRAY)
+                cornerRadius = 12f
+            }
+            isClickable = true
+            setOnClickListener { toggleMenu(context) }
+
+            val params = if (layoutStyle == LayoutStyle.STACKED) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 60).apply { bottomMargin = 5 }
+            } else {
+                LinearLayout.LayoutParams(220, 70).apply { rightMargin = 15 }
+            }
+            layoutParams = params
+        }
+
+        if (iconResId != null) {
+            val iv = ImageView(context).apply {
+                setImageResource(iconResId)
+                setColorFilter(Color.WHITE)
+                alpha = 0.8f
+                layoutParams = LinearLayout.LayoutParams(36, 36).apply { rightMargin = 8 }
+            }
+            labelContainer.addView(iv)
+        }
+
+        val tv = TextView(context).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            textSize = 10f
+            setTypeface(null, Typeface.BOLD)
+            alpha = 0.9f
+            gravity = Gravity.CENTER
+        }
+        labelContainer.addView(tv)
+        container.addView(labelContainer)
+
+        val sliderRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, 55, 1f)
+        }
+
+        if (layoutStyle == LayoutStyle.STACKED) {
+            sliderRow.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 55)
+        }
+        this.mainRowLayout = sliderRow
+
+        if (showValue) {
+            valueDisplay = TextView(context).apply {
+                text = formatValue(value)
+                setTextColor(Color.LTGRAY)
+                textSize = 9f
+                minWidth = 50
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                setPadding(0,0,8,0)
+            }
+            sliderRow.addView(valueDisplay)
+        }
 
         val sb = SeekBar(context).apply {
-            max = this@PropertyControl.max; progress = value; thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }; thumbOffset = 0; splitTrack = false
+            max = 1000
+            val ratio = (value.toFloat() / sliderMax.toFloat()).coerceIn(0f, 1f)
+            val sliderT = if (logPower > 1) ratio.pow(1.0f / logPower) else ratio
+            progress = (sliderT * 1000).toInt()
+
+            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
+            thumbOffset = 0
+            splitTrack = false
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         this.mainSeekBar = sb
@@ -736,11 +825,13 @@ class PropertyControl(
             v.onTouchEvent(event); true
         }
         sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { if (fromUser) setProgress(p) }
+            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                if (fromUser) setProgressFromSlider(p)
+            }
             override fun onStartTrackingTouch(s: SeekBar?) {}
             override fun onStopTrackingTouch(s: SeekBar?) {}
         })
-        row.addView(sb)
+        sliderRow.addView(sb)
 
         if (hasModulation) {
             modIndicator = object : View(context) {
@@ -752,26 +843,51 @@ class PropertyControl(
                     paint.style = Paint.Style.FILL; paint.color = if (active) Color.WHITE else Color.LTGRAY; paint.alpha = if (active) 255 else 100
                     var dotRadius = r * 0.3f
                     if (active) {
-                        val waveVal = if (preciseModDepth > 0) (lastComputedNormalized - (preciseValue/max)) / (preciseModDepth/1000f) else 0f
+                        val waveVal = if (preciseModDepth > 0) (lastComputedNormalized - (preciseValue/sliderMax)) / (preciseModDepth/1000f) else 0f
                         dotRadius = (r * (0.3 + (abs(waveVal)*0.7))).toFloat()
                     }
                     canvas.drawCircle(cx, cy, dotRadius, paint)
                 }
-            }.apply { layoutParams = LinearLayout.LayoutParams(55, 55).apply { leftMargin = 15 }; setOnClickListener { toggleMenu() } }
-            row.addView(modIndicator)
+            }.apply { layoutParams = LinearLayout.LayoutParams(55, 55).apply { leftMargin = 15 }; setOnClickListener { toggleMenu(context) } }
+            sliderRow.addView(modIndicator)
         }
-        container.addView(row)
+
+        container.addView(sliderRow)
         parent.addView(container)
     }
 
     private fun updateIndicatorVisuals() { modIndicator?.invalidate() }
-    private fun updateShapeButtonText() {
-        shapeBtn?.text = modShape.name
+
+    fun toggleMenu(ctx: Context? = currentContext) {
+        if (activeControl == this) closeMenu()
+        else {
+            activeControl?.closeMenu()
+            if (ctx != null) openMenu(ctx)
+        }
     }
 
-    fun toggleMenu() { if (activeControl == this) closeMenu() else { activeControl?.closeMenu(); openMenu() } }
+    fun closeMenu() {
+        if (floatingPanel != null) {
+            val ctx = currentContext ?: return
 
-    private fun openMenu() {
+            val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            baseValueInput?.windowToken?.let { imm?.hideSoftInputFromWindow(it, 0) }
+
+            (floatingPanel?.parent as? ViewGroup)?.removeView(floatingPanel)
+
+            floatingPanel = null
+            modPanelSpeedSeekBar = null
+            modPanelDepthSeekBar = null
+            liveValueDisplay = null
+            baseValueInput = null
+            shapeBtn = null
+
+            (ctx as? MainActivity)?.hideSystemUI()
+        }
+        if (activeControl == this) activeControl = null
+    }
+
+    private fun openMenu(context: Context) {
         val activity = context as? MainActivity ?: return
         val rootLayout = activity.overlayHUD
         val dm = context.resources.displayMetrics
@@ -781,11 +897,13 @@ class PropertyControl(
             orientation = LinearLayout.VERTICAL
             setPadding(30, 30, 30, 30)
             background = GradientDrawable().apply {
-                setColor(Color.argb(245, 15, 15, 15)) // Darker, opaque background
+                setColor(Color.argb(245, 15, 15, 15))
                 cornerRadius = 20f
                 setStroke(2, Color.GRAY)
             }
-            elevation = 40f
+
+            elevation = popupElevation
+
             isClickable = true
             layoutParams = if (isPortrait) {
                 val menuHeight = (dm.heightPixels * 0.40).toInt()
@@ -795,23 +913,19 @@ class PropertyControl(
             }
         }
 
-        // --- TITLE (Just Label) ---
         floatingPanel?.addView(TextView(context).apply {
             text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY); gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 }
         })
 
-        // --- NUMERIC CONTROL ROW ---
         val numRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 140).apply { bottomMargin = 10 }
         }
 
-        // Decrement Button (Weight 1)
-        val btnDec = createNumButton("-") { setProgress(value - 1) }
+        val btnDec = createNumButton(context, "-") { setProgress(value - 1) }
 
-        // Input Box (Weight 1.5, Centered)
         baseValueInput = EditText(context).apply {
             setText(value.toString())
             textSize = 28f
@@ -819,11 +933,10 @@ class PropertyControl(
             setTypeface(null, Typeface.BOLD)
             gravity = Gravity.CENTER
             background = null
-            setPadding(0, 10, 0, 0) // Push text down a bit to ensure top isn't cropped
+            setPadding(0, 10, 0, 0)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            filters = arrayOf(android.text.InputFilter.LengthFilter(4))
+            filters = arrayOf(android.text.InputFilter.LengthFilter(6))
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
-            // Use weight to fill space between buttons
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.5f)
 
             setOnEditorActionListener { v, actionId, _ ->
@@ -832,8 +945,8 @@ class PropertyControl(
                         val num = v.text.toString().toIntOrNull() ?: value
                         setProgress(num)
                         v.clearFocus()
-                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-                        imm.hideSoftInputFromWindow(v.windowToken, 0)
+                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                        imm?.hideSoftInputFromWindow(v.windowToken, 0)
                         (context as? MainActivity)?.hideSystemUI()
                     } catch (e: Exception) {}
                     true
@@ -841,65 +954,90 @@ class PropertyControl(
             }
         }
 
-        // Increment Button (Weight 1)
-        val btnInc = createNumButton("+") { setProgress(value + 1) }
+        val btnInc = createNumButton(context, "+") { setProgress(value + 1) }
 
         numRow.addView(btnDec); numRow.addView(baseValueInput); numRow.addView(btnInc)
         floatingPanel?.addView(numRow)
 
-        // --- LIVE REALTIME VALUE (Just Number, Grey) ---
         val liveRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 }
         }
         liveValueDisplay = TextView(context).apply {
-            text = "$value"
+            text = formatValue(value)
             textSize = 14f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.LTGRAY) // Grey
+            setTextColor(Color.LTGRAY)
         }
         liveRow.addView(liveValueDisplay)
         floatingPanel?.addView(liveRow)
 
-        // --- SEPARATOR ---
         floatingPanel?.addView(View(context).apply {
             layoutParams = LinearLayout.LayoutParams(-1, 2).apply { bottomMargin = 20 }
             setBackgroundColor(Color.DKGRAY)
         })
 
-        // --- SHAPE CYCLE BUTTON ---
-        // Just the name, bigger text, PERFECTLY CENTERED
-        shapeBtn = Button(context).apply {
-            text = modShape.name
-            textSize = 14f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            includeFontPadding = false // Important for vertical centering
-            setPadding(0, 0, 0, 0)   // Important for vertical centering
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#444444"))
-                cornerRadius = 10f
-                setStroke(1, Color.GRAY)
-            }
-            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 25 }
-            setOnClickListener {
-                val nextOrdinal = (modShape.ordinal + 1) % WaveShape.values().size
-                modShape = WaveShape.values()[nextOrdinal]
+        if (hasModulation) {
+            shapeBtn = Button(context).apply {
                 text = modShape.name
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+                setPadding(0, 0, 0, 0)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#444444"))
+                    cornerRadius = 10f
+                    setStroke(1, Color.GRAY)
+                }
+                layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 25 }
+                setOnClickListener {
+                    val nextOrdinal = (modShape.ordinal + 1) % WaveShape.values().size
+                    modShape = WaveShape.values()[nextOrdinal]
+                    text = modShape.name
+                }
+            }
+            floatingPanel?.addView(shapeBtn)
+
+            modPanelSpeedSeekBar = addSliderToPanel(context, "SPEED", modRate) { updateModRate(it) }
+            modPanelDepthSeekBar = addSliderToPanel(context, "DEPTH", modDepth) { updateModDepth(it); updateIndicatorVisuals() }
+            floatingPanel?.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 20) })
+        }
+
+        floatingPanel?.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
+
+        val resetBtn = Button(context).apply {
+            text = "RESET"
+            textSize = 14f
+            setTextColor(Color.LTGRAY)
+            // FIX: Remove padding and font padding to ensure centering
+            includeFontPadding = false
+            setPadding(0, 0, 0, 0)
+            gravity = Gravity.CENTER
+
+            background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                setStroke(2, Color.DKGRAY)
+                cornerRadius = 12f
+            }
+            // FIX: Increased height to 110 and added margins to prevent clipping
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110).apply {
+                bottomMargin = 10
+                topMargin = 5
+            }
+            setOnClickListener {
+                reset()
             }
         }
-        floatingPanel?.addView(shapeBtn)
-
-        modPanelSpeedSeekBar = addSliderToPanel("SPEED", modRate) { updateModRate(it) }
-        modPanelDepthSeekBar = addSliderToPanel("DEPTH", modDepth) { updateModDepth(it); updateIndicatorVisuals() }
+        floatingPanel?.addView(resetBtn)
 
         rootLayout.addView(floatingPanel)
         activeControl = this
     }
 
-    private fun createNumButton(txt: String, action: () -> Unit): Button {
-        return Button(context).apply {
+    private fun createNumButton(ctx: Context, txt: String, action: () -> Unit): Button {
+        return Button(ctx).apply {
             text = txt
             textSize = 24f
             setTextColor(Color.WHITE)
@@ -918,10 +1056,10 @@ class PropertyControl(
         }
     }
 
-    private fun addSliderToPanel(name: String, current: Int, onChange: (Int) -> Unit): SeekBar {
-        val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 10, 0, 10) }
-        row.addView(TextView(context).apply { text=name; textSize=10f; setTextColor(Color.LTGRAY); layoutParams=LinearLayout.LayoutParams(120, -2) })
-        val sb = SeekBar(context).apply {
+    private fun addSliderToPanel(ctx: Context, name: String, current: Int, onChange: (Int) -> Unit): SeekBar {
+        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 10, 0, 10) }
+        row.addView(TextView(ctx).apply { text=name; textSize=10f; setTextColor(Color.LTGRAY); layoutParams=LinearLayout.LayoutParams(120, -2) })
+        val sb = SeekBar(ctx).apply {
             max = 1000; progress = current; layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
             thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -934,29 +1072,7 @@ class PropertyControl(
         floatingPanel?.addView(row)
         return sb
     }
-
-    fun stopAnimation() { isAnimating = false; animTarget = null; modRateTarget = null; modDepthTarget = null }
-
-    fun closeMenu() {
-        if (floatingPanel != null) {
-            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
-            baseValueInput?.windowToken?.let { imm?.hideSoftInputFromWindow(it, 0) }
-
-            (context as? MainActivity)?.overlayHUD?.removeView(floatingPanel)
-            floatingPanel = null
-            modPanelSpeedSeekBar = null
-            modPanelDepthSeekBar = null
-            liveValueDisplay = null
-            baseValueInput = null
-            shapeBtn = null
-
-            (context as? MainActivity)?.hideSystemUI()
-        }
-        if (activeControl == this) activeControl = null
-    }
 }
-
-
 
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
@@ -968,7 +1084,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var axisSb: SeekBar
     private lateinit var transSeekBar: SeekBar
     val controls = java.util.concurrent.CopyOnWriteArrayList<PropertyControl>()
-    val controlsMap = mutableMapOf<String, PropertyControl>()
+    val controlsMap = java.util.concurrent.ConcurrentHashMap<String, PropertyControl>()
     private val presetButtons = mutableMapOf<Int, Button>()
     private lateinit var menuBtn: Button
     // private var currentAnimator: ValueAnimator? = null // REMOVED
@@ -1036,7 +1152,7 @@ class MainActivity : AppCompatActivity() {
         super.onConfigurationChanged(newConfig)
         isRebuildingHUD = true
 
-        // 1. Save State before destruction
+        // 1. Save State
         val activeControlId = PropertyControl.activeControl?.id
         PropertyControl.closeActiveMenu()
 
@@ -1048,36 +1164,39 @@ class MainActivity : AppCompatActivity() {
             settingsMenu!!.cleanup()
         }
 
-        // Save transient UI state
         val savedTransProgress = if (::transSeekBar.isInitialized) transSeekBar.progress else 333
-        val savedIsAutoPlaying = isAutoPlaying // Keep playing status
+        val savedIsAutoPlaying = isAutoPlaying
 
         // 2. Rebuild
-        overlayHUD.removeAllViews()
-        presetButtons.clear() // Clear old references
+        // IMPORTANT: Just remove children, do not nullify overlayHUD
+        if (::overlayHUD.isInitialized) {
+            overlayHUD.removeAllViews()
+        }
+
+        presetButtons.clear()
+
+        // This will now refill the EXISTING overlayHUD
         setupOverlayHUD()
 
         // 3. Restore State
-        overlayHUD.visibility = if (isHudVisible) View.VISIBLE else View.GONE
+        if (::overlayHUD.isInitialized) {
+            overlayHUD.visibility = if (isHudVisible) View.VISIBLE else View.GONE
+        }
         applyReadabilityStyle()
         updateSidebarVisuals()
 
-        // Restore Slider
-        transSeekBar.progress = savedTransProgress
+        if (::transSeekBar.isInitialized) transSeekBar.progress = savedTransProgress
 
-        // Restore Active Preset Visuals (Highlight)
         if (activePreset != -1) {
             val drawable = presetDrawables[activePreset]
             drawable?.isActive = true
             drawable?.invalidateSelf()
         }
 
-        // Restore Auto-Play Visuals
         isAutoPlaying = savedIsAutoPlaying
-        playBtn.setImageDrawable(createPlayIcon(isAutoPlaying))
-        // Note: The runnable is still running on the handler, so logic continues automatically.
+        if (::playBtn.isInitialized) playBtn.setImageDrawable(createPlayIcon(isAutoPlaying))
 
-        // Restore Menus
+        // Restore Menus - Using the Thread-Safe map
         if (activeControlId != null && controlsMap.containsKey(activeControlId)) {
             handler.postDelayed({ controlsMap[activeControlId]?.toggleMenu() }, 50)
         }
@@ -1091,21 +1210,22 @@ class MainActivity : AppCompatActivity() {
         isRebuildingHUD = false
     }
 
-
     fun resetPresetsToDefault() {
-        // 1. Clear SharedPreferences
         val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
         prefs.edit().clear().apply()
-
-        // 2. Clear in-memory presets map
         presets.clear()
-
-        // 3. Reload hardcoded defaults
         initDefaultPresets()
-
-        // 4. Reset view to preset 1
         globalReset()
         applyPreset(1)
+
+        // Force UI refresh to fix "disappearing buttons"
+        runOnUiThread {
+            overlayHUD.removeAllViews()
+            setupOverlayHUD()
+            overlayHUD.visibility = if (isHudVisible) View.VISIBLE else View.GONE
+            applyReadabilityStyle()
+            updateSidebarVisuals()
+        }
 
         Toast.makeText(this, "All presets reset to factory defaults.", Toast.LENGTH_LONG).show()
     }
@@ -1295,10 +1415,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+
+        // Detach all UI from controls to prevent context leaks
+        controls.forEach { it.detach() }
+
         exoPlayer?.release()
         exoPlayer = null
         displayHelper.stop()
     }
+
 
     private fun handleInteraction(event: MotionEvent) {
         if (event.pointerCount >= 2) {
@@ -1361,10 +1486,19 @@ class MainActivity : AppCompatActivity() {
 
 
 
-    // REPLACE the existing setupOverlayHUD method with this one:
     private fun setupOverlayHUD() {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-        overlayHUD = FrameLayout(this).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
+
+        // FIX: Only create the container ONCE.
+        // If it already exists, we just clean it (which is done in onConfigChanged) and re-add children.
+        if (!::overlayHUD.isInitialized) {
+            overlayHUD = FrameLayout(this).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
+            addContentView(overlayHUD, ViewGroup.LayoutParams(-1, -1))
+        } else {
+            // Safety measure: ensure it's clean if called from somewhere else
+            overlayHUD.removeAllViews()
+        }
+
         flashOverlay = createFlashView()
         val logoView = createLogoView()
         setupParameterMenu()
@@ -1434,7 +1568,8 @@ class MainActivity : AppCompatActivity() {
             else { gravity = Gravity.TOP or Gravity.END; topMargin = 40; rightMargin = 40 }
         }
         overlayHUD.addView(cameraPanel, cameraParams)
-        addContentView(overlayHUD, ViewGroup.LayoutParams(-1, -1))
+
+        // Removed addContentView here because it's handled in the check at the top
         updateSidebarVisuals()
     }
 
@@ -1518,19 +1653,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun populateParameterGroups(menuLayout: LinearLayout) {
         var currentGroupContent: LinearLayout? = null
+
         fun createGroup(title: String, startOpen: Boolean = false) {
             val (container, content) = createCollapsibleGroupView(title, startOpen)
             menuLayout.addView(container)
             currentGroupContent = content
         }
+
         fun addControl(c: PropertyControl) {
             if (controlsMap.containsKey(c.id)) {
-                val existingControl = controlsMap[c.id]!!
-                currentGroupContent?.let { existingControl.attachTo(it) } ?: existingControl.attachTo(menuLayout)
+                val existing = controlsMap[c.id]!!
+                currentGroupContent?.let { existing.attachTo(this, it) } ?: existing.attachTo(this, menuLayout)
             } else {
                 controls.add(c)
                 controlsMap[c.id] = c
-                currentGroupContent?.let { c.attachTo(it) } ?: c.attachTo(menuLayout)
+                currentGroupContent?.let { c.attachTo(this, it) } ?: c.attachTo(this, menuLayout)
             }
         }
 
@@ -1538,91 +1675,71 @@ class MainActivity : AppCompatActivity() {
         setupGeometrySpecifics(currentGroupContent!!)
 
         createGroup("3D")
-        addControl(PropertyControl(this, "3D_MIX", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "S_SHAPE", "SHAPE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        // FOV 0.5 to 2.5 is a good range for Fisheye
-        addControl(PropertyControl(this, "S_FOV", "FISHEYE", defaultValue = 500, outMin=0.2f, outMax=1.5f, hasModulation = true))
-        addControl(PropertyControl(this, "S_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
-        addControl(PropertyControl(this, "T_HUE_STR", "RAINBOW STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "T_HUE_POS", "RAINBOW POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "T_WAVE_STR", "WAVE STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "T_WAVE_POS", "WAVE POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl("3D_MIX", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("S_SHAPE", "SHAPE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("S_FOV", "FISHEYE", defaultValue = 500, outMin=0.2f, outMax=1.5f, hasModulation = true))
+        addControl(PropertyControl("S_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
+        addControl(PropertyControl("T_HUE_STR", "RAINBOW STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("T_HUE_POS", "RAINBOW POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl("T_WAVE_STR", "WAVE STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("T_WAVE_POS", "WAVE POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
 
         createGroup("MORPH (Careful)")
-        addControl(PropertyControl(this, "CURVE", "CURVE", defaultValue = 250, outMin=0.0f, outMax=4.0f, hasModulation = true))
-        addControl(PropertyControl(this, "TWIST", "VORTEX", defaultValue = 500, outMin=-5.0f, outMax=5.0f, hasModulation = true))
-        addControl(PropertyControl(this, "FLUX", "FLUX", defaultValue = 0, outMin=0f, outMax=0.5f, hasModulation = true))
+        addControl(PropertyControl("CURVE", "CURVE", defaultValue = 250, outMin=0.0f, outMax=4.0f, hasModulation = true))
+        addControl(PropertyControl("TWIST", "VORTEX", defaultValue = 500, outMin=-5.0f, outMax=5.0f, hasModulation = true))
+        addControl(PropertyControl("FLUX", "FLUX", defaultValue = 0, outMin=0f, outMax=0.5f, hasModulation = true))
 
         createGroup("MASTER TRANSFORM")
-        // WRAP MODE for Angles (0 to 1 range, the shader handles the 360 mult, or we can do 0-360 here)
-        // Let's output 0.0 to 1.0 for Angle, and multiply by 360 in shader or renderer to keep WRAP logic clean.
-        addControl(PropertyControl(this, "M_ANGLE", "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "M_ZOOM", "ZOOM", defaultValue = 130, outMin=0.1f, outMax=4.0f, hasModulation = true))
-        addControl(PropertyControl(this, "M_TX", "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "M_TY", "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "M_TILTX", "TILT X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "M_TILTY", "TILT Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "M_RGB", "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.1f, hasModulation = true))
+        addControl(PropertyControl("M_ANGLE", "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl("M_ZOOM", "ZOOM", defaultValue = 130, outMin=0.1f, outMax=4.0f, hasModulation = true))
+        addControl(PropertyControl("M_TX", "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("M_TY", "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("M_TILTX", "TILT X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("M_TILTY", "TILT Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("M_RGB", "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.1f, hasModulation = true))
 
         createGroup("CAMERA TRANSFORM")
         setupCameraOrientationControls(currentGroupContent!!)
-        addControl(PropertyControl(this, "C_ANGLE", "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "WARP", "WARP DISTORT", defaultValue = 0, outMin=0f, outMax=1f))
-        addControl(PropertyControl(this, "C_ZOOM", "ZOOM", defaultValue = 320, outMin=0.3f, outMax=2.5f, hasModulation = true))
-        addControl(PropertyControl(this, "C_TX", "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "C_TY", "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "C_TILTX", "TILT X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "C_TILTY", "TILT Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "RGB", "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.05f, hasModulation = true))
+        addControl(PropertyControl("C_ANGLE", "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl("WARP", "WARP DISTORT", defaultValue = 0, outMin=0f, outMax=1f))
+        addControl(PropertyControl("C_ZOOM", "ZOOM", defaultValue = 320, outMin=0.3f, outMax=2.5f, hasModulation = true))
+        addControl(PropertyControl("C_TX", "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("C_TY", "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("C_TILTX", "TILT X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("C_TILTY", "TILT Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("RGB", "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.05f, hasModulation = true))
 
         createGroup("COLOR")
-        addControl(PropertyControl(this, "BRIT", "BRIGHTNESS", defaultValue = 500, outMin=0f, outMax=2f))
-        addControl(PropertyControl(this, "HUE", "HUE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl(this, "NEG", "NEGATIVE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl(this, "GLOW", "GLOW", defaultValue = 0, outMin=0f, outMax=2f, hasModulation = true))
-        addControl(PropertyControl(this, "CONTRAST", "CONTRAST", defaultValue = 500, outMin=0f, outMax=2f))
-        addControl(PropertyControl(this, "VIBRANCE", "SATURATION", defaultValue = 500, outMin=0f, outMax=2f))
+        addControl(PropertyControl("BRIT", "BRIGHTNESS", defaultValue = 500, outMin=0f, outMax=2f))
+        addControl(PropertyControl("HUE", "HUE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        addControl(PropertyControl("NEG", "NEGATIVE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("GLOW", "GLOW", defaultValue = 0, outMin=0f, outMax=2f, hasModulation = true))
+        addControl(PropertyControl("CONTRAST", "CONTRAST", defaultValue = 500, outMin=0f, outMax=2f))
+        addControl(PropertyControl("VIBRANCE", "SATURATION", defaultValue = 500, outMin=0f, outMax=2f))
     }
 
     private fun setupGeometrySpecifics(parent: LinearLayout) {
-        val axisContainer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 10) }
         val axisId = "AXIS"
         val axisCtrl: PropertyControl
         if (controlsMap.containsKey(axisId)) {
             axisCtrl = controlsMap[axisId]!!
         } else {
-            axisCtrl = PropertyControl(this, axisId, "COUNT", min = 0, max = 15, defaultValue = 1)
+            axisCtrl = PropertyControl(
+                axisId, "COUNT",
+                min = 1, max = 25, sliderMax = 25,
+                defaultValue = 2,
+                layoutStyle = PropertyControl.LayoutStyle.ROW,
+                includeInPreset = false,
+                hasModulation = false,
+                logPower = 1,
+                showValue = true
+            ) {
+                renderer.axisCount = it.toFloat()
+            }
             controls.add(axisCtrl)
             controlsMap[axisId] = axisCtrl
         }
-        axisSb = SeekBar(this).apply {
-            max = 25
-            progress = axisCtrl.value
-            layoutParams = LinearLayout.LayoutParams(0, 65, 1f)
-            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
-                    renderer.axisCount = (p + 1).toFloat()
-                    axisCtrl.setProgress(p)
-                }
-                override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {}
-            })
-        }
-        lockBtn = Button(this).apply {
-            background = createLockDrawable(axisLocked)
-            layoutParams = LinearLayout.LayoutParams(80, 80).apply { leftMargin = 20 }
-            alpha = if (axisLocked) 1.0f else 0.4f
-            setOnClickListener {
-                axisLocked = !axisLocked
-                background = createLockDrawable(axisLocked)
-                alpha = if (axisLocked) 1.0f else 0.4f
-            }
-        }
-        renderer.axisCount = (axisCtrl.value + 1).toFloat()
-        axisContainer.addView(TextView(this).apply { text = "COUNT"; setTextColor(Color.WHITE); textSize = 8f; minWidth = 100; alpha = 0.8f })
-        axisContainer.addView(axisSb)
-        axisContainer.addView(lockBtn)
-        parent.addView(axisContainer)
+        axisCtrl.attachTo(this, parent)
     }
 
     private fun setupCameraOrientationControls(parent: LinearLayout) {
@@ -1666,63 +1783,54 @@ class MainActivity : AppCompatActivity() {
             clipToPadding = false
         }
 
-        // --- Transition Time Control + Play Button ---
+        // --- Transition Time + Play Button Row ---
         val transContainer = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(10, 0, 0, 5)
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(10, 0, 10, 5)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
-        transContainer.addView(ImageView(this).apply {
-            setImageDrawable(createClockDrawable())
-            alpha = 0.5f
-            layoutParams = LinearLayout.LayoutParams(50, 50).apply { rightMargin = 10 }
-        })
-
-        val timeLabel = TextView(this).apply {
-            text = "%.1fs".format(transitionMs / 1000f)
-            setTextColor(Color.WHITE)
-            textSize = 12f
-            setPadding(4, 0, 8, 0)
-        }
-        transContainer.addView(timeLabel)
-
-        // Calculate progress, but don't let the listener screw up the exact MS value during rebuild
-        val currentProgress = ((transitionMs / 30000.0).pow(1.0/3.0) * 1000).toInt().coerceIn(0, 1000)
-
-        transSeekBar = SeekBar(this).apply {
-            max = 1000
-            progress = currentProgress
-            layoutParams = LinearLayout.LayoutParams(500, 55)
-            thumb = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setSize(38, 38)
-                cornerRadius = 19f
+        // Transition Time Control
+        val transId = "TRANS_TIME"
+        var transCtrl = controlsMap[transId]
+        if (transCtrl == null) {
+            transCtrl = PropertyControl(
+                transId, "TIME",
+                min = 0, max = 300000, sliderMax = 30000,
+                defaultValue = 1000,
+                layoutStyle = PropertyControl.LayoutStyle.ROW,
+                iconResId = android.R.drawable.ic_menu_recent_history,
+                includeInPreset = false,
+                hasModulation = false,
+                logPower = 3,
+                showValue = true,
+                valueFormatter = { "%.1fs".format(it / 1000f) }
+            ) {
+                transitionMs = it.toLong()
             }
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
-                    // Only update logic if user touches or logic is running,
-                    // prevent rounding errors during rebuild
-                    if (f || !isRebuildingHUD) {
-                        transitionMs = ((p / 1000f).pow(3.0f) * 30000).toLong()
-                        timeLabel.text = "%.1fs".format(transitionMs / 1000f)
-                    }
-                }
-                override fun onStartTrackingTouch(s: SeekBar?) {}
-                override fun onStopTrackingTouch(s: SeekBar?) {}
-            })
+            controls.add(transCtrl)
+            controlsMap[transId] = transCtrl
         }
-        transContainer.addView(transSeekBar)
+
+        val sliderWrapper = LinearLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        }
+        transCtrl.attachTo(this, sliderWrapper)
+        transContainer.addView(sliderWrapper)
 
         // --- Play Button ---
         playBtn = ImageButton(this).apply {
             setImageDrawable(createPlayIcon(isAutoPlaying))
             background = null
             scaleType = ImageView.ScaleType.FIT_CENTER
-            layoutParams = LinearLayout.LayoutParams(110, 110).apply { leftMargin = 15 }
+            layoutParams = LinearLayout.LayoutParams(110, 110).apply { leftMargin = 5 }
             setPadding(10, 10, 10, 10)
             setOnClickListener { toggleAutoPlay() }
         }
         transContainer.addView(playBtn)
+
+        presetPanel.addView(transContainer)
 
         // --- Preset Buttons ---
         val presetRow = FrameLayout(this)
@@ -1732,39 +1840,28 @@ class MainActivity : AppCompatActivity() {
             overScrollMode = View.OVER_SCROLL_NEVER
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-
         val btnRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
-        // Cleanup old animators/maps
-        presetButtons.clear() // Although not used for TextViews, good practice
+        presetButtons.clear()
         presetDrawables.clear()
         presetAnimators.values.forEach { it.cancel() }
         presetAnimators.clear()
 
-        // Loop 9 downTo 1
         (9 downTo 1).forEach { idx ->
             val pd = ProgressButtonDrawable(idx.toString())
 
-            // Logic to restore animation state if rotating during transition
             if (idx == activePreset) {
                 pd.isActive = true
-
                 val timePassed = System.currentTimeMillis() - transitionStartTime
-
-                // If we are currently transitioning
                 if (timePassed < transitionMs && transitionMs > 0) {
                     val startProgress = (timePassed.toFloat() / transitionMs).coerceIn(0f, 1f)
-
-                    // Set initial state so it doesn't blink empty
                     pd.setProgress(startProgress)
-
-                    // Resume animation
                     val anim = ValueAnimator.ofFloat(startProgress, 1f).apply {
                         duration = (transitionMs - timePassed).coerceAtLeast(0)
-                        interpolator = android.view.animation.LinearInterpolator() // Important for smooth resume
+                        interpolator = android.view.animation.LinearInterpolator()
                         addUpdateListener { va ->
                             pd.setProgress(va.animatedValue as Float)
                             pd.invalidateSelf()
@@ -1773,29 +1870,20 @@ class MainActivity : AppCompatActivity() {
                     }
                     presetAnimators[idx] = anim
                 } else {
-                    // Transition finished
                     pd.setProgress(1f)
                 }
             }
 
             presetDrawables[idx] = pd
 
-            // Use TextView instead of Button to avoid default OS styling hiding the background
             val b = TextView(this).apply {
-                text = "" // Text is drawn by Drawable
+                text = ""
                 background = pd
                 alpha = 1.0f
                 isClickable = true
                 isFocusable = true
-
-                layoutParams = LinearLayout.LayoutParams(83, 110).apply {
-                    setMargins(2, 0, 2, 0)
-                }
-
-                setOnClickListener {
-                    stopAutoPlay()
-                    applyPreset(idx)
-                }
+                layoutParams = LinearLayout.LayoutParams(83, 110).apply { setMargins(2, 0, 2, 0) }
+                setOnClickListener { stopAutoPlay(); applyPreset(idx) }
                 setOnLongClickListener {
                     pendingSaveIndex = idx
                     saveConfirmBtn.visibility = View.VISIBLE
@@ -1814,24 +1902,16 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.BLACK)
             textSize = 14f
             setTypeface(null, Typeface.BOLD)
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                cornerRadius = 12f
-            }
+            background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = 12f }
             layoutParams = FrameLayout.LayoutParams(280, 90, Gravity.CENTER)
-            setOnClickListener {
-                pendingSaveIndex?.let { savePreset(it) }
-                visibility = View.GONE
-            }
+            setOnClickListener { pendingSaveIndex?.let { savePreset(it) }; visibility = View.GONE }
         }
         presetRow.addView(saveConfirmBtn)
 
-        presetPanel.addView(transContainer)
         presetPanel.addView(presetRow)
 
         return presetPanel
     }
-
 
     private fun toggleAutoPlay() {
         if (isAutoPlaying) {
@@ -2137,8 +2217,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     public fun globalReset() {
-        renderer.stopRotationAnim() // STOP GL ANIM
-        controls.forEach { it.stopAnimation() } // STOP GL ANIM
+        renderer.stopRotationAnim()
+        controls.forEach { it.stopAnimation() }
 
         renderer.mRotAccum = 0.0
         renderer.cRotAccum = 0.0
@@ -2150,14 +2230,11 @@ class MainActivity : AppCompatActivity() {
         renderer.rot180 = false
         activePreset = -1
         updatePresetHighlights()
+
+        // Reset all controls
         controls.forEach { it.reset() }
-        renderer.axisCount = 2.0f
-        axisSb.progress = 1
-        controlsMap["AXIS"]?.setProgress(1)
+
         updateSidebarVisuals()
-        if (::transSeekBar.isInitialized) {
-            transSeekBar.progress = 322
-        }
     }
 
     private fun updatePresetHighlights() {
@@ -2236,7 +2313,9 @@ class MainActivity : AppCompatActivity() {
         renderer.animateRotationTo(targetMRot, targetCRot, durationSec)
 
         controls.forEach { control ->
-            if (control.id == "AXIS") return@forEach
+            // FIX: Explicitly skip controls that should not be part of the preset (like TRANS_TIME)
+            if (control.id == "AXIS" || !control.includeInPreset) return@forEach
+
             val snap = p.controlSnapshots[control.id]
             if (snap != null) {
                 control.animateTo(snap.value.toFloat(), durationSec, snap.shape)
@@ -2254,9 +2333,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-
     private fun savePreset(idx: Int) {
-        val snapshots = controls.filter { it.id != "AXIS" }.associate { it.id to it.getSnapshot() }
+        // FIX: Added filter && it.includeInPreset to ensure Transition Time isn't saved
+        val snapshots = controls.filter { it.id != "AXIS" && it.includeInPreset }.associate { it.id to it.getSnapshot() }
+
         val axisVal = controlsMap["AXIS"]?.value ?: 0
         val newPreset = Preset(snapshots, renderer.flipX, renderer.flipY, renderer.rot180, axisVal + 1)
         presets[idx] = newPreset
@@ -2278,7 +2358,6 @@ class MainActivity : AppCompatActivity() {
             getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE).edit().putString("PRESET_$idx", rootObj.toString()).apply()
             Toast.makeText(this, "Preset $idx Saved", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) { Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show() }
-
     }
 
     // Add this helper function inside MainActivity

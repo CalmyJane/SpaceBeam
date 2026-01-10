@@ -23,7 +23,7 @@
         <activity
             android:name=".MainActivity"
             android:screenOrientation="fullSensor"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode|keyboardHidden"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
