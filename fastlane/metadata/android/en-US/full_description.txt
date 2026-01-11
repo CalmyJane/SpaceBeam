@@ -1,0 +1,24 @@
+    SpaceBeam transforms your camera feed into psychedelic, real-time geometry pattern generator. It transmtis the image as a "second screen"
+    to be shared over miracast or hdmi.
+    
+    Features:
+    * kaleidoscope effects
+    * Front/Back Camera as Input source
+    * RTSP as input-source
+    * Image/Video as input-source
+    * 9 presets
+    * Auto-Play mode
+
+    Recommended Setup:
+    Run this app on a Samsung Android device (e.g. Samsung S20 FE). Samsung is the only system still supporting miracast. Look for the option "Smart View".
+    Connect to any smart TV/Projector that supports miracast. Or connect to a miracast-hdmi-dongle.
+    Optional: Use a second phone as remote camera. Take the second phone, install "IP Webcam" app.
+    On main phone, host a wifi hotspot, or bring both phones into the same external wifi.
+    Select the rtsp input in the app and enter the address "rtsp://192.168.30.40:8080/h264_ulaw.sdp" (the IP adress is shown on the remote cam phone when the server is running).
+    You should get a remote image from the second phone through quite some distance.
+
+    This way you can very easily create stunning visual art setups all just with a phone and not tons of cabling and heavy computers with expensive software.
+
+    Hope you enjoy this, if you do, send me a mail :)
+    info@calmyjane.com
+    www.calmyjane.com
