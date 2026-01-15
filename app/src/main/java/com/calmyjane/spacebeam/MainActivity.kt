@@ -464,7 +464,7 @@ class ExternalDisplayHelper(
     }
 }
 
-class PropertyControl(
+open class PropertyControl(
     val id: String,
     val label: String,
     val min: Int = 0,
@@ -529,13 +529,13 @@ class PropertyControl(
     private var valueDisplay: TextView? = null
     private var mainRowLayout: LinearLayout? = null
 
-    private var floatingPanel: LinearLayout? = null
+    protected var floatingPanel: LinearLayout? = null
     private var modPanelSpeedSeekBar: SeekBar? = null
     private var modPanelDepthSeekBar: SeekBar? = null
     private var liveValueDisplay: TextView? = null
     private var baseValueInput: EditText? = null
     private var shapeBtn: Button? = null
-    private var currentContext: Context? = null
+    protected var currentContext: Context? = null
 
     val computedValue: Float
         get() {
@@ -596,7 +596,6 @@ class PropertyControl(
                 value = preciseValue.toInt()
                 modRateTarget?.let { preciseModRate = modRateStart + (it - modRateStart) * ease }
                 modDepthTarget?.let { preciseModDepth = modDepthStart + (it - modDepthStart) * ease }
-                syncUiElements()
             }
         }
 
@@ -903,7 +902,7 @@ class PropertyControl(
         if (activeControl == this) activeControl = null
     }
 
-    private fun openMenu(context: Context) {
+    open fun openMenu(context: Context) {
         val activity = context as? MainActivity ?: return
         val rootLayout = activity.overlayHUD
         val dm = context.resources.displayMetrics
@@ -928,6 +927,9 @@ class PropertyControl(
                 FrameLayout.LayoutParams(600, -2).apply { gravity = Gravity.CENTER_VERTICAL or Gravity.START; leftMargin = 880 }
             }
         }
+
+        // --- HOOK FOR EXTRA CONTROLS ---
+        addExtraControls(floatingPanel!!, context)
 
         floatingPanel?.addView(TextView(context).apply {
             text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY); gravity = Gravity.CENTER
@@ -1029,17 +1031,14 @@ class PropertyControl(
             text = "RESET"
             textSize = 14f
             setTextColor(Color.LTGRAY)
-            // FIX: Remove padding and font padding to ensure centering
             includeFontPadding = false
             setPadding(0, 0, 0, 0)
             gravity = Gravity.CENTER
-
             background = GradientDrawable().apply {
                 setColor(Color.TRANSPARENT)
                 setStroke(2, Color.DKGRAY)
                 cornerRadius = 12f
             }
-            // FIX: Increased height to 110 and added margins to prevent clipping
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110).apply {
                 bottomMargin = 10
                 topMargin = 5
@@ -1054,7 +1053,10 @@ class PropertyControl(
         activeControl = this
     }
 
-    private fun createNumButton(ctx: Context, txt: String, action: () -> Unit): Button {
+    // Override this in subclasses to add custom buttons at the top of the menu
+    open fun addExtraControls(panel: LinearLayout, context: Context) {}
+
+    protected fun createNumButton(ctx: Context, txt: String, action: () -> Unit): Button {
         return Button(ctx).apply {
             text = txt
             textSize = 24f
@@ -1074,7 +1076,7 @@ class PropertyControl(
         }
     }
 
-    private fun addSliderToPanel(ctx: Context, name: String, current: Int, onChange: (Int) -> Unit): SeekBar {
+    protected fun addSliderToPanel(ctx: Context, name: String, current: Int, onChange: (Int) -> Unit): SeekBar {
         val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 10, 0, 10) }
         row.addView(TextView(ctx).apply { text=name; textSize=10f; setTextColor(Color.LTGRAY); layoutParams=LinearLayout.LayoutParams(120, -2) })
         val sb = SeekBar(ctx).apply {
@@ -1091,6 +1093,26 @@ class PropertyControl(
         return sb
     }
 }
+
+class SourcePropertyControl(
+    id: String,
+    label: String,
+    defaultValue: Int = 0
+) : PropertyControl(
+    id = id,
+    label = label,
+    defaultValue = defaultValue,
+    outMin = 0f,
+    outMax = 1f,
+    hasModulation = true,
+    iconResId = android.R.drawable.ic_menu_slideshow
+) {
+    override fun addExtraControls(panel: LinearLayout, context: Context) {
+        // Placeholders for future "Delete" or "Toggle Cam" buttons
+        // In the next phase, logic for switching front/back cam or deleting logic goes here.
+    }
+}
+
 
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
@@ -1263,13 +1285,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun startLocalMedia(uri: android.net.Uri) {
         val cpFuture = ProcessCameraProvider.getInstance(this)
-        cpFuture.addListener({ try { cpFuture.get().unbindAll() } catch (e: Exception) {} }, ContextCompat.getMainExecutor(this))
+
         val mimeType = contentResolver.getType(uri)
         val isImage = mimeType?.startsWith("image") == true
 
         glView.queueEvent {
-            renderer.resetVideoTexture()
-            val surface = renderer.getPlayerSurface() ?: return@queueEvent
+            val surface = renderer.getMediaSurface() ?: return@queueEvent
             runOnUiThread {
                 if (isImage) {
                     try {
@@ -1279,7 +1300,17 @@ class MainActivity : AppCompatActivity() {
                         val bitmap = BitmapFactory.decodeStream(inputStream)
                         inputStream?.close()
                         if (bitmap != null) {
-                            renderer.updateTextureSize(bitmap.width, bitmap.height)
+                            renderer.updateMediaTextureSize(bitmap.width, bitmap.height)
+
+                            // AUTO-ROTATE IMAGES
+                            // If Portrait image -> Rotate -90 to fill landscape screen
+                            // If Landscape image -> 0 rotation
+                            if (bitmap.height > bitmap.width) {
+                                renderer.setMediaRotation(-90f)
+                            } else {
+                                renderer.setMediaRotation(0f)
+                            }
+
                             val canvas = surface.lockCanvas(null)
                             canvas.drawColor(Color.BLACK)
                             val destRect = Rect(0, 0, canvas.width, canvas.height)
@@ -1287,6 +1318,9 @@ class MainActivity : AppCompatActivity() {
                             canvas.drawBitmap(bitmap, srcRect, destRect, null)
                             surface.unlockCanvasAndPost(canvas)
                             isRtspMode = true
+
+                            controlsMap["MEDIA_LEVEL"]?.animateTo(1000f, 0.5f)
+
                             Toast.makeText(this, "Image Loaded", Toast.LENGTH_SHORT).show()
                         }
                     } catch (e: Exception) { Log.e("Media", "Image Load Failed", e) }
@@ -1300,9 +1334,23 @@ class MainActivity : AppCompatActivity() {
                     exoPlayer?.setMediaItem(mediaItem)
                     exoPlayer?.repeatMode = Player.REPEAT_MODE_ONE
                     exoPlayer?.volume = 0f
+
+                    // Initial assumption
+                    renderer.setMediaRotation(0f)
+
                     exoPlayer?.addListener(object : Player.Listener {
                         override fun onVideoSizeChanged(videoSize: VideoSize) {
-                            if (videoSize.width > 0 && videoSize.height > 0) renderer.updateTextureSize(videoSize.width, videoSize.height)
+                            if (videoSize.width > 0 && videoSize.height > 0) {
+                                renderer.updateMediaTextureSize(videoSize.width, videoSize.height)
+
+                                // AUTO-ROTATE VIDEO
+                                // If video is strictly vertical (like a phone recording), rotate it to fill
+                                if (videoSize.height > videoSize.width) {
+                                    renderer.setMediaRotation(-90f)
+                                } else {
+                                    renderer.setMediaRotation(0f)
+                                }
+                            }
                         }
                         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                             Toast.makeText(this@MainActivity, "Video Error: Try a different file", Toast.LENGTH_SHORT).show()
@@ -1311,11 +1359,54 @@ class MainActivity : AppCompatActivity() {
                     exoPlayer?.prepare()
                     exoPlayer?.play()
                     isRtspMode = true
+                    controlsMap["MEDIA_LEVEL"]?.animateTo(1000f, 0.5f)
                     Toast.makeText(this, "Playing Video", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
+
+    private fun startRtsp(url: String) {
+        glView.queueEvent {
+            val surface = renderer.getRtspSurface()
+            runOnUiThread {
+                if (surface != null) {
+                    if (exoPlayer == null) exoPlayer = ExoPlayer.Builder(this).build()
+                    exoPlayer?.volume = 0f
+                    exoPlayer?.stop()
+                    exoPlayer?.clearVideoSurface()
+                    exoPlayer?.setVideoSurface(surface)
+                    val rtspSource = RtspMediaSource.Factory().setForceUseRtpTcp(true).setTimeoutMs(5000).createMediaSource(MediaItem.fromUri(url))
+                    exoPlayer?.setMediaSource(rtspSource)
+
+                    exoPlayer?.addListener(object : Player.Listener {
+                        override fun onVideoSizeChanged(videoSize: VideoSize) {
+                            if (videoSize.width > 0 && videoSize.height > 0) {
+                                renderer.updateRtspTextureSize(videoSize.width, videoSize.height)
+
+                                // DYNAMIC RTSP ROTATION
+                                // If the stream sends Portrait (Height > Width), we rotate -90 to fill the mixer.
+                                // If the stream sends Landscape (Width > Height), we use 0.
+                                if (videoSize.height > videoSize.width) {
+                                    renderer.setRtspRotation(-90f)
+                                } else {
+                                    renderer.setRtspRotation(0f)
+                                }
+                            }
+                        }
+                        override fun onPlayerError(error: androidx.media3.common.PlaybackException) { Toast.makeText(this@MainActivity, "Stream Error: ${error.message}", Toast.LENGTH_LONG).show() }
+                    })
+                    exoPlayer?.prepare()
+                    exoPlayer?.play()
+                    isRtspMode = true
+                    lastRtspUrl = url
+                    controlsMap["RTSP_LEVEL"]?.animateTo(1000f, 0.5f)
+                    Toast.makeText(this, "Connecting (TCP)...", Toast.LENGTH_SHORT).show()
+                } else { Toast.makeText(this, "Renderer not ready", Toast.LENGTH_SHORT).show() }
+            }
+        }
+    }
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -1378,51 +1469,21 @@ class MainActivity : AppCompatActivity() {
             val provider = cpFuture.get()
             provider.unbindAll()
             glView.queueEvent {
-                renderer.resetVideoTexture()
+                // renderer.resetVideoTexture() // Don't reset, just re-bind camera
                 runOnUiThread {
                     val preview = Preview.Builder().setTargetRotation(Surface.ROTATION_90).build()
-                    preview.setSurfaceProvider { req -> renderer.provideSurface(req) }
+                    preview.setSurfaceProvider { req -> renderer.provideCameraSurface(req) }
                     try { provider.bindToLifecycle(this, currentSelector, preview) } catch (e: Exception) { Log.e("Camera", "Bind failed", e) }
                 }
             }
         }, ContextCompat.getMainExecutor(this))
     }
 
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             hideSystemUI()
-        }
-    }
-
-    private fun startRtsp(url: String) {
-        val cpFuture = ProcessCameraProvider.getInstance(this)
-        cpFuture.addListener({ try { cpFuture.get().unbindAll() } catch (e: Exception) {} }, ContextCompat.getMainExecutor(this))
-        glView.queueEvent {
-            renderer.resetVideoTexture()
-            val surface = renderer.getPlayerSurface()
-            runOnUiThread {
-                if (surface != null) {
-                    if (exoPlayer == null) exoPlayer = ExoPlayer.Builder(this).build()
-                    exoPlayer?.volume = 0f
-                    exoPlayer?.stop()
-                    exoPlayer?.clearVideoSurface()
-                    exoPlayer?.setVideoSurface(surface)
-                    val rtspSource = RtspMediaSource.Factory().setForceUseRtpTcp(true).setTimeoutMs(5000).createMediaSource(MediaItem.fromUri(url))
-                    exoPlayer?.setMediaSource(rtspSource)
-                    exoPlayer?.addListener(object : Player.Listener {
-                        override fun onVideoSizeChanged(videoSize: VideoSize) {
-                            if (videoSize.width > 0 && videoSize.height > 0) renderer.updateTextureSize(videoSize.width, videoSize.height)
-                        }
-                        override fun onPlayerError(error: androidx.media3.common.PlaybackException) { Toast.makeText(this@MainActivity, "Stream Error: ${error.message}", Toast.LENGTH_LONG).show() }
-                    })
-                    exoPlayer?.prepare()
-                    exoPlayer?.play()
-                    isRtspMode = true
-                    lastRtspUrl = url
-                    Toast.makeText(this, "Connecting (TCP)...", Toast.LENGTH_SHORT).show()
-                } else { Toast.makeText(this, "Renderer not ready", Toast.LENGTH_SHORT).show() }
-            }
         }
     }
 
@@ -1700,7 +1761,33 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        createGroup("GEOMETRY", startOpen = true)
+        // --- NEW MIXER SECTION ---
+        createGroup("MIXER", startOpen = true)
+        addControl(SourcePropertyControl("CAM_LEVEL", "CAMERA", defaultValue = 1000))
+        addControl(SourcePropertyControl("MEDIA_LEVEL", "MEDIA", defaultValue = 0))
+        addControl(SourcePropertyControl("RTSP_LEVEL", "STREAM", defaultValue = 0))
+
+        // Add "+" button (Visual Placeholder for now, functional logic to come)
+        val addBtn = Button(this).apply {
+            text = "+"
+            textSize = 20f
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#333333"))
+                cornerRadius = 15f
+                setStroke(1, Color.GRAY)
+            }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 80).apply {
+                setMargins(20, 10, 20, 10)
+            }
+            setOnClickListener {
+                showAddSourceDialog()
+            }
+        }
+        currentGroupContent?.addView(addBtn)
+
+
+        createGroup("GEOMETRY")
         setupCameraOrientationControls(currentGroupContent!!)
         setupGeometrySpecifics(currentGroupContent!!)
 
@@ -1745,6 +1832,28 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl("GLOW", "GLOW", defaultValue = 0, outMin=0f, outMax=2f, hasModulation = true))
         addControl(PropertyControl("CONTRAST", "CONTRAST", defaultValue = 500, outMin=0f, outMax=2f))
         addControl(PropertyControl("VIBRANCE", "SATURATION", defaultValue = 500, outMin=0f, outMax=2f))
+    }
+
+    private fun showAddSourceDialog() {
+        val items = arrayOf("Image", "Video", "RTSP Stream")
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Add Source")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> {
+                        // Triggers image picker, logic handled in onActivityResult -> startLocalMedia -> Mixer Channel 2
+                        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "image/*" }
+                        mediaPickerLauncher.launch(intent)
+                    }
+                    1 -> {
+                        // Triggers video picker -> startLocalMedia -> Mixer Channel 2
+                        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "video/*" }
+                        mediaPickerLauncher.launch(intent)
+                    }
+                    2 -> showRtspDialog() // -> startRtsp -> Mixer Channel 3
+                }
+            }
+            .show()
     }
 
     private fun setupGeometrySpecifics(parent: LinearLayout) {
@@ -2773,8 +2882,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
+        // Shaders
         private var kaleidoProgram = 0
         private var simpleProgram = 0
+        private var copyOesProgram = 0
+
         @Volatile private var isSurfaceReady = false
         private val mvpMatrix = FloatArray(16)
         private val identityMatrix = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
@@ -2789,22 +2901,133 @@ class MainActivity : AppCompatActivity() {
         var flipY = -1.0f
         var rot180 = false
 
-        // Resolution Tracking
-        private var texWidth = 1280
-        private var texHeight = 720
+        // Resolution Constant
+        private val FIXED_WIDTH = 1920
+        private val FIXED_HEIGHT = 1080
+        private var viewWidth = 1
+        private var viewHeight = 1
 
         // Timing
         private var lastTime = System.nanoTime()
         private var deltaTime = 0.0f
 
-        // GL Surfaces & Textures
-        private var cameraTexId = -1
-        private var surfaceTexture: SurfaceTexture? = null
-        private var playerSurface: Surface? = null
+        // --- SOURCE CHANNELS ---
+        inner class SourceChannel {
+            var oesTexId = -1
+            var surfaceTexture: SurfaceTexture? = null
+            var surface: Surface? = null
+
+            var fboId = 0
+            var fboTexId = 0
+
+            var width = 1280
+            var height = 720
+
+            // Rotation in degrees (0, 90, 180, 270)
+            var rotation = 0f
+
+            fun init() {
+                oesTexId = createOESTex()
+                surfaceTexture = SurfaceTexture(oesTexId)
+                surfaceTexture?.setDefaultBufferSize(width, height)
+
+                val fb = IntArray(1); val tx = IntArray(1)
+                GLES20.glGenFramebuffers(1, fb, 0)
+                GLES20.glGenTextures(1, tx, 0)
+                fboId = fb[0]; fboTexId = tx[0]
+
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, FIXED_WIDTH, FIXED_HEIGHT, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+                GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, fboTexId, 0)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            }
+
+            fun updateSize(w: Int, h: Int) {
+                width = w; height = h
+                glView.queueEvent { surfaceTexture?.setDefaultBufferSize(w, h) }
+            }
+
+            fun getSurfaceForInput(): Surface {
+                if (surface == null && surfaceTexture != null) surface = Surface(surfaceTexture)
+                return surface!!
+            }
+
+            fun processToFbo(program: Int) {
+                try {
+                    surfaceTexture?.updateTexImage()
+                } catch (e: Exception) { return }
+
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+                GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+                GLES20.glUseProgram(program)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTexId)
+
+                GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uTex"), 0)
+
+                // --- ROTATION & ASPECT FILL ---
+
+                // 1. Pass Rotation
+                val rad = Math.toRadians(-rotation.toDouble()).toFloat()
+                GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uRotation"), rad)
+
+                // 2. Determine Effective Source Dimensions
+                // If rotated 90 or 270 (sideways), width acts as height visually
+                val isSideways = (kotlin.math.abs(rotation) % 180f) > 45f
+                val effectiveW = if (isSideways) height.toFloat() else width.toFloat()
+                val effectiveH = if (isSideways) width.toFloat() else height.toFloat()
+
+                val fboAspect = FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat()
+                val safeH = if (effectiveH > 0) effectiveH else 1.0f
+                val srcAspect = effectiveW / safeH
+
+                var sx = 1.0f
+                var sy = 1.0f
+
+                // Aspect Fill (Crop to fit without distortion)
+                if (fboAspect > srcAspect) {
+                    // Screen is wider than image.
+                    // To fill width, we must ZOOM IN on height (crop top/bottom).
+                    // This means scaling Y by < 1.0 (using less texture space)
+                    sy = srcAspect / fboAspect
+                } else {
+                    // Screen is taller than image.
+                    // To fill height, we must ZOOM IN on width (crop sides).
+                    sx = fboAspect / srcAspect
+                }
+
+                // 3. Swap scales if we are rotated 90 degrees
+                // Because the scaling in shader applies to the UN-ROTATED texture coordinate system.
+                // If we determined we need to crop the "visual height" (sy), but the image is rotated 90deg,
+                // that visual height actually maps to the source texture's width.
+                if (isSideways) {
+                    val temp = sx
+                    sx = sy
+                    sy = temp
+                }
+
+                GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uScale"), sx, sy)
+
+                bindCommonAttribs(program)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            }
+        }
+
+        private val camChannel = SourceChannel()
+        private val mediaChannel = SourceChannel()
+        private val rtspChannel = SourceChannel()
+
         private var fboId = 0
         private var fboTexId = 0
-        private var fboWidth = 1920
-        private var fboHeight = 1080
 
         // Recorder / External
         private var captureRequested = false
@@ -2822,17 +3045,11 @@ class MainActivity : AppCompatActivity() {
         private var extWidth = 0
         private var extHeight = 0
 
-        // Buffers & Uniforms
         private lateinit var pBuf: FloatBuffer
         private lateinit var tBuf: FloatBuffer
         private var uLocs = mutableMapOf<String, Int>()
         private var simpleULocs = mutableMapOf<String, Int>()
-        private var viewWidth = 1
-        private var viewHeight = 1
-        private val FIXED_WIDTH = 1920
-        private val FIXED_HEIGHT = 1080
 
-        // --- Rotation Animation State ---
         private var rotTargetM: Double? = null
         private var rotStartM: Double = 0.0
         private var rotTargetC: Double? = null
@@ -2842,79 +3059,101 @@ class MainActivity : AppCompatActivity() {
         private var isRotAnimating = false
 
         fun animateRotationTo(targetM: Double, targetC: Double, duration: Float) {
-            rotTargetM = targetM
-            rotStartM = mRotAccum
-            rotTargetC = targetC
-            rotStartC = cRotAccum
-            rotAnimDuration = duration
-            rotAnimTime = 0f
-            isRotAnimating = true
+            rotTargetM = targetM; rotStartM = mRotAccum; rotTargetC = targetC; rotStartC = cRotAccum; rotAnimDuration = duration; rotAnimTime = 0f; isRotAnimating = true
         }
-
         fun stopRotationAnim() { isRotAnimating = false }
-
         fun resetPhases() { ctx.controls.forEach { it.lfoPhase = 0.0 }; mRotAccum = 0.0; cRotAccum = 0.0; lRotAccum = 0.0 }
         fun capturePhoto() { captureRequested = true }
         fun stopRecording(callback: (File?) -> Unit) { onStopCallback = callback; isStopRequested = true }
-        fun getPlayerSurface(): Surface? { if (surfaceTexture == null) return null; if (playerSurface == null) { playerSurface = Surface(surfaceTexture) }; return playerSurface }
         fun startRecording(file: File) { pendingRecordFile = file; recordStartTimeNs = 0 }
-        fun resetVideoTexture() {
-            playerSurface?.release(); playerSurface = null; surfaceTexture?.release(); surfaceTexture = null
-            if (cameraTexId != -1) { val t = IntArray(1); t[0] = cameraTexId; GLES20.glDeleteTextures(1, t, 0); cameraTexId = -1 }
-            cameraTexId = createOESTex(); surfaceTexture = SurfaceTexture(cameraTexId); surfaceTexture?.setDefaultBufferSize(texWidth, texHeight)
-        }
-        fun provideSurface(req: SurfaceRequest) {
+
+        fun provideCameraSurface(req: SurfaceRequest) {
             glView.queueEvent {
-                surfaceTexture?.let { st ->
-                    texWidth = req.resolution.width
-                    texHeight = req.resolution.height
-                    st.setDefaultBufferSize(texWidth, texHeight)
+                camChannel.surfaceTexture?.let { st ->
+                    camChannel.width = req.resolution.width
+                    camChannel.height = req.resolution.height
+                    st.setDefaultBufferSize(camChannel.width, camChannel.height)
                     val s = Surface(st)
                     req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() }
                 }
             }
         }
+
+        fun getMediaSurface(): Surface? = mediaChannel.getSurfaceForInput()
+        fun getRtspSurface(): Surface? = rtspChannel.getSurfaceForInput()
+
+        fun updateMediaTextureSize(w: Int, h: Int) = mediaChannel.updateSize(w, h)
+        fun updateRtspTextureSize(w: Int, h: Int) = rtspChannel.updateSize(w, h)
+
+        fun setMediaRotation(deg: Float) { mediaChannel.rotation = deg }
+        fun setRtspRotation(deg: Float) { rtspChannel.rotation = deg }
+
         fun setExternalSurface(s: Surface, w: Int, h: Int) { extSurfaceArgs = Triple(s, w, h) }
         fun removeExternalSurface() { extSurfaceArgs = null }
-
-        fun updateTextureSize(width: Int, height: Int) {
-            texWidth = width
-            texHeight = height
-            glView.queueEvent { surfaceTexture?.setDefaultBufferSize(width, height) }
-        }
 
         override fun onSurfaceCreated(gl: GL10?, config: GL10EGLConfig?) {
             setupEGL(); GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
 
-            // --- SHADER (Includes Aspect Fill for Camera->FBO) ---
-            val fSrc = """#extension GL_OES_EGL_image_external : require
-            precision highp float; varying vec2 v; uniform samplerExternalOES uTex;
+            // --- 1. COPY SHADER (OES -> 2D) with ROTATION & FILL ---
+            // Note the order: Scale THEN Rotate to ensure cropping happens relative to original image axes
+            val fSrcCopy = """#extension GL_OES_EGL_image_external : require
+    precision mediump float; varying vec2 v; 
+    uniform samplerExternalOES uTex; 
+    uniform vec2 uScale; 
+    uniform float uRotation;
+    
+    void main() {
+        // Center UV
+        vec2 uv = v - 0.5;
+        
+        // 1. Scale (Aspect Fit logic calculated in Kotlin)
+        // This expands the UV range if the image is smaller than screen
+        uv = uv * uScale;
+        
+        // 2. Rotate
+        float c = cos(uRotation);
+        float s = sin(uRotation);
+        uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+        
+        // Restore center
+        uv = uv + 0.5;
+        
+        // 3. MANUAL MIRRORED REPEAT
+        // OES textures don't always support GL_MIRRORED_REPEAT via params.
+        // We calculate it manually here:
+        // Range 0..1 stays 0..1
+        // Range 1..2 becomes 1..0 (Mirrored)
+        // Range -1..0 becomes 0..1 (Mirrored)
+        uv = abs(mod(uv + 1.0, 2.0) - 1.0);
+        
+        gl_FragColor = texture2D(uTex, uv);
+    }""".trimIndent()
+            copyOesProgram = createProgram(vSrc, fSrcCopy)
+
+            // --- 2. MIXER SHADER ---
+            val fSrcKaleido = """
+            precision highp float; varying vec2 v; 
+            uniform sampler2D uTexCam, uTexMedia, uTexRtsp;
+            uniform float uMixCam, uMixMedia, uMixRtsp;
             uniform float uMR, uCR, uCZ, uA, uMZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB, uWarp;
             uniform float uBrit, uTHueStr, uTHuePos, uTWaveStr, uTWavePos;
             uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
-            uniform float uTexAspect; 
             uniform float uCurve, uTwist, uFlux, uSShape, uSFov, uScroll, uMode;
 
             vec3 hueShift(vec3 color, float hue) { const vec3 k = vec3(0.57735, 0.57735, 0.57735); float cosAngle = cos(hue); return vec3(color * cosAngle + cross(k, color) * sin(hue) + k * dot(k, color) * (1.0 - cosAngle)); }
 
-            vec3 sampleCamera(vec2 uv, float rgbShift) {
+            vec3 sampleSource(sampler2D tex, vec2 uv, float rgbShift) {
                 vec2 centered = uv - 0.5;
                 float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y); centered /= max(z, 0.1);
                 centered *= uCZ;
-
-                // Aspect Fill: Camera to FBO
-                if (uA > uTexAspect) { centered.y *= uTexAspect / uA; } 
-                else { centered.x *= uA / uTexAspect; }
-
                 float aspectFactor = mix(uA, 1.0, uWarp); centered.x *= aspectFactor;
                 float cr = uCR * 0.01745329; float c = cos(cr); float s = sin(cr);
                 centered = vec2(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
                 centered.x /= aspectFactor; centered += uCT;
                 vec2 rotatedUV = centered + 0.5; rotatedUV.x += rgbShift; rotatedUV = (rotatedUV - 0.5) * uF + 0.5;
-
                 vec2 mirroredUV = abs(mod(rotatedUV + 1.0, 2.0) - 1.0);
-                return texture2D(uTex, mirroredUV).rgb;
+                return texture2D(tex, mirroredUV).rgb;
             }
 
             void main() {
@@ -2923,6 +3162,7 @@ class MainActivity : AppCompatActivity() {
                 float modeBlend = smoothstep(0.0, 1.0, uMode);
                 vec2 effectiveTilt = mix(uMTilt, vec2(0.0), modeBlend);
                 vec2 effectiveTrans = uMT + mix(vec2(0.0), uMTilt * 2.0, modeBlend);
+                
                 for(int i=0; i<3; i++) {
                     float mOff = (i==0) ? uMRGB : (i==2) ? -uMRGB : 0.0;
                     vec2 uv = v - 0.5;
@@ -2944,7 +3184,14 @@ class MainActivity : AppCompatActivity() {
                     mixedUV.y += uScroll;
                     vec2 cameraUV = abs(mod(mixedUV + 1.0, 2.0) - 1.0);
                     float sOff = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
-                    vec3 smp = sampleCamera(cameraUV, sOff);
+                    
+                    vec3 pixelAccum = vec3(0.0);
+                    if (uMixCam > 0.01) pixelAccum += sampleSource(uTexCam, cameraUV, sOff) * uMixCam;
+                    if (uMixMedia > 0.01) pixelAccum += sampleSource(uTexMedia, cameraUV, sOff) * uMixMedia;
+                    if (uMixRtsp > 0.01) pixelAccum += sampleSource(uTexRtsp, cameraUV, sOff) * uMixRtsp;
+                    
+                    vec3 smp = clamp(pixelAccum, 0.0, 1.0);
+
                     if (uMode > 0.01) {
                         if (uTHueStr > 0.01) { float hueArg = (mixedUV.y * 0.5) + uTHuePos; vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (hueArg + vec3(0.0, 0.33, 0.67))); smp = mix(smp, smp * rainbow * 2.0, uTHueStr * uMode); }
                         if (uTWaveStr > 0.01) { float waveDomain = mixedUV.y - (uTWavePos * 10.0); float distFromWave = abs(fract(waveDomain) - 0.5); float width = 0.15 + (uTWaveStr * 0.2); float wavePulse = smoothstep(width, 0.0, distFromWave); wavePulse = wavePulse * wavePulse; float intensity = (uTWaveStr * uTWaveStr) * 0.8; vec3 waveColor = vec3(0.5, 0.8, 1.0) * wavePulse * intensity; smp += waveColor; }
@@ -2960,7 +3207,7 @@ class MainActivity : AppCompatActivity() {
                 gl_FragColor = vec4(finalColor, 1.0);
             }""".trimIndent()
 
-            kaleidoProgram = createProgram(vSrc, fSrc)
+            kaleidoProgram = createProgram(vSrc, fSrcKaleido)
             val activeUniforms = IntArray(1); GLES20.glGetProgramiv(kaleidoProgram, GLES20.GL_ACTIVE_UNIFORMS, activeUniforms, 0)
             val lenBuf = IntArray(1); val sizeBuf = IntArray(1); val typeBuf = IntArray(1); val nameBuf = ByteArray(256)
             for (i in 0 until activeUniforms[0]) {
@@ -2977,10 +3224,11 @@ class MainActivity : AppCompatActivity() {
                 simpleULocs["uMVPMatrix"] = GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix")
             }
 
-            cameraTexId = createOESTex()
-            surfaceTexture = SurfaceTexture(cameraTexId)
-            surfaceTexture?.setDefaultBufferSize(texWidth, texHeight)
-            initFBO(FIXED_WIDTH, FIXED_HEIGHT)
+            camChannel.init()
+            mediaChannel.init()
+            rtspChannel.init()
+
+            initMainFBO(FIXED_WIDTH, FIXED_HEIGHT)
             GLES20.glUseProgram(kaleidoProgram)
             uLocs["uA"]?.let { GLES20.glUniform1f(it, FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat()) }
             pBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)).position(0) }
@@ -2988,9 +3236,9 @@ class MainActivity : AppCompatActivity() {
             ctx.runOnUiThread { ctx.startCamera() }
         }
 
-        private fun initFBO(w: Int, h: Int) {
+        private fun initMainFBO(w: Int, h: Int) {
             if (fboId != 0) { val fb = IntArray(1) { fboId }; val tx = IntArray(1) { fboTexId }; GLES20.glDeleteFramebuffers(1, fb, 0); GLES20.glDeleteTextures(1, tx, 0) }
-            fboWidth = w; fboHeight = h; val fb = IntArray(1); val tx = IntArray(1); GLES20.glGenFramebuffers(1, fb, 0); GLES20.glGenTextures(1, tx, 0)
+            val fb = IntArray(1); val tx = IntArray(1); GLES20.glGenFramebuffers(1, fb, 0); GLES20.glGenTextures(1, tx, 0)
             fboId = fb[0]; fboTexId = tx[0]
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
             GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
@@ -3012,9 +3260,7 @@ class MainActivity : AppCompatActivity() {
             if (isRotAnimating && rotTargetM != null) {
                 rotAnimTime += deltaTime
                 if (rotAnimTime >= rotAnimDuration) {
-                    mRotAccum = rotTargetM!!
-                    cRotAccum = rotTargetC!!
-                    isRotAnimating = false
+                    mRotAccum = rotTargetM!!; cRotAccum = rotTargetC!!; isRotAnimating = false
                 } else {
                     val t = (rotAnimTime / rotAnimDuration).coerceIn(0f, 1f)
                     val ease = 1f - (1f - t).pow(3f)
@@ -3025,10 +3271,13 @@ class MainActivity : AppCompatActivity() {
 
             ctx.controls.forEach { it.update(deltaTime) }
 
-            try { surfaceTexture?.updateTexImage() } catch (e: Exception) { return }
+            camChannel.processToFbo(copyOesProgram)
+            mediaChannel.processToFbo(copyOesProgram)
+            rtspChannel.processToFbo(copyOesProgram)
+
             manageSurfaces()
             updateMovementPhysics(deltaTime)
-            renderToFBO()
+            renderToMainFBO()
             renderToScreen()
             renderToExternal()
             renderToRecorder()
@@ -3036,51 +3285,36 @@ class MainActivity : AppCompatActivity() {
         }
 
         private fun updateMovementPhysics(d: Float) {
-            // 1. Handle Scroll (Tunnel) Physics
             val speedCtrl = ctx.controlsMap["S_SPEED"]
             if (speedCtrl != null) {
-                // Get the raw speed (-2.0 to 2.0)
                 val rawSpeed = speedCtrl.computedValue
-
-                // Standard movement
-                // We use a power curve for the speed to make low speeds more precise
                 val sign = sign(rawSpeed)
                 val curvedSpeed = sign * (abs(rawSpeed)).pow(2.2f)
-
                 scrollAccum += curvedSpeed * d * 0.6f
-
-                // --- THE SOFT LANDING FIX ---
-                // If speed is very low (effectively stopped), gently pull towards the nearest integer
                 if (abs(rawSpeed) < 0.05f) {
                     val nearestCenter = round(scrollAccum)
                     val distToCenter = nearestCenter - scrollAccum
-
-                    // The factor '3.0f' determines how fast it snaps to center.
-                    // using deltaTime ensures it is smooth regardless of frame rate.
                     scrollAccum += distToCenter * d * 3.0f
                 }
-
-                // Keep the accumulator within reasonable bounds to prevent float precision issues
-                // (Assuming texture repeats every 1.0 or 2.0 units)
                 if (abs(scrollAccum) > 1000.0f) scrollAccum %= 2.0f
             }
-
         }
 
-        private fun renderToFBO() {
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId); GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT); GLES20.glUseProgram(kaleidoProgram)
+        private fun renderToMainFBO() {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+            GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glUseProgram(kaleidoProgram)
+
             fun safeUni(name: String, v: Float) { uLocs[name]?.let { GLES20.glUniform1f(it, v) } }
             fun safeUni2(name: String, v1: Float, v2: Float) { uLocs[name]?.let { GLES20.glUniform2f(it, v1, v2) } }
 
-            val widthF = FIXED_WIDTH.toFloat()
-            val heightF = FIXED_HEIGHT.toFloat()
-            val fboAspect = widthF / heightF
+            safeUni("uA", FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat())
 
-            val texAspect = if (texHeight > 0) texWidth.toFloat() / texHeight.toFloat() else 1.0f
-            safeUni("uTexAspect", texAspect)
-            safeUni("uA", fboAspect)
+            safeUni("uMixCam", ctx.controlsMap["CAM_LEVEL"]?.computedValue ?: 0f)
+            safeUni("uMixMedia", ctx.controlsMap["MEDIA_LEVEL"]?.computedValue ?: 0f)
+            safeUni("uMixRtsp", ctx.controlsMap["RTSP_LEVEL"]?.computedValue ?: 0f)
 
-            // GET COMPUTED VALUES DIRECTLY (Already Scaled by PropertyControl)
             val vMAngle = ctx.controlsMap["M_ANGLE"]?.computedValue ?: 0f
             val vMZoom = ctx.controlsMap["M_ZOOM"]?.computedValue ?: 1f
             val vMTx = ctx.controlsMap["M_TX"]?.computedValue ?: 0f
@@ -3089,7 +3323,6 @@ class MainActivity : AppCompatActivity() {
             val vMTiltY = ctx.controlsMap["M_TILTY"]?.computedValue ?: 0f
             val v3DMix = ctx.controlsMap["3D_MIX"]?.computedValue ?: 0f
 
-            // Note: vMAngle is 0.0-1.0. We multiply by 360 here plus the accumulated physics rotation.
             safeUni("uAx", axisCount)
             safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f)
             safeUni("uMZ", vMZoom)
@@ -3134,8 +3367,17 @@ class MainActivity : AppCompatActivity() {
             safeUni("uBrit", ctx.controlsMap["BRIT"]?.computedValue ?: 1.0f)
 
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexId)
-            uLocs["uTex"]?.let { GLES20.glUniform1i(it, 0) }
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, camChannel.fboTexId)
+            uLocs["uTexCam"]?.let { GLES20.glUniform1i(it, 0) }
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mediaChannel.fboTexId)
+            uLocs["uTexMedia"]?.let { GLES20.glUniform1i(it, 1) }
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, rtspChannel.fboTexId)
+            uLocs["uTexRtsp"]?.let { GLES20.glUniform1i(it, 2) }
+
             bindCommonAttribs(kaleidoProgram)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
@@ -3146,41 +3388,26 @@ class MainActivity : AppCompatActivity() {
             GLES20.glViewport(0, 0, viewWidth, viewHeight); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             val isPortrait = viewWidth < viewHeight
 
-            // --- Aspect Fill Calculation (Screen vs FBO) ---
-            // The FBO is 16:9. The screen might be 21:9 or 4:3.
-            // We want to scale the quad so it fills the screen without stretching.
             android.opengl.Matrix.setIdentityM(mvpMatrix, 0)
 
-            val fboRatio = FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat() // ~1.77 (16:9)
+            val fboRatio = FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat()
             val screenRatio = viewWidth.toFloat() / viewHeight.toFloat()
 
             if (isPortrait) {
-                // Rotate quad -90 degrees
                 android.opengl.Matrix.rotateM(mvpMatrix, 0, -90f, 0f, 0f, 1f)
-
-                // Effective FBO ratio after rotation (1080/1920 = ~0.56)
                 val rotatedFboRatio = 1f / fboRatio
-
                 if (screenRatio < rotatedFboRatio) {
-                    // Screen is taller/narrower (e.g. 0.45 vs 0.56)
-                    // We must scale the Long Dimension (which is Local Y / Screen X) to fill.
                     val scale = rotatedFboRatio / screenRatio
                     android.opengl.Matrix.scaleM(mvpMatrix, 0, 1f, scale, 1f)
                 } else {
-                    // Screen is wider/shorter
                     val scale = screenRatio / rotatedFboRatio
                     android.opengl.Matrix.scaleM(mvpMatrix, 0, scale, 1f, 1f)
                 }
             } else {
-                // Landscape
                 if (screenRatio > fboRatio) {
-                    // Screen wider than 16:9 (e.g. 21:9)
-                    // Scale Y (Height) UP to fill width (Aspect Fill)
                     val scale = screenRatio / fboRatio
                     android.opengl.Matrix.scaleM(mvpMatrix, 0, 1f, scale, 1f)
                 } else {
-                    // Screen narrower than 16:9 (e.g. 4:3)
-                    // Scale X (Width) UP to fill height
                     val scale = fboRatio / screenRatio
                     android.opengl.Matrix.scaleM(mvpMatrix, 0, scale, 1f, 1f)
                 }
@@ -3264,9 +3491,9 @@ class MainActivity : AppCompatActivity() {
         private fun handleStopRecording() { if (isStopRequested) { videoRecorder?.drain(true); val out = videoRecorder?.file; if (recordSurface != EGL14.EGL_NO_SURFACE) { EGL14.eglDestroySurface(mSavedDisplay, recordSurface); recordSurface = EGL14.EGL_NO_SURFACE }; videoRecorder?.release(); videoRecorder = null; isStopRequested = false; onStopCallback?.invoke(out) } }
         private fun handleCapture() {
             if (captureRequested) {
-                captureRequested = false; val b = ByteBuffer.allocate(fboWidth * fboHeight * 4); GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
+                captureRequested = false; val b = ByteBuffer.allocate(FIXED_WIDTH * FIXED_HEIGHT * 4); GLES20.glReadPixels(0, 0, FIXED_WIDTH, FIXED_HEIGHT, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
                 Thread {
-                    val bmp = Bitmap.createBitmap(fboWidth, fboHeight, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
+                    val bmp = Bitmap.createBitmap(FIXED_WIDTH, FIXED_HEIGHT, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
                     val values = ContentValues().apply { put(MediaStore.Images.Media.DISPLAY_NAME, "SB_${System.currentTimeMillis()}.jpg"); put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg"); put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SpaceBeam") }
                     ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)?.let { uri -> ctx.contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) } }
                 }.start()
