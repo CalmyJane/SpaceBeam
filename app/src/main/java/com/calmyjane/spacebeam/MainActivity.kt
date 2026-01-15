@@ -1290,6 +1290,7 @@ class MainActivity : AppCompatActivity() {
         val isImage = mimeType?.startsWith("image") == true
 
         glView.queueEvent {
+            renderer.resetMediaSurface()
             val surface = renderer.getMediaSurface() ?: return@queueEvent
             runOnUiThread {
                 if (isImage) {
@@ -2927,6 +2928,14 @@ class MainActivity : AppCompatActivity() {
             var rotation = 0f
 
             fun init() {
+                if (surface != null) {
+                    surface?.release()
+                    surface = null
+                }
+                if (surfaceTexture != null) {
+                    surfaceTexture?.release()
+                    surfaceTexture = null
+                }
                 oesTexId = createOESTex()
                 surfaceTexture = SurfaceTexture(oesTexId)
                 surfaceTexture?.setDefaultBufferSize(width, height)
@@ -2956,6 +2965,25 @@ class MainActivity : AppCompatActivity() {
             fun getSurfaceForInput(): Surface {
                 if (surface == null && surfaceTexture != null) surface = Surface(surfaceTexture)
                 return surface!!
+            }
+
+            fun refreshInput() {
+                // 1. Release Java Objects
+                surface?.release()
+                surface = null
+                surfaceTexture?.release()
+                surfaceTexture = null
+
+                // 2. Delete the old GL Texture to prevent memory leaks
+                if (oesTexId != -1) {
+                    val t = IntArray(1) { oesTexId }
+                    GLES20.glDeleteTextures(1, t, 0)
+                }
+
+                // 3. Create fresh Texture and SurfaceTexture
+                oesTexId = createOESTex()
+                surfaceTexture = SurfaceTexture(oesTexId)
+                surfaceTexture?.setDefaultBufferSize(width, height)
             }
 
             fun processToFbo(program: Int) {
@@ -3077,6 +3105,10 @@ class MainActivity : AppCompatActivity() {
                     req.provideSurface(s, ContextCompat.getMainExecutor(ctx)) { s.release() }
                 }
             }
+        }
+
+        fun resetMediaSurface() {
+            mediaChannel.refreshInput()
         }
 
         fun getMediaSurface(): Surface? = mediaChannel.getSurfaceForInput()
