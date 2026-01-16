@@ -1097,7 +1097,9 @@ open class PropertyControl(
 class SourcePropertyControl(
     id: String,
     label: String,
-    defaultValue: Int = 0
+    defaultValue: Int = 0,
+    // 1. Add this parameter to the constructor so you can pass it in
+    includeInPreset: Boolean = false
 ) : PropertyControl(
     id = id,
     label = label,
@@ -1105,11 +1107,12 @@ class SourcePropertyControl(
     outMin = 0f,
     outMax = 1f,
     hasModulation = true,
-    iconResId = android.R.drawable.ic_menu_slideshow
+    iconResId = android.R.drawable.ic_menu_slideshow,
+    // 2. Pass the parameter to the parent PropertyControl
+    includeInPreset = includeInPreset
 ) {
     override fun addExtraControls(panel: LinearLayout, context: Context) {
         // Placeholders for future "Delete" or "Toggle Cam" buttons
-        // In the next phase, logic for switching front/back cam or deleting logic goes here.
     }
 }
 
@@ -1764,9 +1767,9 @@ class MainActivity : AppCompatActivity() {
 
         // --- NEW MIXER SECTION ---
         createGroup("MIXER", startOpen = true)
-        addControl(SourcePropertyControl("CAM_LEVEL", "CAMERA", defaultValue = 1000))
-        addControl(SourcePropertyControl("MEDIA_LEVEL", "MEDIA", defaultValue = 0))
-        addControl(SourcePropertyControl("RTSP_LEVEL", "STREAM", defaultValue = 0))
+        addControl(SourcePropertyControl("CAM_LEVEL", "CAMERA", defaultValue = 1000, includeInPreset = false))
+        addControl(SourcePropertyControl("MEDIA_LEVEL", "MEDIA", defaultValue = 0, includeInPreset = false))
+        addControl(SourcePropertyControl("RTSP_LEVEL", "STREAM", defaultValue = 0, includeInPreset = false))
 
         // Add "+" button (Visual Placeholder for now, functional logic to come)
         val addBtn = Button(this).apply {
