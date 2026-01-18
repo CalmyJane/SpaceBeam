@@ -1293,6 +1293,45 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "Source Removed", Toast.LENGTH_SHORT).show()
     }
 
+    private fun createSwitchCameraDrawable(): BitmapDrawable {
+        val size = 300
+        val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(b)
+
+        // 1. Main Camera Icon
+        val cameraDrawable = ContextCompat.getDrawable(this, android.R.drawable.ic_menu_camera)?.mutate()
+        if (cameraDrawable != null) {
+            cameraDrawable.setTint(Color.WHITE)
+            // Fill 90% of the canvas from top-left
+            // Was 255, increased to 270 to push it closer to the border
+            cameraDrawable.setBounds(0, 0, 270, 270)
+            cameraDrawable.draw(c)
+        }
+
+        // 2. Refresh Icon (Overlapping)
+        val refreshDrawable = ContextCompat.getDrawable(this, android.R.drawable.ic_popup_sync)?.mutate()
+        if (refreshDrawable != null) {
+            refreshDrawable.setTint(Color.WHITE)
+            // Position: Overlap significantly to keep the overall footprint tight
+            // Fills the gap in the bottom right
+            refreshDrawable.setBounds(160, 160, 300, 300)
+
+            // Draw a stroke behind refresh to cut the camera icon
+            val p = Paint().apply {
+                color = Color.BLACK
+                style = Paint.Style.STROKE
+                strokeWidth = 10f
+                isAntiAlias = true
+                alpha = 180 // Increased alpha to cut clearly
+            }
+            c.drawCircle(230f, 230f, 65f, p)
+
+            refreshDrawable.draw(c)
+        }
+
+        return BitmapDrawable(resources, b)
+    }
+
     private fun addDynamicSourceControl(ctrl: PropertyControl) {
         if (mixerGroupContainer == null) return
         val idx = mixerGroupContainer!!.childCount - 1
@@ -1950,20 +1989,21 @@ class MainActivity : AppCompatActivity() {
         cameraSettingsPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(10, 20, 10, 20)
+            setPadding(0, 0, 0, 0)
         }
-        // ONLY KEEP THE TOGGLE CAMERA BUTTON HERE AS A BACKUP or REMOVE IF MOVED TO SLIDER
-        // The prompt says "buttons in top right can be removed except toggle camera"
-        fun createSideBtn(resId: Int, action: () -> Unit) = ImageButton(this).apply {
-            setImageResource(resId)
+
+        fun createSideBtn(drawable: android.graphics.drawable.Drawable, action: () -> Unit) = ImageButton(this).apply {
+            setImageDrawable(drawable)
             setColorFilter(Color.WHITE)
             setBackgroundColor(Color.TRANSPARENT)
-            alpha = 0.85f
-            layoutParams = LinearLayout.LayoutParams(100, 100)
+            alpha = 0.9f
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            // CHANGED: 150x150 to match Record Buttons exactly
+            layoutParams = LinearLayout.LayoutParams(150, 150)
             setOnClickListener { action(); updateSidebarVisuals() }
         }
 
-        cameraSettingsPanel.addView(createSideBtn(android.R.drawable.ic_menu_camera) { switchCamera() })
+        cameraSettingsPanel.addView(createSideBtn(createSwitchCameraDrawable()) { switchCamera() })
 
         return cameraSettingsPanel
     }
@@ -1974,21 +2014,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createRecordControls(): LinearLayout {
-        recordControls = LinearLayout(this).apply { gravity = Gravity.CENTER; setPadding(10, 10, 10, 10) }
+        // CHANGED: Tight fit (0 padding)
+        recordControls = LinearLayout(this).apply { gravity = Gravity.CENTER; setPadding(0, 0, 0, 0) }
+
         photoBtn = ImageButton(this).apply {
             setImageDrawable(ContextCompat.getDrawable(context, android.R.drawable.ic_menu_camera));
             setBackgroundColor(Color.TRANSPARENT);
             setColorFilter(Color.WHITE);
             alpha = 0.8f;
-            scaleX = 1.2f; // Adjusted scale slightly as the icon is larger than text
+            scaleX = 1.2f;
             scaleY = 1.2f;
             layoutParams = LinearLayout.LayoutParams(150, 150);
             setOnClickListener { renderer.capturePhoto(); triggerFlashPulse() }
         }
         recordBtn = ImageButton(this).apply {
-            // "presence_video_online" looks like a small video camera
             setImageDrawable(ContextCompat.getDrawable(context, android.R.drawable.presence_video_online))
-
             setBackgroundColor(Color.TRANSPARENT)
             setColorFilter(Color.WHITE)
             alpha = 0.5f
@@ -2501,20 +2541,25 @@ class MainActivity : AppCompatActivity() {
         val getCircleBg = { alpha: Int -> getBg(alpha).apply { shape = GradientDrawable.OVAL } }
 
         val panels = listOf(cameraSettingsPanel, presetPanel, recordControls)
-        // Ensure orientationBtn is included here to share the circle background style
         val utils = listOf(menuBtn, orientationBtn, settingsBtn)
 
-        panels.forEach { it.background = null; it.setPadding(15, 15, 15, 15); it.clipToOutline = true }
+        // Reset clip
+        panels.forEach { it.clipToOutline = true }
         parameterPanel.background = null
 
         when (readabilityLevel) {
             1, 2 -> {
                 val alpha = if (readabilityLevel == 1) 180 else 120
-                panels.forEach { it.background = getBg(alpha) }
+
+                // CHANGED: Reduced padding from 15 to 5 for a tighter fit
+                panels.forEach {
+                    it.background = getBg(alpha)
+                    it.setPadding(5, 5, 5, 5)
+                }
+
                 parameterPanel.background = getBg(alpha)
                 parameterPanel.clipToOutline = true
 
-                // This applies the shared circle background to toggle button and settings
                 utils.forEach { it.background = getCircleBg(alpha) }
 
                 applyRecursiveGlow(overlayHUD, readabilityLevel == 2)
@@ -2527,6 +2572,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
 
     private fun applyRecursiveGlow(view: View, enabled: Boolean) {
         if (view is TextView) { if (enabled) view.setShadowLayer(50f, 0f, 0f, Color.BLACK) else view.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT) }
@@ -3948,12 +3994,15 @@ abstract class SourcePropertyControl(
     outMax = 1f,
     hasModulation = true,
     includeInPreset = false,
-    layoutStyle = LayoutStyle.ROW, // <--- CHANGED TO ROW FOR INLINE ALIGNMENT
+    layoutStyle = LayoutStyle.ROW,
     iconResId = android.R.drawable.presence_video_online
 ) {
-    override fun addExtraControls(panel: LinearLayout, context: Context) {
-        val deleteBtn = Button(context).apply {
-            text = "DELETE SOURCE"
+    // Override openMenu to append content at the bottom instead of injecting at top via addExtraControls
+    override fun openMenu(context: Context) {
+        super.openMenu(context)
+
+        val removeBtn = Button(context).apply {
+            text = "REMOVE"
             textSize = 12f
             setTextColor(Color.WHITE)
             background = GradientDrawable().apply {
@@ -3969,7 +4018,7 @@ abstract class SourcePropertyControl(
                 showDeleteConfirmation()
             }
         }
-        panel.addView(deleteBtn)
+        floatingPanel?.addView(removeBtn)
     }
 
     private fun showDeleteConfirmation() {
@@ -3994,29 +4043,9 @@ class CameraSourceControl(mainActivity: MainActivity) : PropertyControl(
     outMax = 1f,
     hasModulation = true,
     includeInPreset = true,
-    layoutStyle = LayoutStyle.ROW, // <--- CHANGED TO ROW FOR INLINE ALIGNMENT
+    layoutStyle = LayoutStyle.ROW,
     iconResId = android.R.drawable.ic_menu_camera
-) {
-    override fun addExtraControls(panel: LinearLayout, context: Context) {
-        val toggleBtn = Button(context).apply {
-            text = "SWITCH FRONT/BACK"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#444444"))
-                cornerRadius = 10f
-                setStroke(1, Color.GRAY)
-            }
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 80).apply {
-                bottomMargin = 20
-            }
-            setOnClickListener {
-                (context as? MainActivity)?.switchCamera()
-            }
-        }
-        panel.addView(toggleBtn)
-    }
-}
+)
 
 class MediaSourceControl(
     id: String,
