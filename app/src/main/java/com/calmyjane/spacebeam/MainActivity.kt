@@ -210,12 +210,65 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         randomRow.addView(randomCheck)
         contentLayout.addView(randomRow)
 
-        // Auto-Play Duration using PropertyControl
+        // Preset Filter Row (Grid 1-9)
+        contentLayout.addView(TextView(activity).apply {
+            text = "INCLUDE PRESETS:"
+            textSize = 12f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.START
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10; bottomMargin = 5 }
+        })
+
+        // Container for the 9 checkboxes
+        val filterContainer = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            // Match parent width, no scroll
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = 15
+            }
+        }
+
+        for (i in 1..9) {
+            val cbContainer = LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                // Weight 1 distributes them evenly across the width
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+
+            val cb = CheckBox(activity).apply {
+                isChecked = activity.autoPlayFilter.contains(i)
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+                // Scale down slightly to fit 9 in a row comfortably
+                scaleX = 0.8f
+                scaleY = 0.8f
+                // Remove default padding to tighten layout
+                setPadding(0,0,0,0)
+                layoutParams = LinearLayout.LayoutParams(-2, -2) // Wrap content
+                setOnCheckedChangeListener { _, isChecked ->
+                    if (isChecked) activity.autoPlayFilter.add(i) else activity.autoPlayFilter.remove(i)
+                    activity.updatePlayButtonState()
+                }
+            }
+            val lbl = TextView(activity).apply {
+                text = "$i"
+                textSize = 10f
+                setTextColor(Color.LTGRAY)
+                gravity = Gravity.CENTER
+            }
+            cbContainer.addView(lbl)
+            cbContainer.addView(cb)
+            filterContainer.addView(cbContainer)
+        }
+        contentLayout.addView(filterContainer)
+
+        // Auto-Play Duration -> Changed layoutStyle to ROW
         autoPlayDurationControl = PropertyControl(
             "AUTO_DUR", "DURATION",
             min = 0, max = 300000, sliderMax = 60000,
             defaultValue = activity.autoPlayDurationMs.toInt(),
-            layoutStyle = PropertyControl.LayoutStyle.STACKED,
+            layoutStyle = PropertyControl.LayoutStyle.ROW, // <--- CHANGED TO ROW (Inline)
             includeInPreset = false,
             hasModulation = false,
             logPower = 2,
@@ -1123,6 +1176,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var displayHelper: ExternalDisplayHelper
     private lateinit var axisSb: SeekBar
     private lateinit var transSeekBar: SeekBar
+    var autoPlayFilter = mutableSetOf(1, 2, 3, 4, 5, 6, 7, 8, 9)
     val controls = java.util.concurrent.CopyOnWriteArrayList<PropertyControl>()
     val controlsMap = java.util.concurrent.ConcurrentHashMap<String, PropertyControl>()
     private val presetButtons = mutableMapOf<Int, Button>()
@@ -1187,6 +1241,18 @@ class MainActivity : AppCompatActivity() {
     // For filling the button visual
     private var presetAnimators = mutableMapOf<Int, ValueAnimator>()
     private val presetDrawables = mutableMapOf<Int, ProgressButtonDrawable>()
+
+    fun updatePlayButtonState() {
+        if (!::playBtn.isInitialized) return
+        val enabled = autoPlayFilter.isNotEmpty()
+        playBtn.isEnabled = enabled
+        playBtn.alpha = if (enabled) 1.0f else 0.3f
+
+        // If we are playing but suddenly have no allowed presets, stop
+        if (!enabled && isAutoPlaying) {
+            stopAutoPlay()
+        }
+    }
 
 
 
@@ -1452,6 +1518,15 @@ class MainActivity : AppCompatActivity() {
         setContentView(glView)
         setupOverlayHUD()
         initDefaultPresets()
+        val prefs = getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+        autoPlayRandom = prefs.getBoolean("AP_RANDOM", false)
+        val filterStr = prefs.getString("AP_FILTER", null)
+        if (filterStr != null) {
+            autoPlayFilter.clear()
+            if (filterStr.isNotEmpty()) {
+                filterStr.split(",").mapNotNull { it.toIntOrNull() }.forEach { autoPlayFilter.add(it) }
+            }
+        }
         glView.post {
             globalReset()
             applyPreset(1)
@@ -2094,6 +2169,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(10, 10, 10, 10)
             setOnClickListener { toggleAutoPlay() }
         }
+        updatePlayButtonState()
         transContainer.addView(playBtn)
 
         presetPanel.addView(transContainer)
@@ -2218,6 +2294,10 @@ class MainActivity : AppCompatActivity() {
         if (isAutoPlaying) {
             stopAutoPlay()
         } else {
+            if (autoPlayFilter.isEmpty()) {
+                Toast.makeText(this, "No presets selected for Auto-Play", Toast.LENGTH_SHORT).show()
+                return
+            }
             isAutoPlaying = true
             playBtn.setImageDrawable(createPlayIcon(true)) // White
             Toast.makeText(this, "Auto-Play Started", Toast.LENGTH_SHORT).show()
@@ -2228,17 +2308,32 @@ class MainActivity : AppCompatActivity() {
     private fun stopAutoPlay() {
         isAutoPlaying = false
         handler.removeCallbacks(autoPlayRunnable)
-        playBtn.setImageDrawable(createPlayIcon(false)) // Grey
+        if (::playBtn.isInitialized) playBtn.setImageDrawable(createPlayIcon(false)) // Grey
+
+        // Save Settings on stop
+        val prefs = getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+        val filterStr = autoPlayFilter.joinToString(",")
+        prefs.edit()
+            .putBoolean("AP_RANDOM", autoPlayRandom)
+            .putString("AP_FILTER", filterStr)
+            .apply()
     }
 
     private fun triggerNextAutoPlay() {
         if (!isAutoPlaying) return
+        if (autoPlayFilter.isEmpty()) {
+            stopAutoPlay()
+            return
+        }
 
-        // Calculate next index
+        val sortedFilter = autoPlayFilter.sorted()
+
         val nextIdx = if (autoPlayRandom) {
-            (1..9).random()
+            sortedFilter.random()
         } else {
-            if (activePreset >= 9 || activePreset < 1) 1 else activePreset + 1
+            // Find the next number in the filter larger than current
+            // If none, wrap around to the first one in the filter
+            sortedFilter.firstOrNull { it > activePreset } ?: sortedFilter.first()
         }
 
         applyPreset(nextIdx)
