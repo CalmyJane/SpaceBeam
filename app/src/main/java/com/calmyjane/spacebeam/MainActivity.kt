@@ -1816,14 +1816,18 @@ class MainActivity : AppCompatActivity() {
         // 3. Add "+" button
         val addBtn = Button(this).apply {
             text = "+"
-            textSize = 20f
+            textSize = 24f // Slightly larger for better visibility
             setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER // Fixes vertical alignment
+            includeFontPadding = false // Fixes clipping at the bottom
+            setPadding(0, 0, 0, 0) // Removes default button padding
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#333333"))
                 cornerRadius = 15f
                 setStroke(1, Color.GRAY)
             }
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 80).apply {
+            layoutParams = LinearLayout.LayoutParams(150, 80).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
                 setMargins(20, 10, 20, 10)
             }
             setOnClickListener {
@@ -3944,6 +3948,7 @@ abstract class SourcePropertyControl(
     outMax = 1f,
     hasModulation = true,
     includeInPreset = false,
+    layoutStyle = LayoutStyle.ROW, // <--- CHANGED TO ROW FOR INLINE ALIGNMENT
     iconResId = android.R.drawable.presence_video_online
 ) {
     override fun addExtraControls(panel: LinearLayout, context: Context) {
@@ -3956,7 +3961,6 @@ abstract class SourcePropertyControl(
                 cornerRadius = 10f
                 setStroke(1, Color.RED)
             }
-            // INCREASED HEIGHT FOR VISIBILITY
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120).apply {
                 topMargin = 30
                 bottomMargin = 10
@@ -3990,6 +3994,7 @@ class CameraSourceControl(mainActivity: MainActivity) : PropertyControl(
     outMax = 1f,
     hasModulation = true,
     includeInPreset = true,
+    layoutStyle = LayoutStyle.ROW, // <--- CHANGED TO ROW FOR INLINE ALIGNMENT
     iconResId = android.R.drawable.ic_menu_camera
 ) {
     override fun addExtraControls(panel: LinearLayout, context: Context) {
@@ -4012,13 +4017,14 @@ class CameraSourceControl(mainActivity: MainActivity) : PropertyControl(
         panel.addView(toggleBtn)
     }
 }
+
 class MediaSourceControl(
     id: String,
     label: String,
     sourceId: String,
     mainActivity: MainActivity,
     private val exoPlayer: ExoPlayer?
-) : SourcePropertyControl(id, label, 0, sourceId, mainActivity) { // defaultValue changed to 0
+) : SourcePropertyControl(id, label, 0, sourceId, mainActivity) {
     override fun onRemove() {
         try {
             exoPlayer?.stop()
@@ -4035,7 +4041,7 @@ class RtspSourceControl(
     sourceId: String,
     mainActivity: MainActivity,
     private val exoPlayer: ExoPlayer
-) : SourcePropertyControl(id, label, 0, sourceId, mainActivity) { // defaultValue changed to 0
+) : SourcePropertyControl(id, label, 0, sourceId, mainActivity) {
     override fun onRemove() {
         try {
             exoPlayer.stop()
