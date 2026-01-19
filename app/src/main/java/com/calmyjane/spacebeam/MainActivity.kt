@@ -72,20 +72,17 @@ import javax.microedition.khronos.egl.EGLConfig as GL10EGLConfig
 import android.opengl.EGLConfig as EGL14EGLConfig
 import android.content.Intent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.media3.common.C
 import kotlin.apply
 import android.view.inputmethod.InputMethodManager
 import android.bluetooth.*
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
-import android.media.midi.MidiDevice
-import android.media.midi.MidiDeviceInfo
-import android.media.midi.MidiManager
-import android.media.midi.MidiReceiver
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
-import android.media.midi.MidiOutputPort
+import kotlin.math.pow
+import kotlin.math.sin
+import kotlin.math.abs
 
 class MidiHelper(private val activity: MainActivity) {
     // Standard BLE MIDI UUIDs from your Tester App
@@ -799,7 +796,8 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 class ExternalDisplayHelper(
     private val context: Context,
     private val renderer: MainActivity.KaleidoscopeRenderer
-) {
+)
+{
     private var presentation: CleanFeedPresentation? = null
     private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -909,8 +907,6 @@ open class PropertyControl(
     enum class LayoutStyle { STACKED, ROW }
 
     var popupElevation: Float = 40f
-
-    // Added: Reference to the main UI container for removal
     private var rootLayout: View? = null
 
     companion object {
@@ -920,11 +916,17 @@ open class PropertyControl(
         }
     }
 
+    // --- STATE VARIABLES ---
     @Volatile var value: Int = defaultValue
         private set
     @Volatile var preciseValue: Float = defaultValue.toFloat()
         private set
 
+    // Default Smoothing: 50%
+    var smoothing: Int = 500
+    private var smoothedNormalized: Float = 0f
+
+    // Animation / LFO State
     private var animTarget: Float? = null
     private var animStart: Float = 0f
     private var animDuration: Float = 0f
@@ -939,18 +941,17 @@ open class PropertyControl(
     var preciseModDepth: Float = 0f
     var lfoPhase: Double = 0.0
 
-    private var lastComputedNormalized: Float = 0f
     private var modSnapshotValue: Float = 0f
     private var modRateStart = 0f
     private var modRateTarget: Float? = null
     private var modDepthStart = 0f
     private var modDepthTarget: Float? = null
 
+    // UI References
     private var mainSeekBar: SeekBar? = null
     private var modIndicator: View? = null
     private var valueDisplay: TextView? = null
     private var mainRowLayout: LinearLayout? = null
-
     protected var floatingPanel: LinearLayout? = null
     private var modPanelSpeedSeekBar: SeekBar? = null
     private var modPanelDepthSeekBar: SeekBar? = null
@@ -959,25 +960,32 @@ open class PropertyControl(
     private var shapeBtn: Button? = null
     protected var currentContext: Context? = null
 
+    init {
+        val ratio = (defaultValue.toFloat() / sliderMax.toFloat()).coerceAtLeast(0f)
+        smoothedNormalized = if (logPower > 1) ratio.toDouble().pow(logPower.toDouble()).toFloat() else ratio
+    }
+
+    // --- OUTPUT ---
     val computedValue: Float
         get() {
-            val norm = lastComputedNormalized
-            return outMin + (norm * (outMax - outMin))
+            return outMin + (smoothedNormalized * (outMax - outMin))
         }
 
-    data class Snapshot(val value: Int, val active: Boolean, val rate: Int, val depth: Int, val shape: String)
+    // --- SNAPSHOTS ---
+    data class Snapshot(val value: Int, val active: Boolean, val rate: Int, val depth: Int, val shape: String, val smoothing: Int)
 
-    fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name)
+    fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name, smoothing)
 
     fun restore(s: Snapshot, durationSec: Float) {
         animateTo(s.value.toFloat(), durationSec, s.shape)
         if (hasModulation) {
             animateModulation(s.rate.toFloat(), s.depth.toFloat(), durationSec)
         }
+        this.smoothing = s.smoothing
     }
 
     fun animateTo(target: Float, durationSec: Float, newShape: String? = null) {
-        modSnapshotValue = lastComputedNormalized
+        modSnapshotValue = smoothedNormalized
         animTarget = target
         animStart = preciseValue
         animDuration = durationSec
@@ -999,9 +1007,10 @@ open class PropertyControl(
         modDepthTarget = targetDepth
     }
 
+    // --- MAIN UPDATE LOOP ---
     fun update(deltaTime: Float) {
         val t = if (isAnimating && animDuration > 0) (animTime / animDuration).coerceIn(0f, 1f) else 1f
-        val ease = 1f - (1f - t).pow(3f)
+        val ease = 1f - (1f - t).toDouble().pow(3.0).toFloat()
 
         if (isAnimating && animTarget != null) {
             animTime += deltaTime
@@ -1022,73 +1031,76 @@ open class PropertyControl(
         }
 
         val ratio = (preciseValue / sliderMax.toFloat()).coerceAtLeast(0f)
-        val curvedNorm = if (logPower > 1) ratio.pow(logPower) else ratio
+        val curvedNorm = if (logPower > 1) ratio.toDouble().pow(logPower.toDouble()).toFloat() else ratio
 
-        if (!hasModulation || (preciseModRate == 0f && preciseModDepth == 0f && modDepthTarget == null)) {
-            lastComputedNormalized = curvedNorm
-            updateLiveValueUI(value)
-            return
+        var targetNormalized = curvedNorm
+
+        if (hasModulation && (preciseModRate > 0f || preciseModDepth > 0f || modDepthTarget != null)) {
+            val baseSpeed = (preciseModRate / 1000f + 0.05f).toDouble().pow(3.0).toFloat()
+            lfoPhase += baseSpeed * deltaTime * 2.0 * Math.PI
+            if (lfoPhase > 2.0 * Math.PI) lfoPhase -= 2.0 * Math.PI
+
+            val rawWave: Double = when (modShape) {
+                WaveShape.SINE -> sin(lfoPhase) * 0.5 + 0.5
+                WaveShape.TRIANGLE -> { val p = (lfoPhase / (2.0 * Math.PI)); if (p < 0.5) p * 2.0 else 2.0 - (p * 2.0) }
+                WaveShape.RAMP -> (lfoPhase / (2.0 * Math.PI)) % 1.0
+                WaveShape.WOBBLE_SINE -> { val w = sin(lfoPhase + sin(lfoPhase)); w * 0.5 + 0.5 }
+                WaveShape.RANDOM_SMOOTH -> (sin(lfoPhase) * 0.5 + 0.5 + sin(lfoPhase * 2.3) * 0.2) / 1.4
+                WaveShape.RANDOM_STEP -> Math.random()
+            }
+
+            val depthNorm = (preciseModDepth / 1000f).toDouble().pow(2.0).toFloat()
+
+            if (modMode == ModMode.WRAP) {
+                targetNormalized = (curvedNorm + (rawWave.toFloat() * depthNorm)) % 1.0f
+            } else {
+                // Smart Bipolar Shift Logic
+                targetNormalized = (curvedNorm * (1.0f - depthNorm)) + (rawWave.toFloat() * depthNorm)
+            }
         }
 
-        val baseSpeed = (preciseModRate / 1000f + 0.05f).pow(3f)
-        lfoPhase += baseSpeed * deltaTime * 2.0 * Math.PI
-        if (lfoPhase > 2.0 * Math.PI) lfoPhase -= 2.0 * Math.PI
-
-        val rawWave: Double = when (modShape) {
-            WaveShape.SINE -> sin(lfoPhase) * 0.5 + 0.5
-            WaveShape.TRIANGLE -> { val p = (lfoPhase / (2.0 * Math.PI)); if (p < 0.5) p * 2.0 else 2.0 - (p * 2.0) }
-            WaveShape.RAMP -> (lfoPhase / (2.0 * Math.PI)) % 1.0
-            WaveShape.WOBBLE_SINE -> { val w = sin(lfoPhase + sin(lfoPhase)); w * 0.5 + 0.5 }
-            WaveShape.RANDOM_SMOOTH -> (sin(lfoPhase) * 0.5 + 0.5 + sin(lfoPhase * 2.3) * 0.2) / 1.4
-            WaveShape.RANDOM_STEP -> Math.random()
+        if (isAnimating) {
+            targetNormalized = (modSnapshotValue * (1.0f - ease)) + (targetNormalized * ease)
         }
 
-        val depthNorm = (preciseModDepth / 1000f).pow(2f)
-        val targetVal = if (modMode == ModMode.WRAP) {
-            (curvedNorm + (rawWave * depthNorm)) % 1.0f
+        // 5. Smoothing
+        if (smoothing == 0 || isAnimating) {
+            smoothedNormalized = targetNormalized
         } else {
-            curvedNorm + (rawWave.toFloat() * depthNorm * (1.0f - curvedNorm))
-        }
-
-        lastComputedNormalized = if (isAnimating) {
-            (modSnapshotValue * (1.0f - ease)) + (targetVal.toFloat() * ease)
-        } else {
-            targetVal.toFloat()
+            val s = smoothing / 1000f
+            val speed = 5.0f * (1.0f - s) * (1.0f - s) + 0.1f
+            val lerpFactor = (speed * deltaTime).coerceIn(0f, 1f)
+            smoothedNormalized += (targetNormalized - smoothedNormalized) * lerpFactor
         }
 
         modIndicator?.postInvalidate()
+
         val displayVal = if (logPower > 1) {
-            (lastComputedNormalized.pow(1.0f/logPower) * sliderMax).toInt()
+            (targetNormalized.toDouble().pow(1.0/logPower) * sliderMax).toInt()
         } else {
-            (lastComputedNormalized * sliderMax).toInt()
+            (targetNormalized * sliderMax).toInt()
         }
         updateLiveValueUI(displayVal)
     }
 
     private fun syncUiElements() {
         val ratio = (value.toFloat() / sliderMax.toFloat()).coerceIn(0f, 1f)
-        val sliderT = if (logPower > 1) ratio.pow(1.0f / logPower) else ratio
+        val sliderT = if (logPower > 1) ratio.toDouble().pow(1.0 / logPower).toFloat() else ratio
         val seekProgress = (sliderT * 1000).toInt()
 
-        val sb = mainSeekBar
-        if (sb != null) {
-            sb.post {
-                if (sb.progress != seekProgress) {
-                    try { sb.progress = seekProgress } catch (e: Exception) {}
-                }
+        mainSeekBar?.post {
+            if (mainSeekBar?.progress != seekProgress) {
+                try { mainSeekBar?.progress = seekProgress } catch (e: Exception) {}
             }
         }
 
-        if (showValue && valueDisplay != null) {
-            valueDisplay?.post { valueDisplay?.text = formatValue(value) }
-        }
+        if (showValue) valueDisplay?.post { valueDisplay?.text = formatValue(value) }
 
         if (activeControl == this) {
-            baseValueInput?.post {
-                if (baseValueInput?.hasFocus() == false) baseValueInput?.setText(value.toString())
-            }
+            baseValueInput?.post { if (baseValueInput?.hasFocus() == false) baseValueInput?.setText(value.toString()) }
             modPanelSpeedSeekBar?.post { modPanelSpeedSeekBar?.progress = preciseModRate.toInt() }
             modPanelDepthSeekBar?.post { modPanelDepthSeekBar?.progress = preciseModDepth.toInt() }
+            floatingPanel?.findViewWithTag<SeekBar>("SMOOTH_SEEK")?.progress = smoothing
         }
     }
 
@@ -1105,13 +1117,13 @@ open class PropertyControl(
     private fun setProgressFromSlider(p: Int) {
         if (isAnimating) stopAnimation()
         val t = p / 1000f
-        val curvedT = if (logPower > 1) t.pow(logPower) else t
+        val curvedT = if (logPower > 1) t.toDouble().pow(logPower.toDouble()).toFloat() else t
         val calcVal = (curvedT * sliderMax).toInt().coerceIn(min, max)
         value = calcVal
         preciseValue = calcVal.toFloat()
 
-        if (showValue && valueDisplay != null) valueDisplay?.text = formatValue(value)
-        if (activeControl == this && baseValueInput != null && !baseValueInput!!.hasFocus()) {
+        if (showValue) valueDisplay?.text = formatValue(value)
+        if (activeControl == this && baseValueInput?.hasFocus() == false) {
             baseValueInput!!.setText("$calcVal")
         }
         onValueChanged?.invoke(calcVal)
@@ -1137,12 +1149,17 @@ open class PropertyControl(
         updateIndicatorVisuals()
     }
 
+    fun updateSmoothing(v: Int) {
+        smoothing = v.coerceIn(0, 1000)
+    }
+
     fun reset() {
         stopAnimation()
         setProgress(defaultValue)
         if (hasModulation) {
             updateModRate(200)
             updateModDepth(0)
+            updateSmoothing(500)
             modShape = if (modMode == ModMode.WRAP) WaveShape.RAMP else WaveShape.SINE
             updateIndicatorVisuals()
             shapeBtn?.text = modShape.name
@@ -1154,17 +1171,11 @@ open class PropertyControl(
     }
 
     fun detach() {
-        mainSeekBar = null
-        modIndicator = null
-        valueDisplay = null
-        mainRowLayout = null
+        mainSeekBar = null; modIndicator = null; valueDisplay = null; mainRowLayout = null
         if (activeControl == this) closeMenu()
         currentContext = null
-        // Note: We intentionally do NOT clear rootLayout here, as detach is used during logic updates.
-        // We use explicit removal for deleting sources.
     }
 
-    // New function to completely remove the UI element
     fun removeFromParent() {
         detach()
         if (rootLayout != null && rootLayout?.parent != null) {
@@ -1181,128 +1192,78 @@ open class PropertyControl(
             orientation = if (layoutStyle == LayoutStyle.STACKED) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, 2, 0, 6)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-
-        // Save reference for deletion
         rootLayout = container
 
         val labelContainer = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#222222"))
-                setStroke(2, Color.DKGRAY)
-                cornerRadius = 12f
-            }
+            background = GradientDrawable().apply { setColor(Color.parseColor("#222222")); setStroke(2, Color.DKGRAY); cornerRadius = 12f }
             isClickable = true
             setOnClickListener { toggleMenu(context) }
-
-            val params = if (layoutStyle == LayoutStyle.STACKED) {
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 60).apply { bottomMargin = 5 }
-            } else {
-                LinearLayout.LayoutParams(220, 70).apply { rightMargin = 5 }
-            }
+            val params = if (layoutStyle == LayoutStyle.STACKED) LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 60).apply { bottomMargin = 5 } else LinearLayout.LayoutParams(220, 70).apply { rightMargin = 5 }
             layoutParams = params
         }
 
         if (iconResId != null) {
-            val iv = ImageView(context).apply {
-                setImageResource(iconResId)
-                setColorFilter(Color.WHITE)
-                alpha = 0.8f
-                layoutParams = LinearLayout.LayoutParams(36, 36).apply { rightMargin = 8 }
-            }
-            labelContainer.addView(iv)
+            labelContainer.addView(ImageView(context).apply { setImageResource(iconResId); setColorFilter(Color.WHITE); alpha = 0.8f; layoutParams = LinearLayout.LayoutParams(36, 36).apply { rightMargin = 8 } })
         }
 
-        val tv = TextView(context).apply {
-            text = label
-            setTextColor(Color.WHITE)
-            textSize = 10f
-            setTypeface(null, Typeface.BOLD)
-            alpha = 0.9f
-            gravity = Gravity.CENTER
-        }
-        labelContainer.addView(tv)
+        labelContainer.addView(TextView(context).apply { text = label; setTextColor(Color.WHITE); textSize = 10f; setTypeface(null, Typeface.BOLD); alpha = 0.9f; gravity = Gravity.CENTER })
         container.addView(labelContainer)
 
         val sliderRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, 55, 1f)
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = if (layoutStyle == LayoutStyle.STACKED) LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 55) else LinearLayout.LayoutParams(0, 55, 1f)
         }
-
-        if (layoutStyle == LayoutStyle.STACKED) {
-            sliderRow.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 55)
-        }
-        this.mainRowLayout = sliderRow
+        mainRowLayout = sliderRow
 
         if (showValue) {
-            valueDisplay = TextView(context).apply {
-                text = formatValue(value)
-                setTextColor(Color.LTGRAY)
-                textSize = 9f
-                minWidth = 90
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                setPadding(0,0,8,0)
-            }
+            valueDisplay = TextView(context).apply { text = formatValue(value); setTextColor(Color.LTGRAY); textSize = 9f; minWidth = 90; gravity = Gravity.END or Gravity.CENTER_VERTICAL; setPadding(0,0,8,0) }
             sliderRow.addView(valueDisplay)
         }
 
         val sb = SeekBar(context).apply {
             max = 1000
             val ratio = (value.toFloat() / sliderMax.toFloat()).coerceIn(0f, 1f)
-            val sliderT = if (logPower > 1) ratio.pow(1.0f / logPower) else ratio
-            progress = (sliderT * 1000).toInt()
-
+            val t = if (logPower > 1) ratio.toDouble().pow(1.0/logPower).toFloat() else ratio
+            progress = (t * 1000).toInt()
             thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
-            setPadding(0,0,0,0)
-            thumbOffset = 0
-            splitTrack = false
+            setPadding(0,0,0,0); thumbOffset = 0; splitTrack = false
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        this.mainSeekBar = sb
-        sb.setOnTouchListener { v, event ->
-            v.parent.requestDisallowInterceptTouchEvent(true)
-            if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_DOWN) {
-                stopAnimation()
-                if (activeControl != null && activeControl != this@PropertyControl) closeActiveMenu()
+            setOnTouchListener { v, event ->
+                v.parent.requestDisallowInterceptTouchEvent(true)
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) { stopAnimation(); if (activeControl != null && activeControl != this@PropertyControl) closeActiveMenu() }
+                if (event.actionMasked == MotionEvent.ACTION_UP) v.parent.requestDisallowInterceptTouchEvent(false)
+                v.onTouchEvent(event); true
             }
-            if ((event.action and MotionEvent.ACTION_MASK) == MotionEvent.ACTION_UP) v.parent.requestDisallowInterceptTouchEvent(false)
-            v.onTouchEvent(event); true
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { if (fromUser) setProgressFromSlider(p) }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
         }
-        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                if (fromUser) setProgressFromSlider(p)
-            }
-            override fun onStartTrackingTouch(s: SeekBar?) {}
-            override fun onStopTrackingTouch(s: SeekBar?) {}
-        })
+        mainSeekBar = sb
         sliderRow.addView(sb)
 
         if (hasModulation) {
             modIndicator = object : View(context) {
                 private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
                 override fun onDraw(canvas: Canvas) {
-                    val cx = width / 2f; val cy = height / 2f; val r = (Math.min(width, height) / 2f) - 2f; val active = modDepth > 0
+                    val cx = width / 2f; val cy = height / 2f; val r = (Math.min(width, height) / 2f) - 2f
                     paint.style = Paint.Style.STROKE; paint.strokeWidth = 3f; paint.color = Color.WHITE; paint.alpha = 255
                     canvas.drawCircle(cx, cy, r, paint)
-                    paint.style = Paint.Style.FILL; paint.color = if (active) Color.WHITE else Color.LTGRAY; paint.alpha = if (active) 255 else 100
+                    paint.style = Paint.Style.FILL; paint.color = if (modDepth > 0) Color.WHITE else Color.LTGRAY; paint.alpha = if (modDepth > 0) 255 else 100
                     var dotRadius = r * 0.3f
-                    if (active) {
-                        val waveVal = if (preciseModDepth > 0) (lastComputedNormalized - (preciseValue/sliderMax)) / (preciseModDepth/1000f) else 0f
-                        dotRadius = (r * (0.3 + (abs(waveVal)*0.7))).toFloat()
+                    if (modDepth > 0) {
+                        val normDiff = smoothedNormalized - (preciseValue / sliderMax.toFloat())
+                        dotRadius = (r * (0.3 + (abs(normDiff) * 3.0))).toFloat().coerceAtMost(r)
                     }
                     canvas.drawCircle(cx, cy, dotRadius, paint)
                 }
             }.apply { layoutParams = LinearLayout.LayoutParams(55, 55).apply { leftMargin = 15 }; setOnClickListener { toggleMenu(context) } }
             sliderRow.addView(modIndicator)
         }
-
         container.addView(sliderRow)
         parent.addView(container)
     }
@@ -1310,29 +1271,16 @@ open class PropertyControl(
     private fun updateIndicatorVisuals() { modIndicator?.invalidate() }
 
     fun toggleMenu(ctx: Context? = currentContext) {
-        if (activeControl == this) closeMenu()
-        else {
-            activeControl?.closeMenu()
-            if (ctx != null) openMenu(ctx)
-        }
+        if (activeControl == this) closeMenu() else { activeControl?.closeMenu(); if (ctx != null) openMenu(ctx) }
     }
 
     fun closeMenu() {
         if (floatingPanel != null) {
             val ctx = currentContext ?: return
-
             val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
             baseValueInput?.windowToken?.let { imm?.hideSoftInputFromWindow(it, 0) }
-
             (floatingPanel?.parent as? ViewGroup)?.removeView(floatingPanel)
-
-            floatingPanel = null
-            modPanelSpeedSeekBar = null
-            modPanelDepthSeekBar = null
-            liveValueDisplay = null
-            baseValueInput = null
-            shapeBtn = null
-
+            floatingPanel = null; modPanelSpeedSeekBar = null; modPanelDepthSeekBar = null; liveValueDisplay = null; baseValueInput = null; shapeBtn = null
             (ctx as? MainActivity)?.hideSystemUI()
         }
         if (activeControl == this) activeControl = null
@@ -1346,96 +1294,43 @@ open class PropertyControl(
 
         floatingPanel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(30, 30, 30, 30)
-            background = GradientDrawable().apply {
-                setColor(Color.argb(245, 15, 15, 15))
-                cornerRadius = 20f
-                setStroke(2, Color.GRAY)
-            }
-
-            elevation = popupElevation
-
-            isClickable = true
-            layoutParams = if (isPortrait) {
-                val menuHeight = (dm.heightPixels * 0.40).toInt()
-                FrameLayout.LayoutParams(700, -2).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = menuHeight + 20 }
-            } else {
-                FrameLayout.LayoutParams(600, -2).apply { gravity = Gravity.CENTER_VERTICAL or Gravity.START; leftMargin = 880 }
-            }
+            // CHANGED: Reduced padding from 30 to 10 to give more space for content
+            setPadding(10, 30, 10, 30)
+            background = GradientDrawable().apply { setColor(Color.argb(245, 15, 15, 15)); cornerRadius = 20f; setStroke(2, Color.GRAY) }
+            elevation = popupElevation; isClickable = true
+            layoutParams = if (isPortrait) FrameLayout.LayoutParams(700, -2).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = (dm.heightPixels * 0.40).toInt() + 20 }
+            else FrameLayout.LayoutParams(600, -2).apply { gravity = Gravity.CENTER_VERTICAL or Gravity.START; leftMargin = 880 }
         }
 
-        // --- HOOK FOR EXTRA CONTROLS ---
         addExtraControls(floatingPanel!!, context)
 
-        // --- TITLE & MIDI MAP ROW ---
-        val titleRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 }
-        }
+        val titleRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 } }
+        titleRow.addView(TextView(context).apply { text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
 
-        titleRow.addView(TextView(context).apply {
-            text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY);
-            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-        })
-
-        // MIDI MAP BUTTON
         val midiBtn = Button(context).apply {
-            textSize = 11f // Slightly larger
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
+            textSize = 11f; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+            includeFontPadding = false; setPadding(0, 0, 0, 0)
+            layoutParams = LinearLayout.LayoutParams(240, 90).apply { rightMargin = 10 }
 
-            // CRITICAL UI FIXES:
-            includeFontPadding = false
-            setPadding(0, 0, 0, 0) // Remove internal bulk
-            background = getMidiButtonBackground(activity, false)
-
-            // Wider and taller to ensure text fits
-            layoutParams = LinearLayout.LayoutParams(240, 90).apply {
-                rightMargin = 10
-            }
-            val myControlId = this@PropertyControl.id
-
-            // Initial State Check
-            val mappedCC = activity.midiHelper.getMappedCC(myControlId)
+            val mappedCC = activity.midiHelper.getMappedCC(this@PropertyControl.id)
             text = if (mappedCC != null) "CC: $mappedCC" else "MAP MIDI"
-            if (mappedCC != null) background = getMidiButtonBackground(activity, true)
+            background = getMidiButtonBackground(isMapped = (mappedCC != null))
 
             setOnClickListener {
                 if (text.toString().startsWith("CC")) {
-                    // UNMAP FLOW
-                    androidx.appcompat.app.AlertDialog.Builder(context)
-                        .setTitle("Unmap MIDI?")
-                        .setMessage("Disconnect from CC ${activity.midiHelper.getMappedCC(this@PropertyControl.id)}?")
-                        .setPositiveButton("Unmap") { _, _ ->
-                            activity.midiHelper.unmap(this@PropertyControl.id)
-                            text = "MAP MIDI"
-                            background = getMidiButtonBackground(activity, false)
-                        }
-                        .setNegativeButton("Cancel", null)
-                        .show()
+                    activity.midiHelper.unmap(this@PropertyControl.id)
+                    text = "MAP MIDI"; background = getMidiButtonBackground(false)
                 } else if (text == "WAITING...") {
-                    // CANCEL LEARN FLOW
                     activity.midiHelper.learningTargetId = null
-                    text = "MAP MIDI"
-                    background = getMidiButtonBackground(activity, false)
+                    text = "MAP MIDI"; background = getMidiButtonBackground(false)
                 } else {
-                    // START LEARN FLOW
-                    text = "WAITING..."
-                    setTextColor(Color.RED)
-                    background = GradientDrawable().apply {
-                        setColor(Color.parseColor("#440000"))
-                        setStroke(2, Color.RED)
-                        cornerRadius = 10f
-                    }
-
+                    text = "WAITING..."; setTextColor(Color.RED)
+                    background = GradientDrawable().apply { setColor(Color.parseColor("#440000")); setStroke(2, Color.RED); cornerRadius = 10f }
                     activity.midiHelper.learningTargetId = this@PropertyControl.id
                     activity.midiHelper.onLearningComplete = {
                         val newCC = activity.midiHelper.getMappedCC(this@PropertyControl.id)
-                        text = "CC: $newCC"
-                        setTextColor(Color.WHITE)
-                        background = getMidiButtonBackground(activity, true)
+                        text = "CC: $newCC"; setTextColor(Color.WHITE)
+                        background = getMidiButtonBackground(true)
                     }
                 }
             }
@@ -1443,165 +1338,103 @@ open class PropertyControl(
         titleRow.addView(midiBtn)
         floatingPanel?.addView(titleRow)
 
-        // --- NUMERICAL INPUT ---
-        val numRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 140).apply { bottomMargin = 10 }
-        }
-
+        val numRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, 140).apply { bottomMargin = 10 } }
         val btnDec = createNumButton(context, "-") { setProgress(value - 1) }
-
         baseValueInput = EditText(context).apply {
-            setText(value.toString())
-            textSize = 28f
-            setTextColor(Color.WHITE)
-            setTypeface(null, Typeface.BOLD)
-            gravity = Gravity.CENTER
-            background = null
-            setPadding(0, 10, 0, 0)
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            filters = arrayOf(android.text.InputFilter.LengthFilter(6))
-            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.5f)
-
+            setText(value.toString()); textSize = 28f; setTextColor(Color.WHITE); setTypeface(null, Typeface.BOLD); gravity = Gravity.CENTER; background = null
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER; filters = arrayOf(android.text.InputFilter.LengthFilter(6))
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE; layoutParams = LinearLayout.LayoutParams(0, -1, 1.5f)
             setOnEditorActionListener { v, actionId, _ ->
                 if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
-                    try {
-                        val num = v.text.toString().toIntOrNull() ?: value
-                        setProgress(num)
-                        v.clearFocus()
-                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-                        imm?.hideSoftInputFromWindow(v.windowToken, 0)
-                        (context as? MainActivity)?.hideSystemUI()
-                    } catch (e: Exception) {}
+                    val num = v.text.toString().toIntOrNull() ?: value; setProgress(num); v.clearFocus()
+                    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                    imm?.hideSoftInputFromWindow(v.windowToken, 0); (context as? MainActivity)?.hideSystemUI()
                     true
                 } else false
             }
         }
-
         val btnInc = createNumButton(context, "+") { setProgress(value + 1) }
-
         numRow.addView(btnDec); numRow.addView(baseValueInput); numRow.addView(btnInc)
         floatingPanel?.addView(numRow)
 
         if (hasModulation) {
-            val liveRow = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 }
-            }
-            liveValueDisplay = TextView(context).apply {
-                text = formatValue(value)
-                textSize = 14f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(Color.LTGRAY)
-            }
+            val liveRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 } }
+            liveValueDisplay = TextView(context).apply { text = formatValue(value); textSize = 14f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY) }
             liveRow.addView(liveValueDisplay)
             floatingPanel?.addView(liveRow)
-        }
 
-        floatingPanel?.addView(View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(-1, 2).apply { bottomMargin = 20 }
-            setBackgroundColor(Color.DKGRAY)
-        })
+            floatingPanel?.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 2).apply { bottomMargin = 20 }; setBackgroundColor(Color.DKGRAY) })
 
-        if (hasModulation) {
             shapeBtn = Button(context).apply {
-                text = modShape.name
-                textSize = 14f
-                setTextColor(Color.WHITE)
-                gravity = Gravity.CENTER
-                includeFontPadding = false
-                setPadding(0, 0, 0, 0)
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#444444"))
-                    cornerRadius = 10f
-                    setStroke(1, Color.GRAY)
-                }
+                text = modShape.name; textSize = 14f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; includeFontPadding = false; setPadding(0, 0, 0, 0)
+                background = GradientDrawable().apply { setColor(Color.parseColor("#444444")); cornerRadius = 10f; setStroke(1, Color.GRAY) }
                 layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 25 }
-                setOnClickListener {
-                    val nextOrdinal = (modShape.ordinal + 1) % WaveShape.values().size
-                    modShape = WaveShape.values()[nextOrdinal]
-                    text = modShape.name
-                }
+                setOnClickListener { modShape = WaveShape.values()[(modShape.ordinal + 1) % WaveShape.values().size]; text = modShape.name }
             }
             floatingPanel?.addView(shapeBtn)
 
             modPanelSpeedSeekBar = addSliderToPanel(context, "SPEED", modRate) { updateModRate(it) }
-            modPanelDepthSeekBar = addSliderToPanel(context, "DEPTH", modDepth) { updateModDepth(it); updateIndicatorVisuals() }
+            modPanelDepthSeekBar = addSliderToPanel(context, "DEPTH", modDepth) { updateModDepth(it) }
+
+            val smoothSb = addSliderToPanel(context, "SMOOTH", smoothing) { updateSmoothing(it) }
+            smoothSb.tag = "SMOOTH_SEEK"
+
             floatingPanel?.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 20) })
         }
 
         floatingPanel?.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
-
         val resetBtn = Button(context).apply {
-            text = "RESET"
-            textSize = 14f
-            setTextColor(Color.LTGRAY)
-            includeFontPadding = false
-            setPadding(0, 0, 0, 0)
-            gravity = Gravity.CENTER
-            background = GradientDrawable().apply {
-                setColor(Color.TRANSPARENT)
-                setStroke(2, Color.DKGRAY)
-                cornerRadius = 12f
-            }
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110).apply {
-                bottomMargin = 10
-                topMargin = 5
-            }
-            setOnClickListener {
-                reset()
-            }
+            text = "RESET"; textSize = 14f; setTextColor(Color.LTGRAY); includeFontPadding = false; setPadding(0, 0, 0, 0); gravity = Gravity.CENTER
+            background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(2, Color.DKGRAY); cornerRadius = 12f }
+            layoutParams = LinearLayout.LayoutParams(-1, 110).apply { bottomMargin = 10; topMargin = 5 }
+            setOnClickListener { reset() }
         }
         floatingPanel?.addView(resetBtn)
-
         rootLayout.addView(floatingPanel)
         activeControl = this
     }
 
-    private fun getMidiButtonBackground(ctx: Context, isMapped: Boolean): GradientDrawable {
-        return GradientDrawable().apply {
-            cornerRadius = 10f
-            if (isMapped) {
-                setColor(Color.parseColor("#004400"))
-                setStroke(2, Color.GREEN)
-            } else {
-                setColor(Color.parseColor("#333333"))
-                setStroke(1, Color.GRAY)
-            }
-        }
+    private fun getMidiButtonBackground(isMapped: Boolean): GradientDrawable {
+        return GradientDrawable().apply { cornerRadius = 10f; if (isMapped) { setColor(Color.parseColor("#004400")); setStroke(2, Color.GREEN) } else { setColor(Color.parseColor("#333333")); setStroke(1, Color.GRAY) } }
     }
-    // Override this in subclasses to add custom buttons at the top of the menu
     open fun addExtraControls(panel: LinearLayout, context: Context) {}
-
     protected fun createNumButton(ctx: Context, txt: String, action: () -> Unit): Button {
-        return Button(ctx).apply {
-            text = txt
-            textSize = 24f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            includeFontPadding = false
-            setPadding(0, 0, 0, 0)
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#333333"))
-                cornerRadius = 15f
-                setStroke(1, Color.GRAY)
-            }
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
-                setMargins(5, 5, 5, 5)
-            }
-            setOnClickListener { action() }
-        }
+        return Button(ctx).apply { text = txt; textSize = 24f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; includeFontPadding = false; setPadding(0, 0, 0, 0)
+            background = GradientDrawable().apply { setColor(Color.parseColor("#333333")); cornerRadius = 15f; setStroke(1, Color.GRAY) }
+            layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(5, 5, 5, 5) }
+            setOnClickListener { action() } }
     }
-
     protected fun addSliderToPanel(ctx: Context, name: String, current: Int, onChange: (Int) -> Unit): SeekBar {
-        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 10, 0, 10) }
-        row.addView(TextView(ctx).apply { text=name; textSize=10f; setTextColor(Color.LTGRAY); layoutParams=LinearLayout.LayoutParams(120, -2) })
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 5, 0, 5)
+        }
+
+        // Label: Fixed width (130 is enough for "SMOOTH" at 10sp), single line
+        row.addView(TextView(ctx).apply {
+            text = name
+            textSize = 10f
+            setTextColor(Color.LTGRAY)
+            maxLines = 1
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(130, ViewGroup.LayoutParams.MATCH_PARENT)
+        })
+
+        // Slider: Weight 1f to fill remaining space, 0 margins
         val sb = SeekBar(ctx).apply {
-            max = 1000; progress = current; layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            max = 1000
+            progress = current
             thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
+
+            // Remove all internal padding so track goes edge-to-edge
+            setPadding(0, 0, 0, 0)
+            thumbOffset = 0
+
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                setMargins(0, 0, 0, 0)
+            }
+
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) onChange(p) }
                 override fun onStartTrackingTouch(s: SeekBar?) {}
@@ -3280,8 +3113,15 @@ class MainActivity : AppCompatActivity() {
             if (snap != null) {
                 control.animateTo(snap.value.toFloat(), durationSec, snap.shape)
                 if (control.hasModulation) {
-                    control.animateModulation(snap.rate.toFloat(), snap.depth.toFloat(), durationSec)
-                }
+                    control.animateTo(snap.value.toFloat(), durationSec, snap.shape)
+
+                    // 2. Animate LFO
+                    if (control.hasModulation) {
+                        control.animateModulation(snap.rate.toFloat(), snap.depth.toFloat(), durationSec)
+                    }
+
+                    // 3. FIX: Load Smoothing!
+                    control.smoothing = snap.smoothing                }
             }
         }
         updateSidebarVisuals()
@@ -3294,9 +3134,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun savePreset(idx: Int) {
-        // FIX: Added filter && it.includeInPreset to ensure Transition Time isn't saved
         val snapshots = controls.filter { it.id != "AXIS" && it.includeInPreset }.associate { it.id to it.getSnapshot() }
-
         val axisVal = controlsMap["AXIS"]?.value ?: 0
         val newPreset = Preset(snapshots, renderer.flipX, renderer.flipY, renderer.rot180, axisVal + 1)
         presets[idx] = newPreset
@@ -3311,7 +3149,12 @@ class MainActivity : AppCompatActivity() {
             val controlsObj = JSONObject()
             newPreset.controlSnapshots.forEach { (key, snap) ->
                 val snapObj = JSONObject()
-                snapObj.put("v", snap.value); snapObj.put("r", snap.rate); snapObj.put("d", snap.depth); snapObj.put("shape", snap.shape)
+                snapObj.put("v", snap.value)
+                snapObj.put("r", snap.rate)
+                snapObj.put("d", snap.depth)
+                snapObj.put("shape", snap.shape)
+                // SAVE SMOOTHING
+                snapObj.put("s", snap.smoothing)
                 controlsObj.put(key, snapObj)
             }
             rootObj.put("controls", controlsObj)
@@ -3423,7 +3266,8 @@ class MainActivity : AppCompatActivity() {
 
             // Default M_ANGLE to 0 if not specified
             if (!overrides.contains("M_ANGLE")) {
-                baseSnapshots["M_ANGLE"] = PropertyControl.Snapshot(0, false, 0, 0, "SINE")
+                // FIXED: Default smoothing to 500
+                baseSnapshots["M_ANGLE"] = PropertyControl.Snapshot(0, false, 0, 0, "SINE", 500)
             }
 
             var i = 0
@@ -3442,166 +3286,40 @@ class MainActivity : AppCompatActivity() {
                     // Check for Shape String safely
                     if (i + 4 < overrides.size && overrides[i + 4] is String) {
                         val potentialShape = overrides[i + 4] as String
-                        // Verify it is a valid WaveShape enum
-                        val isValid = try {
-                            PropertyControl.WaveShape.valueOf(potentialShape)
-                            true
-                        } catch (e: Exception) {
-                            false
-                        }
-
-                        if (isValid) {
-                            shape = potentialShape
-                            step = 5
-                        }
+                        val isValid = try { PropertyControl.WaveShape.valueOf(potentialShape); true } catch (e: Exception) { false }
+                        if (isValid) { shape = potentialShape; step = 5 }
                     }
-                    baseSnapshots[key] = PropertyControl.Snapshot(value, true, rate, depth, shape)
+                    // FIXED: Default smoothing to 500 (was 0)
+                    baseSnapshots[key] = PropertyControl.Snapshot(value, true, rate, depth, shape, 500)
                     i += step
                 } else {
                     // Static value
-                    baseSnapshots[key] = PropertyControl.Snapshot(value, false, 0, 0, "SINE")
+                    // FIXED: Default smoothing to 500 (was 0)
+                    baseSnapshots[key] = PropertyControl.Snapshot(value, false, 0, 0, "SINE", 500)
                     i += 2
                 }
             }
             return Preset(baseSnapshots, 1f, -1f, false, ax)
         }
 
-        // --- PRESET DEFINITIONS (From Logs) ---
+        // --- PRESET DEFINITIONS ---
+        presets[1] = p(2, "M_ZOOM", 130, "M_TX", 500, "M_TY", 500, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
+        presets[2] = p(2, "M_ZOOM", 49, "M_TX", 688, "M_TY", 609, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
+        presets[3] = p(2, "M_ANGLE", 0, 169, 1000, "RAMP", "M_ZOOM", 168, "M_TX", 500, 480, 378, "M_TY", 546, 340, 698, "M_TILTX", 500, 268, 788, "M_TILTY", 500, 241, 732, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
+        presets[4] = p(2, "M_ANGLE", 172, 262, 287, "M_ZOOM", 160, 531, 316, "M_TX", 500, 235, 184, "M_TY", 500, 217, 218, "M_TILTX", 500, 242, 305, "M_TILTY", 500, 318, 343, "C_ZOOM", 500, 583, 365, "HUE", 184, 298, 505, "RAMP", "GLOW", 172, "CONTRAST", 718, "VIBRANCE", 899)
+        presets[5] = p(2, "M_ANGLE", 172, 262, 287, "M_ZOOM", 518, 531, 576, "M_TX", 500, 431, 525, "M_TY", 500, 217, 644, "RANDOM_SMOOTH", "M_TILTX", 500, 498, 1000, "M_TILTY", 500, 318, 1000, "C_ZOOM", 500, 583, 365, "GLOW", 485, "CONTRAST", 788, "VIBRANCE", 899)
+        presets[6] = p(2, "3D_MIX", 1000, "S_FOV", 884, "M_ANGLE", 172, 262, 287, "M_ZOOM", 130, 200, 0, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 345, "RANDOM_SMOOTH", "C_ZOOM", 500, 583, 365, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853)
+        presets[7] = p(2, "3D_MIX", 1000, "S_SHAPE", 0, 343, 0, "S_SPEED", 206, "S_FOV", 481, "T_WAVE_STR", 454, "T_WAVE_POS", 20, 375, 1000, "RAMP", "M_ANGLE", 870, "M_ZOOM", 77, "M_TX", 500, 320, 328, "M_TY", 500, 323, 343, "M_TILTY", 500, 318, 0, "C_ZOOM", 500, 583, 0, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853)
+        presets[8] = p(2, "3D_MIX", 1000, "S_SHAPE", 1000, 343, 785, "S_FOV", 481, 496, 704, "S_SPEED", 1000, "M_ANGLE", 172, 262, 287, "M_ZOOM", 160, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 469, "C_ZOOM", 500, 583, 365, "RGB", 490, 534, 634, "GLOW", 285, "CONTRAST", 786, "VIBRANCE", 828)
+        presets[9] = p(6, "3D_MIX", 1000, "S_FOV", 600, "S_SPEED", 150, "S_SHAPE", 0, 150, 600, "SINE", "M_ZOOM", 120, 150, 200, "SINE", "M_ANGLE", 0, 60, 1000, "RAMP", "HUE", 0, 80, 1000, "RAMP", "VIBRANCE", 600, "GLOW", 600, "RGB", 150, "M_TX", 500, "M_TY", 500, "M_TILTX", 500, "M_TILTY", 500)
 
-        presets[1] = p(2,
-            "M_ZOOM", 130,
-            "M_TX", 500,
-            "M_TY", 500,
-            "C_ZOOM", 320,
-            "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500
-        )
-
-        presets[2] = p(2,
-            "M_ZOOM", 49,
-            "M_TX", 688, "M_TY", 609,
-            "C_ZOOM", 320,
-            "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500
-        )
-
-        presets[3] = p(2,
-            "M_ANGLE", 0, 169, 1000, "RAMP",
-            "M_ZOOM", 168,
-            "M_TX", 500, 480, 378,
-            "M_TY", 546, 340, 698,
-            "M_TILTX", 500, 268, 788,
-            "M_TILTY", 500, 241, 732,
-            "C_ZOOM", 320,
-            "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500
-        )
-
-        presets[4] = p(2,
-            "M_ANGLE", 172, 262, 287,
-            "M_ZOOM", 160, 531, 316,
-            "M_TX", 500, 235, 184,
-            "M_TY", 500, 217, 218,
-            "M_TILTX", 500, 242, 305,
-            "M_TILTY", 500, 318, 343,
-            "C_ZOOM", 500, 583, 365,
-            "HUE", 184, 298, 505, "RAMP",
-            "GLOW", 172,
-            "CONTRAST", 718, "VIBRANCE", 899
-        )
-
-        presets[5] = p(2,
-            "M_ANGLE", 172, 262, 287,
-            "M_ZOOM", 518, 531, 576,
-            "M_TX", 500, 431, 525,
-            "M_TY", 500, 217, 644, "RANDOM_SMOOTH",
-            "M_TILTX", 500, 498, 1000,
-            "M_TILTY", 500, 318, 1000,
-            "C_ZOOM", 500, 583, 365,
-            "GLOW", 485,
-            "CONTRAST", 788, "VIBRANCE", 899
-        )
-
-        presets[6] = p(2,
-            "3D_MIX", 1000,
-            "S_FOV", 884,
-            "M_ANGLE", 172, 262, 287,
-            "M_ZOOM", 130, 200, 0,
-            "M_TX", 500, 431, 40,
-            "M_TY", 500, 217, 34,
-            "M_TILTX", 500, 498, 303,
-            "M_TILTY", 500, 318, 345, "RANDOM_SMOOTH",
-            "C_ZOOM", 500, 583, 365,
-            "GLOW", 178,
-            "CONTRAST", 522, "VIBRANCE", 853
-        )
-
-        presets[7] = p(2,
-            "3D_MIX", 1000,
-            "S_SHAPE", 0, 343, 0,
-            "S_SPEED", 206,
-            "S_FOV", 481,
-            "T_WAVE_STR", 454,
-            "T_WAVE_POS", 20, 375, 1000, "RAMP",
-            "M_ANGLE", 870,
-            "M_ZOOM", 77,
-            "M_TX", 500, 320, 328,
-            "M_TY", 500, 323, 343,
-            "M_TILTY", 500, 318, 0,
-            "C_ZOOM", 500, 583, 0,
-            "GLOW", 178,
-            "CONTRAST", 522, "VIBRANCE", 853
-        )
-
-        presets[8] = p(2,
-            "3D_MIX", 1000,
-            "S_SHAPE", 1000, 343, 785,
-            "S_FOV", 481, 496, 704,
-            "S_SPEED", 1000,
-            "M_ANGLE", 172, 262, 287,
-            "M_ZOOM", 160,
-            "M_TX", 500, 431, 40,
-            "M_TY", 500, 217, 34,
-            "M_TILTX", 500, 498, 303,
-            "M_TILTY", 500, 318, 469,
-            "C_ZOOM", 500, 583, 365,
-            "RGB", 490, 534, 634,
-            "GLOW", 285,
-            "CONTRAST", 786, "VIBRANCE", 828
-        )
-
-        presets[9] = p(6, // High Axis for complex geometry
-            "3D_MIX", 1000,          // Fully 3D
-            "S_FOV", 600,            // Moderate FOV
-            "S_SPEED", 150,          // Slow, graceful forward movement
-
-            // "Breathing" Geometry: Modulate Shape between Circle and Square slowly
-            "S_SHAPE", 0, 150, 600, "SINE",
-
-            // Subtle Zoom breathing synced roughly with shape
-            "M_ZOOM", 120, 150, 200, "SINE",
-
-            // Slow, constant rotation to keep it dynamic but not dizzying
-            "M_ANGLE", 0, 60, 1000, "RAMP",
-
-            // Deep Color Cycle
-            "HUE", 0, 80, 1000, "RAMP",
-            "VIBRANCE", 600,
-            "GLOW", 600,             // High glow for "Neon" look
-            "RGB", 150,              // Slight chromatic aberration for "Wild" edge
-
-            // Center the view
-            "M_TX", 500, "M_TY", 500,
-            "M_TILTX", 500, "M_TILTY", 500
-        )
-
-        // Load saved overrides from SharedPreferences
+        // Load saved overrides
         val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
-        // UPDATED LOOP LIMIT TO 9
         for (i in 1..9) {
             val jsonStr = prefs.getString("PRESET_$i", null)
             if (jsonStr != null) {
-                // ... (Keep existing loading logic) ...
                 try {
                     val rootObj = JSONObject(jsonStr)
-                    // ... (rest of parsing logic) ...
                     val loadedAxis = rootObj.getInt("axis")
                     val loadedFlipX = rootObj.getDouble("flipX").toFloat()
                     val loadedFlipY = rootObj.getDouble("flipY").toFloat()
@@ -3620,7 +3338,9 @@ class MainActivity : AppCompatActivity() {
                             snapObj.optBoolean("active", false),
                             snapObj.optInt("r", 0),
                             snapObj.optInt("d", 0),
-                            snapObj.optString("shape", "SINE")
+                            snapObj.optString("shape", "SINE"),
+                            // FIXED: Use 500 as fallback if 's' is missing in old JSON
+                            snapObj.optInt("s", 500)
                         )
                     }
                     presets[i] = Preset(loadedSnapshots, loadedFlipX, loadedFlipY, loadedRot180, loadedAxis)
