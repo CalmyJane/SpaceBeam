@@ -88,13 +88,13 @@ import android.widget.Toast
 import android.media.midi.MidiOutputPort
 
 class MidiHelper(private val activity: MainActivity) {
-    private val midiManager = activity.getSystemService(Context.MIDI_SERVICE) as MidiManager
-    private val bluetoothAdapter: BluetoothAdapter? = (activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
-    private var openDevice: MidiDevice? = null
+    // Standard BLE MIDI UUIDs from your Tester App
+    private val MIDI_SERVICE_UUID = java.util.UUID.fromString("03B80E5A-EDE8-4B33-A751-6CE34EC4C700")
+    private val MIDI_CHAR_UUID    = java.util.UUID.fromString("7772E5DB-3868-4112-A1A9-F2669D106BF3")
+    private val CCCD_UUID         = java.util.UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-    // CRITICAL FIX: Keep strong references so the garbage collector doesn't kill the connection
-    private val openedPorts = mutableListOf<MidiOutputPort>()
-    private val activeReceivers = mutableListOf<MidiReceiver>()
+    private val bluetoothAdapter: BluetoothAdapter? = (activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+    private var activeGatt: BluetoothGatt? = null
 
     // Mapping: CC Number (Int) -> PropertyControl ID (String)
     private val ccMap = java.util.concurrent.ConcurrentHashMap<Int, String>()
@@ -107,9 +107,6 @@ class MidiHelper(private val activity: MainActivity) {
 
     var learningTargetId: String? = null
     var onLearningComplete: (() -> Unit)? = null
-
-    // Running Status Tracking
-    private var lastStatusByte: Int = 0
 
     fun getMappedCC(controlId: String): Int? {
         return reverseMap[controlId]
@@ -127,7 +124,6 @@ class MidiHelper(private val activity: MainActivity) {
             return
         }
 
-        // Permission check for Android 12+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(activity, "Permission missing for BT Scan", Toast.LENGTH_SHORT).show()
@@ -139,25 +135,21 @@ class MidiHelper(private val activity: MainActivity) {
         scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 val device = result?.device ?: return
-
-                // FIX: Filter out unnamed devices to avoid cluttering the list with "Unknown"
                 try {
+                    // Pass found device to UI
                     if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
-                        if (device.name != null) {
-                            onDeviceFound?.invoke(device)
-                        }
+                        // Optional: Filter by Service UUID here if desired, but name check is usually enough for list
+                        if (device.name != null) onDeviceFound?.invoke(device)
                     } else {
-                        // Fallback if permission check fails weirdly, strictly filter nulls
                         if (device.name != null) onDeviceFound?.invoke(device)
                     }
-                } catch (e: SecurityException) {
-                    // Ignore devices we can't read
-                }
+                } catch (e: SecurityException) { }
             }
         }
 
         try {
             isScanning = true
+            // Scan for everything, filtering is done in UI or you can add ScanFilter here
             bluetoothAdapter.bluetoothLeScanner?.startScan(scanCallback)
             Handler(Looper.getMainLooper()).postDelayed({ stopLeScan() }, 10000)
         } catch (e: SecurityException) {
@@ -184,95 +176,148 @@ class MidiHelper(private val activity: MainActivity) {
             return
         }
 
+        // Close existing
+        close()
+
         try {
-            Log.d("MIDI_DEBUG", "Connecting to ${device.address}")
+            Log.d("MIDI_DEBUG", "Connecting GATT to ${device.address}")
+            // Connect using manual GATT instead of MidiManager
+            activeGatt = device.connectGatt(activity, false, gattCallback)
 
-            // FIX: Use null handler to use a background thread for MIDI input
-            midiManager.openBluetoothDevice(device, { midiDevice ->
-                if (midiDevice != null) {
-                    openDevice = midiDevice
-                    Log.d("MIDI_DEBUG", "Device Opened: ${midiDevice.info}")
-
-                    // Cleanup old connections
-                    openedPorts.forEach { try { it.close() } catch(e:Exception){} }
-                    openedPorts.clear()
-                    activeReceivers.clear()
-
-                    val info = midiDevice.info
-                    for (i in 0 until info.outputPortCount) {
-                        val outputPort = midiDevice.openOutputPort(i)
-                        if (outputPort == null) continue
-
-                        openedPorts.add(outputPort) // Prevent GC
-                        Log.d("MIDI_DEBUG", "Opened Port $i")
-
-                        val receiver = object : MidiReceiver() {
-                            override fun onSend(msg: ByteArray?, offset: Int, count: Int, timestamp: Long) {
-                                if (msg == null) return
-                                handleMidiMessage(msg, offset, count)
-                            }
-                        }
-
-                        activeReceivers.add(receiver) // Prevent GC
-                        outputPort.connect(receiver)
-                    }
-
-                    activity.runOnUiThread {
-                        Toast.makeText(activity, "Connected!", Toast.LENGTH_SHORT).show()
-                    }
-                } else {
-                    Log.e("MIDI_DEBUG", "Failed to open device (Result Null)")
-                }
-            }, null) // <-- Null handler = Background Thread (Critical for performance)
-        } catch (e: Exception) {
-            Log.e("MIDI_DEBUG", "Connection Error", e)
+            activity.runOnUiThread {
+                Toast.makeText(activity, "Connecting...", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: SecurityException) {
+            Log.e("MIDI_DEBUG", "Connection Failed", e)
         }
     }
 
-    private fun handleMidiMessage(data: ByteArray, offset: Int, count: Int) {
-        var i = offset
-        val end = offset + count
+    private val gattCallback = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                Log.d("MIDI_DEBUG", "GATT Connected. Requesting MTU...")
+                try {
+                    // STEP 1: Request larger MTU (Essential for M-Vave)
+                    if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                        val success = gatt.requestMtu(512)
+                        if (!success) gatt.discoverServices()
+                    }
+                } catch (e: SecurityException) {
+                    gatt.discoverServices()
+                }
 
-        while (i < end) {
-            val byte = data[i].toInt() and 0xFF
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "Connected! Initializing...", Toast.LENGTH_SHORT).show()
+                }
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                Log.d("MIDI_DEBUG", "GATT Disconnected")
+                activeGatt = null
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "Disconnected", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
 
-            if (byte >= 0x80) {
-                lastStatusByte = byte
-                i++
-            } else if (lastStatusByte == 0) {
-                i++
-                continue
-            }
+        override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
+            Log.d("MIDI_DEBUG", "MTU Changed: $mtu")
+            try {
+                if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                    gatt?.discoverServices()
+                }
+            } catch (e: SecurityException) {}
+        }
 
-            // CC: 0xB0 - 0xBF
-            if (lastStatusByte in 0xB0..0xBF) {
-                if (i + 1 < end) {
-                    val cc = data[i].toInt() and 0x7F
-                    val value = data[i + 1].toInt() and 0x7F
-                    processCC(cc, value)
-                    i += 2
-                } else break
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                val service = gatt.getService(MIDI_SERVICE_UUID)
+                if (service != null) {
+                    val midiChar = service.getCharacteristic(MIDI_CHAR_UUID)
+                    if (midiChar != null) {
+                        enableMidiNotification(gatt, midiChar)
+                    }
+                }
             }
-            // Note On: 0x90 - 0x9F (Used as buttons by some devices)
-            else if (lastStatusByte in 0x90..0x9F) {
-                if (i + 1 < end) {
-                    val note = data[i].toInt() and 0x7F
-                    val velocity = data[i + 1].toInt() and 0x7F
-                    if (velocity > 0) processCC(note, 127)
-                    i += 2
-                } else break
+        }
+
+        private fun enableMidiNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic) {
+            try {
+                if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return
+
+                // 1. Local Enable
+                gatt.setCharacteristicNotification(char, true)
+
+                // 2. Remote Enable (CCCD)
+                val descriptor = char.getDescriptor(CCCD_UUID)
+                if (descriptor != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        @Suppress("DEPRECATION")
+                        gatt.writeDescriptor(descriptor)
+                    }
+                }
+            } catch (e: SecurityException) {
+                Log.e("MIDI_DEBUG", "Perm fail on subscribe")
             }
-            // Note Off: 0x80 - 0x8F
-            else if (lastStatusByte in 0x80..0x8F) {
-                if (i + 1 < end) {
-                    val note = data[i].toInt() and 0x7F
-                    processCC(note, 0)
-                    i += 2
-                } else break
+        }
+
+        override fun onDescriptorWrite(gatt: BluetoothGatt?, descriptor: BluetoothGattDescriptor?, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "MIDI Ready!", Toast.LENGTH_SHORT).show()
+                }
             }
-            else {
-                // Skip unknown data byte
-                i++
+        }
+
+        // Android 12 and below
+        @Deprecated("Deprecated in Java")
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            handleRawPacket(characteristic.value)
+        }
+
+        // Android 13+
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+            handleRawPacket(value)
+        }
+    }
+
+    private fun handleRawPacket(value: ByteArray) {
+        // BLE MIDI Packet Structure from your Tester:
+        // Byte 0: Header
+        // Byte 1: Timestamp
+        // Byte 2: Status (We want this)
+        // Byte 3: Data 1 (Note/CC num)
+        // Byte 4: Data 2 (Velocity/Value)
+
+        if (value.size > 2) {
+            // Apply mask to ensure we treat bytes as unsigned integers
+            val status = value[2].toInt() and 0xFF
+
+            // 1. Control Change (0xB0 - 0xBF)
+            if ((status and 0xF0) == 0xB0) {
+                if (value.size > 4) {
+                    val ccNum = value[3].toInt() and 0x7F
+                    val ccVal = value[4].toInt() and 0x7F
+                    processCC(ccNum, ccVal)
+                }
+            }
+            // 2. Note On (0x90 - 0x9F) - Treat as button press
+            else if ((status and 0xF0) == 0x90) {
+                if (value.size > 4) {
+                    val noteNum = value[3].toInt() and 0x7F
+                    val velocity = value[4].toInt() and 0x7F
+                    // If velocity > 0, treat as max value, else 0
+                    processCC(noteNum, if (velocity > 0) 127 else 0)
+                }
+            }
+            // 3. Note Off (0x80 - 0x8F)
+            else if ((status and 0xF0) == 0x80) {
+                if (value.size > 3) {
+                    val noteNum = value[3].toInt() and 0x7F
+                    processCC(noteNum, 0)
+                }
             }
         }
     }
@@ -306,9 +351,12 @@ class MidiHelper(private val activity: MainActivity) {
 
     fun close() {
         try {
-            openedPorts.forEach { it.close() }
-            openDevice?.close()
-        } catch (e: Exception) {}
+            if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                activeGatt?.disconnect()
+                activeGatt?.close()
+            }
+            activeGatt = null
+        } catch (e: SecurityException) {}
     }
 }
 
