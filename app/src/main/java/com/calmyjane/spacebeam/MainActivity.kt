@@ -83,6 +83,7 @@ import android.widget.Toast
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.abs
+import org.json.JSONArray
 
 class MidiHelper(private val activity: MainActivity) {
     // Standard BLE MIDI UUIDs from your Tester App
@@ -1068,7 +1069,7 @@ open class PropertyControl(
             smoothedNormalized = targetNormalized
         } else {
             val s = smoothing / 1000f
-            val speed = 5.0f * (1.0f - s) * (1.0f - s) + 0.1f
+            val speed = 10.0f * (1.0f - s) * (1.0f - s) + 0.1f
             val lerpFactor = (speed * deltaTime).coerceIn(0f, 1f)
             smoothedNormalized += (targetNormalized - smoothedNormalized) * lerpFactor
         }
@@ -2796,82 +2797,268 @@ class MainActivity : AppCompatActivity() {
 
     private fun showRtspDialog() {
         val prefs = getSharedPreferences("SpaceBeam_RTSP", Context.MODE_PRIVATE)
-        val historyKey = "RTSP_HISTORY"
-        val rawSet = prefs.getStringSet(historyKey, null)
-        val historyList = rawSet?.toMutableList() ?: mutableListOf()
-        if (historyList.isEmpty()) {
-            historyList.add("rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4")
-            historyList.add("rtsp://192.168.1.2:8554/screen")
-        }
-        val lastUsed = prefs.getString("LAST_RTSP", historyList[0])
+        val historyKey = "RTSP_HISTORY_LIST"
 
-        val row = LinearLayout(this).apply {
+        // 1. Define Defaults
+        val defaults = listOf(
+            "rtsp://192.168.xx.xx:8554/screen",
+            "rtsp://192.168.xx.xx:8080/h264_ulaw.sdp"
+        )
+
+        // 2. Load User History
+        val userHistory = mutableListOf<String>()
+        val jsonStr = prefs.getString(historyKey, "[]")
+        try {
+            val jsonArr = JSONArray(jsonStr)
+            for (i in 0 until jsonArr.length()) {
+                userHistory.add(jsonArr.getString(i))
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // 3. Combine List
+        val displayList = (defaults + userHistory).distinct().toMutableList()
+        val lastUsed = prefs.getString("LAST_RTSP", "")
+
+        // --- FULLSCREEN DIALOG SETUP ---
+        val dialog = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+
+        // Root Container (Black Background)
+        val rootLayout = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#121212"))
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            isClickable = true
+            isFocusable = true
+        }
+
+        // Close Button (Top Right)
+        val closeBtn = Button(this).apply {
+            text = "✕"
+            textSize = 24f
+            setTextColor(Color.GRAY)
+            background = null
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(150, 150).apply {
+                gravity = Gravity.TOP or Gravity.END
+                topMargin = 30
+                rightMargin = 30
+            }
+            setOnClickListener {
+                dialog.dismiss()
+                hideSystemUI() // Restore immersive mode
+            }
+        }
+
+        // Center Content Container
+        val contentContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            // Position slightly above center to avoid keyboard coverage
+            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.TOP
+                topMargin = 300 // Push down from top
+                leftMargin = 50
+                rightMargin = 50
+            }
+        }
+
+        // Title
+        val titleView = TextView(this).apply {
+            text = "CONNECT TO RTSP STREAM"
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 60)
+        }
+
+        // Input Row (Input + Arrow)
+        val inputRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(40, 20, 40, 0)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#222222"))
+                setStroke(2, Color.DKGRAY)
+                cornerRadius = 15f
+            }
+            setPadding(20, 10, 20, 10)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 140)
         }
+
+        val adapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, displayList)
+
         val input = AutoCompleteTextView(this).apply {
-            setText(lastUsed)
-            setTextColor(Color.BLACK)
-            textSize = 16f
-            setPadding(20, 30, 20, 30)
-            threshold = 1
+            setText(if (lastUsed!!.isNotEmpty()) lastUsed else displayList[0])
+            setTextColor(Color.WHITE)
+            textSize = 18f
+            background = null // Remove default underline
+            setSingleLine(true)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
-            imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI or android.view.inputmethod.EditorInfo.IME_ACTION_DONE
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            setAdapter(ArrayAdapter(context, android.R.layout.simple_dropdown_item_1line, historyList))
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_GO
+            threshold = 1
+            dropDownHeight = 600 // Limit dropdown height
+
+            // Allow white text on dropdown
+            setDropDownBackgroundDrawable(GradientDrawable().apply { setColor(Color.DKGRAY) })
+
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+            setAdapter(adapter)
         }
+
         val arrowBtn = ImageButton(this).apply {
             setImageResource(android.R.drawable.arrow_down_float)
-            setBackgroundColor(Color.LTGRAY)
-            layoutParams = LinearLayout.LayoutParams(120, 100).apply { leftMargin = 10 }
-            setOnClickListener { input.showDropDown() }
+            setColorFilter(Color.GRAY) // Tint arrow
+            background = null
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            layoutParams = LinearLayout.LayoutParams(100, ViewGroup.LayoutParams.MATCH_PARENT)
+            setOnClickListener {
+                input.showDropDown()
+                // Hide keyboard to see dropdown better
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+                imm?.hideSoftInputFromWindow(input.windowToken, 0)
+            }
         }
-        row.addView(input); row.addView(arrowBtn)
 
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("RTSP URL")
-            .setView(row)
-            .setPositiveButton("Connect", null) // We set logic below
-            .setNegativeButton("Cancel", null)
-            .create()
+        inputRow.addView(input)
+        inputRow.addView(arrowBtn)
 
+        // Connect Button
+        val connectBtn = Button(this).apply {
+            text = "CONNECT"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#0066CC")) // Blue-ish
+                cornerRadius = 15f
+            }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120).apply {
+                topMargin = 60
+            }
+        }
+
+        // Logic
         fun performConnect() {
             val url = input.text.toString().trim()
             if (url.isNotEmpty()) {
-                if (historyList.contains(url)) historyList.remove(url)
-                historyList.add(0, url)
-                prefs.edit().putStringSet(historyKey, historyList.toHashSet()).putString("LAST_RTSP", url).apply()
+                // Update History
+                userHistory.remove(url)
+                userHistory.add(0, url)
+                if (userHistory.size > 10) {
+                    val trimmed = userHistory.take(10)
+                    userHistory.clear()
+                    userHistory.addAll(trimmed)
+                }
+
+                val saveArray = JSONArray()
+                userHistory.forEach { saveArray.put(it) }
+                prefs.edit().putString(historyKey, saveArray.toString()).putString("LAST_RTSP", url).apply()
 
                 // Hide Keyboard
                 val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
                 imm?.hideSoftInputFromWindow(input.windowToken, 0)
+
+                dialog.dismiss()
                 hideSystemUI()
 
-                // FIX: Dismiss Dialog immediately so user cannot click connect twice
-                dialog.dismiss()
+                // Pass a dummy dialog interface or remove that parameter from attemptConnectRtsp if possible.
+                // Since attemptConnectRtsp expects an AlertDialog in your current code,
+                // we will pass 'null' if you modify attemptConnectRtsp, OR we create a quick dummy wrapper.
+                // However, based on previous context, attemptConnectRtsp takes `androidx.appcompat.app.AlertDialog`.
+                // **CRITICAL FIX:** We will modify this call logic slightly.
+                // Since `attemptConnectRtsp` closes the dialog, we just call the logic directly.
 
-                attemptConnectRtsp(url, dialog)
+                // Trigger connection logic directly
+                attemptConnectRtspFromFullscreen(url)
             }
         }
 
+        connectBtn.setOnClickListener { performConnect() }
         input.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO ||
+                actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
                 performConnect()
                 true
             } else false
         }
 
-        // FIX: Ensure keyboard isn't blocked by full screen flags
-        dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
+        contentContainer.addView(titleView)
+        contentContainer.addView(inputRow)
+        contentContainer.addView(connectBtn)
 
+        rootLayout.addView(contentContainer)
+        rootLayout.addView(closeBtn)
+
+        dialog.setContentView(rootLayout)
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+
+        dialog.setOnDismissListener { hideSystemUI() }
         dialog.show()
 
-        // Override OnClickListener to prevent default close behavior if validation fails (though here we close immediately on success)
-        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener { performConnect() }
         input.requestFocus()
+        input.setSelection(input.text.length)
     }
+
+    // A small helper to bridge the gap since the original function expected an AlertDialog
+    private fun attemptConnectRtspFromFullscreen(url: String) {
+        val uniqueId = "RTSP_${System.currentTimeMillis()}"
+        val player = ExoPlayer.Builder(this).build()
+        player.volume = 0f
+
+        val channel = renderer.addSource(SourceType.RTSP, uniqueId)
+        if (channel == null) {
+            Toast.makeText(this, "Mixer Full", Toast.LENGTH_SHORT).show()
+            player.release()
+            return
+        }
+
+        Toast.makeText(this, "Connecting to Stream...", Toast.LENGTH_SHORT).show()
+
+        glView.queueEvent {
+            val s = channel.getSurfaceForInput()
+            runOnUiThread {
+                try {
+                    player.setVideoSurface(s)
+                    val rtspSource = RtspMediaSource.Factory()
+                        .setForceUseRtpTcp(true)
+                        .createMediaSource(MediaItem.fromUri(url))
+
+                    player.setMediaSource(rtspSource)
+                    player.prepare()
+                    player.play()
+
+                    player.addListener(object : Player.Listener {
+                        override fun onPlaybackStateChanged(playbackState: Int) {
+                            if (playbackState == Player.STATE_READY) {
+                                if (!controlsMap.containsKey(uniqueId)) {
+                                    val ctrl = RtspSourceControl(uniqueId, "STREAM", uniqueId, this@MainActivity, player)
+                                    addDynamicSourceControl(ctrl)
+                                    Toast.makeText(this@MainActivity, "Connected", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                        override fun onVideoSizeChanged(videoSize: VideoSize) {
+                            if (videoSize.width > 0) {
+                                channel.updateSize(videoSize.width, videoSize.height)
+                                if (videoSize.height > videoSize.width) channel.rotation = -90f else channel.rotation = 0f
+                            }
+                        }
+                        override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                            Toast.makeText(this@MainActivity, "Connection Failed", Toast.LENGTH_LONG).show()
+                            renderer.removeSource(uniqueId)
+                            player.release()
+                        }
+                    })
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    renderer.removeSource(uniqueId)
+                    player.release()
+                }
+            }
+        }
+    }
+
     private fun attemptConnectRtsp(url: String, dialog: androidx.appcompat.app.AlertDialog) {
         val uniqueId = "RTSP_${System.currentTimeMillis()}"
         val player = ExoPlayer.Builder(this).build()
@@ -3303,8 +3490,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         // --- PRESET DEFINITIONS ---
-        presets[1] = p(2, "M_ZOOM", 130, "M_TX", 500, "M_TY", 500, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
-        presets[2] = p(2, "M_ZOOM", 49, "M_TX", 688, "M_TY", 609, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
+        presets[1] = p(2, "M_ZOOM", 101, "M_TX", 500, "M_TY", 500, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
+        presets[2] = p(2, "M_ZOOM", 37, "M_TX", 725, "M_TY", 628, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
         presets[3] = p(2, "M_ANGLE", 0, 169, 1000, "RAMP", "M_ZOOM", 168, "M_TX", 500, 480, 378, "M_TY", 546, 340, 698, "M_TILTX", 500, 268, 788, "M_TILTY", 500, 241, 732, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
         presets[4] = p(2, "M_ANGLE", 172, 262, 287, "M_ZOOM", 160, 531, 316, "M_TX", 500, 235, 184, "M_TY", 500, 217, 218, "M_TILTX", 500, 242, 305, "M_TILTY", 500, 318, 343, "C_ZOOM", 500, 583, 365, "HUE", 184, 298, 505, "RAMP", "GLOW", 172, "CONTRAST", 718, "VIBRANCE", 899)
         presets[5] = p(2, "M_ANGLE", 172, 262, 287, "M_ZOOM", 518, 531, 576, "M_TX", 500, 431, 525, "M_TY", 500, 217, 644, "RANDOM_SMOOTH", "M_TILTX", 500, 498, 1000, "M_TILTY", 500, 318, 1000, "C_ZOOM", 500, 583, 365, "GLOW", 485, "CONTRAST", 788, "VIBRANCE", 899)
