@@ -75,7 +75,242 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.media3.common.C
 import kotlin.apply
 import android.view.inputmethod.InputMethodManager
+import android.bluetooth.*
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import android.media.midi.MidiDevice
+import android.media.midi.MidiDeviceInfo
+import android.media.midi.MidiManager
+import android.media.midi.MidiReceiver
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
+import android.media.midi.MidiOutputPort
 
+class MidiHelper(private val activity: MainActivity) {
+    private val midiManager = activity.getSystemService(Context.MIDI_SERVICE) as MidiManager
+    private val bluetoothAdapter: BluetoothAdapter? = (activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+    private var openDevice: MidiDevice? = null
+
+    // CRITICAL FIX: Keep strong references so the garbage collector doesn't kill the connection
+    private val openedPorts = mutableListOf<MidiOutputPort>()
+    private val activeReceivers = mutableListOf<MidiReceiver>()
+
+    // Mapping: CC Number (Int) -> PropertyControl ID (String)
+    private val ccMap = java.util.concurrent.ConcurrentHashMap<Int, String>()
+    // Reverse Map: PropertyControl ID -> CC Number
+    private val reverseMap = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    var isScanning = false
+    private var scanCallback: ScanCallback? = null
+    var onDeviceFound: ((BluetoothDevice) -> Unit)? = null
+
+    var learningTargetId: String? = null
+    var onLearningComplete: (() -> Unit)? = null
+
+    // Running Status Tracking
+    private var lastStatusByte: Int = 0
+
+    fun getMappedCC(controlId: String): Int? {
+        return reverseMap[controlId]
+    }
+
+    fun unmap(controlId: String) {
+        val cc = reverseMap[controlId] ?: return
+        reverseMap.remove(controlId)
+        ccMap.remove(cc)
+    }
+
+    fun startLeScan() {
+        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
+            Toast.makeText(activity, "Bluetooth not enabled", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Permission check for Android 12+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(activity, "Permission missing for BT Scan", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        stopLeScan()
+
+        scanCallback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult?) {
+                val device = result?.device ?: return
+
+                // FIX: Filter out unnamed devices to avoid cluttering the list with "Unknown"
+                try {
+                    if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                        if (device.name != null) {
+                            onDeviceFound?.invoke(device)
+                        }
+                    } else {
+                        // Fallback if permission check fails weirdly, strictly filter nulls
+                        if (device.name != null) onDeviceFound?.invoke(device)
+                    }
+                } catch (e: SecurityException) {
+                    // Ignore devices we can't read
+                }
+            }
+        }
+
+        try {
+            isScanning = true
+            bluetoothAdapter.bluetoothLeScanner?.startScan(scanCallback)
+            Handler(Looper.getMainLooper()).postDelayed({ stopLeScan() }, 10000)
+        } catch (e: SecurityException) {
+            Toast.makeText(activity, "Scanning Failed (Permission)", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun stopLeScan() {
+        if (isScanning && scanCallback != null && bluetoothAdapter != null) {
+            try {
+                if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) {
+                    bluetoothAdapter.bluetoothLeScanner?.stopScan(scanCallback)
+                }
+            } catch (e: SecurityException) { }
+            isScanning = false
+        }
+    }
+
+    fun connectToDevice(device: BluetoothDevice) {
+        stopLeScan()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+
+        try {
+            Log.d("MIDI_DEBUG", "Connecting to ${device.address}")
+
+            // FIX: Use null handler to use a background thread for MIDI input
+            midiManager.openBluetoothDevice(device, { midiDevice ->
+                if (midiDevice != null) {
+                    openDevice = midiDevice
+                    Log.d("MIDI_DEBUG", "Device Opened: ${midiDevice.info}")
+
+                    // Cleanup old connections
+                    openedPorts.forEach { try { it.close() } catch(e:Exception){} }
+                    openedPorts.clear()
+                    activeReceivers.clear()
+
+                    val info = midiDevice.info
+                    for (i in 0 until info.outputPortCount) {
+                        val outputPort = midiDevice.openOutputPort(i)
+                        if (outputPort == null) continue
+
+                        openedPorts.add(outputPort) // Prevent GC
+                        Log.d("MIDI_DEBUG", "Opened Port $i")
+
+                        val receiver = object : MidiReceiver() {
+                            override fun onSend(msg: ByteArray?, offset: Int, count: Int, timestamp: Long) {
+                                if (msg == null) return
+                                handleMidiMessage(msg, offset, count)
+                            }
+                        }
+
+                        activeReceivers.add(receiver) // Prevent GC
+                        outputPort.connect(receiver)
+                    }
+
+                    activity.runOnUiThread {
+                        Toast.makeText(activity, "Connected!", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Log.e("MIDI_DEBUG", "Failed to open device (Result Null)")
+                }
+            }, null) // <-- Null handler = Background Thread (Critical for performance)
+        } catch (e: Exception) {
+            Log.e("MIDI_DEBUG", "Connection Error", e)
+        }
+    }
+
+    private fun handleMidiMessage(data: ByteArray, offset: Int, count: Int) {
+        var i = offset
+        val end = offset + count
+
+        while (i < end) {
+            val byte = data[i].toInt() and 0xFF
+
+            if (byte >= 0x80) {
+                lastStatusByte = byte
+                i++
+            } else if (lastStatusByte == 0) {
+                i++
+                continue
+            }
+
+            // CC: 0xB0 - 0xBF
+            if (lastStatusByte in 0xB0..0xBF) {
+                if (i + 1 < end) {
+                    val cc = data[i].toInt() and 0x7F
+                    val value = data[i + 1].toInt() and 0x7F
+                    processCC(cc, value)
+                    i += 2
+                } else break
+            }
+            // Note On: 0x90 - 0x9F (Used as buttons by some devices)
+            else if (lastStatusByte in 0x90..0x9F) {
+                if (i + 1 < end) {
+                    val note = data[i].toInt() and 0x7F
+                    val velocity = data[i + 1].toInt() and 0x7F
+                    if (velocity > 0) processCC(note, 127)
+                    i += 2
+                } else break
+            }
+            // Note Off: 0x80 - 0x8F
+            else if (lastStatusByte in 0x80..0x8F) {
+                if (i + 1 < end) {
+                    val note = data[i].toInt() and 0x7F
+                    processCC(note, 0)
+                    i += 2
+                } else break
+            }
+            else {
+                // Skip unknown data byte
+                i++
+            }
+        }
+    }
+
+    private fun processCC(cc: Int, val7Bit: Int) {
+        activity.runOnUiThread {
+            // 1. Learning Mode
+            if (learningTargetId != null) {
+                val target = learningTargetId!!
+                // Unmap old
+                if (ccMap.containsKey(cc)) reverseMap.remove(ccMap[cc])
+                if (reverseMap.containsKey(target)) ccMap.remove(reverseMap[target])
+
+                // Map new
+                ccMap[cc] = target
+                reverseMap[target] = cc
+                learningTargetId = null
+                onLearningComplete?.invoke()
+                Toast.makeText(activity, "Mapped CC $cc", Toast.LENGTH_SHORT).show()
+                return@runOnUiThread
+            }
+
+            // 2. Control Mode
+            val targetId = ccMap[cc] ?: return@runOnUiThread
+            val control = activity.controlsMap[targetId] ?: return@runOnUiThread
+
+            val ratio = val7Bit / 127.0f
+            control.setProgress((ratio * control.sliderMax).toInt())
+        }
+    }
+
+    fun close() {
+        try {
+            openedPorts.forEach { it.close() }
+            openDevice?.close()
+        } catch (e: Exception) {}
+    }
+}
 
 class SettingsMenu(private val activity: MainActivity, private val parentView: ViewGroup) {
     private var overlay: FrameLayout? = null
@@ -180,6 +415,22 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 
         contentLayout.addView(createStyledDivider())
 
+        // --- MIDI SECTION ---
+        contentLayout.addView(TextView(activity).apply {
+            text = "MIDI CONTROLLER"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 10, 0, 20)
+        })
+
+        contentLayout.addView(createStyledButton("connect bluetooth midi") {
+            showMidiScanner()
+        })
+
+        contentLayout.addView(createStyledDivider())
+
         // --- AUTO-PLAY SECTION ---
         contentLayout.addView(TextView(activity).apply {
             text = "AUTO-PLAY"
@@ -240,43 +491,28 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             val cb = CheckBox(activity).apply {
                 isChecked = activity.autoPlayFilter.contains(i)
                 buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-                // Scale down slightly to fit 9 in a row comfortably
-                scaleX = 0.8f
-                scaleY = 0.8f
-                // Remove default padding to tighten layout
-                setPadding(0,0,0,0)
+                scaleX = 0.8f; scaleY = 0.8f; setPadding(0,0,0,0)
                 layoutParams = LinearLayout.LayoutParams(-2, -2) // Wrap content
                 setOnCheckedChangeListener { _, isChecked ->
                     if (isChecked) activity.autoPlayFilter.add(i) else activity.autoPlayFilter.remove(i)
                     activity.updatePlayButtonState()
                 }
             }
-            val lbl = TextView(activity).apply {
-                text = "$i"
-                textSize = 10f
-                setTextColor(Color.LTGRAY)
-                gravity = Gravity.CENTER
-            }
-            cbContainer.addView(lbl)
-            cbContainer.addView(cb)
+            val lbl = TextView(activity).apply { text = "$i"; textSize = 10f; setTextColor(Color.LTGRAY); gravity = Gravity.CENTER }
+            cbContainer.addView(lbl); cbContainer.addView(cb)
             filterContainer.addView(cbContainer)
         }
         contentLayout.addView(filterContainer)
 
-        // Auto-Play Duration -> Changed layoutStyle to ROW
+        // Auto-Play Duration
         autoPlayDurationControl = PropertyControl(
             "AUTO_DUR", "DURATION",
             min = 0, max = 300000, sliderMax = 60000,
             defaultValue = activity.autoPlayDurationMs.toInt(),
-            layoutStyle = PropertyControl.LayoutStyle.ROW, // <--- CHANGED TO ROW (Inline)
-            includeInPreset = false,
-            hasModulation = false,
-            logPower = 2,
-            showValue = true,
+            layoutStyle = PropertyControl.LayoutStyle.ROW,
+            includeInPreset = false, hasModulation = false, logPower = 2, showValue = true,
             valueFormatter = { "%.1fs".format(it / 1000f) }
-        ) {
-            activity.autoPlayDurationMs = it.toLong()
-        }
+        ) { activity.autoPlayDurationMs = it.toLong() }
 
         autoPlayDurationControl?.popupElevation = 600f
         autoPlayDurationControl?.attachTo(activity, contentLayout)
@@ -297,6 +533,89 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         overlay!!.addView(scrollContainer)
         parentView.addView(overlay, ViewGroup.LayoutParams(-1, -1))
         overlay!!.bringToFront()
+    }
+
+    private fun showMidiScanner() {
+        // Create a new overlay for scanning
+        val scanOverlay = FrameLayout(activity).apply {
+            setBackgroundColor(Color.argb(230, 0, 0, 0))
+            elevation = 600f
+            isClickable = true
+            isFocusable = true
+        }
+
+        // 1. Close scanner when clicking the black background
+        scanOverlay.setOnClickListener {
+            activity.midiHelper.stopLeScan()
+            // FIX: Remove via class property
+            this@SettingsMenu.overlay?.removeView(scanOverlay)
+        }
+
+        val content = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(800, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            background = getPanelBackground()
+            setPadding(40,40,40,40)
+
+            // 2. Consume clicks inside the box so they don't trigger the background close
+            isClickable = true
+            setOnClickListener { }
+        }
+
+        content.addView(TextView(activity).apply { text = "SCANNING FOR MIDI..."; setTextColor(Color.WHITE); textSize=18f; gravity=Gravity.CENTER })
+
+        val listContainer = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(-1, 600)
+            setPadding(0, 20, 0, 20)
+        }
+        val scroller = ScrollView(activity).apply { addView(listContainer) }
+        content.addView(scroller)
+
+        val foundMacs = mutableSetOf<String>()
+
+        activity.midiHelper.onDeviceFound = { device ->
+            activity.runOnUiThread {
+                if (!foundMacs.contains(device.address)) {
+                    foundMacs.add(device.address)
+                    val btn = Button(activity).apply {
+                        // Handle null name gracefully
+                        val dName = if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) device.name else "Unknown"
+                        text = "${dName ?: "Unknown"}\n${device.address}"
+
+                        setTextColor(Color.LTGRAY)
+                        textSize = 12f
+                        background = GradientDrawable().apply {
+                            setColor(Color.parseColor("#333333"))
+                            setStroke(1, Color.DKGRAY)
+                            cornerRadius = 8f
+                        }
+                        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin=10 }
+                        setOnClickListener {
+                            activity.midiHelper.connectToDevice(device)
+                            this@SettingsMenu.overlay?.removeView(scanOverlay)
+                        }
+                    }
+                    listContainer.addView(btn)
+                }
+            }
+        }
+
+        content.addView(Button(activity).apply {
+            text = "CANCEL"
+            setTextColor(Color.WHITE)
+            background = null
+            setOnClickListener {
+                activity.midiHelper.stopLeScan()
+                this@SettingsMenu.overlay?.removeView(scanOverlay)
+            }
+        })
+
+        scanOverlay.addView(content)
+        overlay?.addView(scanOverlay, ViewGroup.LayoutParams(-1,-1))
+
+        activity.midiHelper.startLeScan()
     }
 
     fun dismiss() {
@@ -1000,11 +1319,83 @@ open class PropertyControl(
         // --- HOOK FOR EXTRA CONTROLS ---
         addExtraControls(floatingPanel!!, context)
 
-        floatingPanel?.addView(TextView(context).apply {
-            text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY); gravity = Gravity.CENTER
+        // --- TITLE & MIDI MAP ROW ---
+        val titleRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 }
+        }
+
+        titleRow.addView(TextView(context).apply {
+            text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY);
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
         })
 
+        // MIDI MAP BUTTON
+        val midiBtn = Button(context).apply {
+            textSize = 11f // Slightly larger
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+
+            // CRITICAL UI FIXES:
+            includeFontPadding = false
+            setPadding(0, 0, 0, 0) // Remove internal bulk
+            background = getMidiButtonBackground(activity, false)
+
+            // Wider and taller to ensure text fits
+            layoutParams = LinearLayout.LayoutParams(240, 90).apply {
+                rightMargin = 10
+            }
+            val myControlId = this@PropertyControl.id
+
+            // Initial State Check
+            val mappedCC = activity.midiHelper.getMappedCC(myControlId)
+            text = if (mappedCC != null) "CC: $mappedCC" else "MAP MIDI"
+            if (mappedCC != null) background = getMidiButtonBackground(activity, true)
+
+            setOnClickListener {
+                if (text.toString().startsWith("CC")) {
+                    // UNMAP FLOW
+                    androidx.appcompat.app.AlertDialog.Builder(context)
+                        .setTitle("Unmap MIDI?")
+                        .setMessage("Disconnect from CC ${activity.midiHelper.getMappedCC(this@PropertyControl.id)}?")
+                        .setPositiveButton("Unmap") { _, _ ->
+                            activity.midiHelper.unmap(this@PropertyControl.id)
+                            text = "MAP MIDI"
+                            background = getMidiButtonBackground(activity, false)
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                } else if (text == "WAITING...") {
+                    // CANCEL LEARN FLOW
+                    activity.midiHelper.learningTargetId = null
+                    text = "MAP MIDI"
+                    background = getMidiButtonBackground(activity, false)
+                } else {
+                    // START LEARN FLOW
+                    text = "WAITING..."
+                    setTextColor(Color.RED)
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#440000"))
+                        setStroke(2, Color.RED)
+                        cornerRadius = 10f
+                    }
+
+                    activity.midiHelper.learningTargetId = this@PropertyControl.id
+                    activity.midiHelper.onLearningComplete = {
+                        val newCC = activity.midiHelper.getMappedCC(this@PropertyControl.id)
+                        text = "CC: $newCC"
+                        setTextColor(Color.WHITE)
+                        background = getMidiButtonBackground(activity, true)
+                    }
+                }
+            }
+        }
+        titleRow.addView(midiBtn)
+        floatingPanel?.addView(titleRow)
+
+        // --- NUMERICAL INPUT ---
         val numRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1122,6 +1513,18 @@ open class PropertyControl(
         activeControl = this
     }
 
+    private fun getMidiButtonBackground(ctx: Context, isMapped: Boolean): GradientDrawable {
+        return GradientDrawable().apply {
+            cornerRadius = 10f
+            if (isMapped) {
+                setColor(Color.parseColor("#004400"))
+                setStroke(2, Color.GREEN)
+            } else {
+                setColor(Color.parseColor("#333333"))
+                setStroke(1, Color.GRAY)
+            }
+        }
+    }
     // Override this in subclasses to add custom buttons at the top of the menu
     open fun addExtraControls(panel: LinearLayout, context: Context) {}
 
@@ -1174,6 +1577,7 @@ class MainActivity : AppCompatActivity() {
     private var currentSelector = CameraSelector.DEFAULT_FRONT_CAMERA
     lateinit var overlayHUD: FrameLayout
     private lateinit var displayHelper: ExternalDisplayHelper
+    lateinit var midiHelper: MidiHelper
     private lateinit var axisSb: SeekBar
     private lateinit var transSeekBar: SeekBar
     var autoPlayFilter = mutableSetOf(1, 2, 3, 4, 5, 6, 7, 8, 9)
@@ -1493,6 +1897,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        midiHelper = MidiHelper(this)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         hideSystemUI()
 
@@ -1546,6 +1951,14 @@ class MainActivity : AppCompatActivity() {
             permissions.add(Manifest.permission.READ_MEDIA_VIDEO)
             permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
         }
+
+        // Bluetooth Permissions
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
         val missing = permissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), 10)
@@ -1578,7 +1991,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-
+        midiHelper.close()
         // Detach all UI from controls to prevent context leaks
         controls.forEach { it.detach() }
 
