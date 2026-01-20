@@ -1232,42 +1232,65 @@ open class PropertyControl(
         detach()
         currentContext = context
 
+        // 1. Main Container: Horizontal Row
         val container = LinearLayout(context).apply {
-            orientation = if (layoutStyle == LayoutStyle.STACKED) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 2, 0, 6)
+            setPadding(0, 4, 0, 4) // Slight vertical padding for spacing
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         rootLayout = container
 
+        // 2. Label Container: Fixed Width on the Left
         val labelContainer = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            background = GradientDrawable().apply { setColor(Color.parseColor("#222222")); setStroke(2, Color.DKGRAY); cornerRadius = 12f }
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#222222"))
+                setStroke(2, Color.DKGRAY)
+                cornerRadius = 12f
+            }
             isClickable = true
 
             // Single Click: Toggle Menu
             setOnClickListener { toggleMenu(context) }
 
-            // NEW: Long Press -> MIDI Learn (Default VAL mode)
+            // Long Press: MIDI Learn
             setOnLongClickListener {
                 (context as? MainActivity)?.showMidiLearnOverlay(this@PropertyControl.id, this@PropertyControl.label)
                 true
             }
 
-            val params = if (layoutStyle == LayoutStyle.STACKED) LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 60).apply { bottomMargin = 5 } else LinearLayout.LayoutParams(220, 70).apply { rightMargin = 5 }
-            layoutParams = params
+            // Fixed width (210) ensures sliders align; Height 70 matches button style
+            layoutParams = LinearLayout.LayoutParams(210, 70).apply {
+                rightMargin = 12
+            }
         }
 
         if (iconResId != null) {
-            labelContainer.addView(ImageView(context).apply { setImageResource(iconResId); setColorFilter(Color.WHITE); alpha = 0.8f; layoutParams = LinearLayout.LayoutParams(36, 36).apply { rightMargin = 8 } })
+            labelContainer.addView(ImageView(context).apply {
+                setImageResource(iconResId)
+                setColorFilter(Color.WHITE)
+                alpha = 0.8f
+                layoutParams = LinearLayout.LayoutParams(36, 36).apply { rightMargin = 8 }
+            })
         }
 
-        labelContainer.addView(TextView(context).apply { text = label; setTextColor(Color.WHITE); textSize = 10f; setTypeface(null, Typeface.BOLD); alpha = 0.9f; gravity = Gravity.CENTER })
+        labelContainer.addView(TextView(context).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            textSize = 10f
+            setTypeface(null, Typeface.BOLD)
+            alpha = 0.9f
+            gravity = Gravity.CENTER
+        })
         container.addView(labelContainer)
 
+        // 3. Slider Row: Fills remaining space
         val sliderRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = if (layoutStyle == LayoutStyle.STACKED) LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 55) else LinearLayout.LayoutParams(0, 55, 1f)
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, 60, 1f)
         }
         mainRowLayout = sliderRow
 
@@ -1277,10 +1300,8 @@ open class PropertyControl(
                 setTextColor(Color.LTGRAY)
                 textSize = 9f
                 minWidth = 90
-                // CHANGED: Removed Gravity.CENTER_VERTICAL to rely purely on padding
-                gravity = Gravity.END
-                // CHANGED: Increased top padding to 12 to force text down
-                setPadding(0, 12, 8, 0)
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL // Reverted to center for inline look
+                setPadding(0, 0, 8, 0)
                 includeFontPadding = false
             }
             sliderRow.addView(valueDisplay)
@@ -1293,7 +1314,10 @@ open class PropertyControl(
             progress = (t * 1000).toInt()
             thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
             setPadding(0,0,0,0); thumbOffset = 0; splitTrack = false
+
+            // Flex width to fill space between value and mod indicator
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+
             setOnTouchListener { v, event ->
                 v.parent.requestDisallowInterceptTouchEvent(true)
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) { stopAnimation(); if (activeControl != null && activeControl != this@PropertyControl) closeActiveMenu() }
@@ -1324,7 +1348,10 @@ open class PropertyControl(
                     }
                     canvas.drawCircle(cx, cy, dotRadius, paint)
                 }
-            }.apply { layoutParams = LinearLayout.LayoutParams(55, 55).apply { leftMargin = 15 }; setOnClickListener { toggleMenu(context) } }
+            }.apply {
+                layoutParams = LinearLayout.LayoutParams(55, 55).apply { leftMargin = 15 }
+                setOnClickListener { toggleMenu(context) }
+            }
             sliderRow.addView(modIndicator)
         }
         container.addView(sliderRow)
@@ -2558,7 +2585,7 @@ class MainActivity : AppCompatActivity() {
 
         createGroup("CAMERA TRANSFORM")
         addControl(PropertyControl("C_ANGLE", "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl("WARP", "WARP DISTORT", defaultValue = 0, outMin=0f, outMax=1f))
+        addControl(PropertyControl("WARP", "DISTORT", defaultValue = 0, outMin=0f, outMax=1f))
         addControl(PropertyControl("C_ZOOM", "ZOOM", defaultValue = 320, outMin=0.3f, outMax=2.5f, hasModulation = true))
         addControl(PropertyControl("C_TX", "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
         addControl(PropertyControl("C_TY", "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
