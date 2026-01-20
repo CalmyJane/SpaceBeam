@@ -97,8 +97,6 @@ class MidiHelper(private val activity: MainActivity) {
         private set
 
     // --- MAPPING CONFIGURATION ---
-    // Mapping Modes: VAL (Value), RATE (Mod Speed), DEPTH (Mod Depth), TRIG (Trigger/Button)
-    // Target Special Prefixes: SRC_DYN_x (Dynamic Source Index), PRESET_x (1-9), CMD_ (Global Commands)
     private val DEFAULT_MAPPING_JSON = """
     [
       {"cc":40, "t":"CAM_MAIN", "m":"VAL"},
@@ -131,16 +129,14 @@ class MidiHelper(private val activity: MainActivity) {
 
     data class MidiBinding(val target: String, val mode: String, val scale: Float = 1.0f)
 
-    // CC -> List of Bindings (Support 1 CC controlling multiple params)
     private val bindingMap = java.util.concurrent.ConcurrentHashMap<Int, java.util.concurrent.CopyOnWriteArrayList<MidiBinding>>()
-
-    // Reverse Map for UI display (TargetID -> CC). Only stores the FIRST found CC for a target's VALUE mode.
     private val reverseMap = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
     var isScanning = false
     private var scanCallback: ScanCallback? = null
     var onDeviceFound: ((BluetoothDevice) -> Unit)? = null
 
+    // Supports "TARGET_ID" or "TARGET_ID|MODE" (e.g. M_ZOOM|RATE)
     var learningTargetId: String? = null
     var onLearningComplete: (() -> Unit)? = null
 
@@ -176,7 +172,6 @@ class MidiHelper(private val activity: MainActivity) {
         }
     }
 
-    // NEW: Get all bindings for a specific target to display in the list
     fun getBindingsForTarget(targetId: String): List<Pair<Int, MidiBinding>> {
         val result = mutableListOf<Pair<Int, MidiBinding>>()
         bindingMap.forEach { (cc, list) ->
@@ -189,18 +184,13 @@ class MidiHelper(private val activity: MainActivity) {
         return result
     }
 
-    // NEW: Remove a specific binding
     fun removeBinding(cc: Int, targetId: String) {
-        // Remove from main map
         bindingMap[cc]?.removeIf { it.target == targetId }
         if (bindingMap[cc]?.isEmpty() == true) {
             bindingMap.remove(cc)
         }
-
-        // Update reverse map if this was the display CC
         if (reverseMap[targetId] == cc) {
             reverseMap.remove(targetId)
-            // Try to find another Value binding for this target to display
             val other = getBindingsForTarget(targetId).firstOrNull { it.second.mode == "VAL" }
             if (other != null) {
                 reverseMap[targetId] = other.first
@@ -215,7 +205,6 @@ class MidiHelper(private val activity: MainActivity) {
     fun unmap(controlId: String) {
         val cc = reverseMap[controlId] ?: return
         reverseMap.remove(controlId)
-        // Remove only the VAL binding for this control, leave others on this CC if any
         bindingMap[cc]?.removeIf { it.target == controlId && it.mode == "VAL" }
         if (bindingMap[cc]?.isEmpty() == true) {
             bindingMap.remove(cc)
@@ -227,15 +216,12 @@ class MidiHelper(private val activity: MainActivity) {
             Toast.makeText(activity, "Bluetooth not enabled", Toast.LENGTH_SHORT).show()
             return
         }
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(activity, "Permission missing for BT Scan", Toast.LENGTH_SHORT).show()
             return
         }
-
         stopLeScan()
-
         scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 val device = result?.device ?: return
@@ -248,14 +234,11 @@ class MidiHelper(private val activity: MainActivity) {
                 } catch (e: SecurityException) { }
             }
         }
-
         try {
             isScanning = true
             bluetoothAdapter.bluetoothLeScanner?.startScan(scanCallback)
             Handler(Looper.getMainLooper()).postDelayed({ stopLeScan() }, 10000)
-        } catch (e: SecurityException) {
-            Toast.makeText(activity, "Scanning Failed (Permission)", Toast.LENGTH_SHORT).show()
-        }
+        } catch (e: SecurityException) { }
     }
 
     fun stopLeScan() {
@@ -298,18 +281,15 @@ class MidiHelper(private val activity: MainActivity) {
                 activity.runOnUiThread { Toast.makeText(activity, "Disconnected", Toast.LENGTH_SHORT).show() }
             }
         }
-
         override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
             try { if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) gatt?.discoverServices() } catch (e: SecurityException) {}
         }
-
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 val service = gatt.getService(MIDI_SERVICE_UUID)
                 service?.getCharacteristic(MIDI_CHAR_UUID)?.let { enableMidiNotification(gatt, it) }
             }
         }
-
         private fun enableMidiNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic) {
             try {
                 if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return
@@ -327,10 +307,7 @@ class MidiHelper(private val activity: MainActivity) {
                 }
             } catch (e: SecurityException) { }
         }
-
-        // Android 13+
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) { handleRawPacket(value) }
-        // Android 12-
         @Deprecated("Deprecated in Java")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) { handleRawPacket(characteristic.value) }
     }
@@ -338,12 +315,9 @@ class MidiHelper(private val activity: MainActivity) {
     private fun handleRawPacket(value: ByteArray) {
         if (value.size > 2) {
             val status = value[2].toInt() and 0xFF
-            // CC (0xB0)
             if ((status and 0xF0) == 0xB0 && value.size > 4) {
                 processCC(value[3].toInt() and 0x7F, value[4].toInt() and 0x7F)
-            }
-            // Note On (0x90) -> Treat as CC 127
-            else if ((status and 0xF0) == 0x90 && value.size > 4) {
+            } else if ((status and 0xF0) == 0x90 && value.size > 4) {
                 val velocity = value[4].toInt() and 0x7F
                 processCC(value[3].toInt() and 0x7F, if (velocity > 0) 127 else 0)
             }
@@ -354,36 +328,43 @@ class MidiHelper(private val activity: MainActivity) {
         activity.runOnUiThread {
             // 1. Learning Mode
             if (learningTargetId != null) {
-                val target = learningTargetId!!
+                var target = learningTargetId!!
+                var forcedMode: String? = null
 
-                // Unmap old CC if it exists for this target
-                if (reverseMap.containsKey(target)) {
-                    val oldCC = reverseMap[target]!!
-                    bindingMap[oldCC]?.removeIf { it.target == target }
+                // Check for pipe syntax "TARGET|MODE"
+                if (target.contains("|")) {
+                    val parts = target.split("|")
+                    target = parts[0]
+                    forcedMode = parts[1]
                 }
 
-                // Clear existing bindings for the incoming CC
-                bindingMap.remove(cc)
+                // If specific mode is forced (RATE/DEPTH), use it. Otherwise guess based on prefix.
+                val mode = forcedMode ?: (if (target.startsWith("CMD_") || target.startsWith("PRESET_")) "TRIG" else "VAL")
 
-                // DETERMINE MODE: If it's a Command or Preset, it's a Trigger. Otherwise, Value.
-                val mode = if (target.startsWith("CMD_") || target.startsWith("PRESET_")) "TRIG" else "VAL"
+                // Remove existing bindings for this specific target & mode pair (to avoid duplicates)
+                if (reverseMap.containsKey(target) && mode == "VAL") {
+                    val oldCC = reverseMap[target]!!
+                    bindingMap[oldCC]?.removeIf { it.target == target && it.mode == "VAL" }
+                }
+
+                // Also clean up if this CC was already doing something else?
+                // For simplicity in learning, we usually wipe the CC for this specific binding type.
+                bindingMap[cc]?.removeIf { it.target == target && it.mode == mode }
 
                 addBinding(cc, target, mode, 1.0f, true)
 
                 learningTargetId = null
                 onLearningComplete?.invoke()
-                Toast.makeText(activity, "Mapped CC $cc to $target", Toast.LENGTH_SHORT).show()
+                Toast.makeText(activity, "Mapped CC $cc to $target ($mode)", Toast.LENGTH_SHORT).show()
                 return@runOnUiThread
             }
 
-            // 2. Execution Mode (Same as before)
+            // 2. Execution Mode
             val bindings = bindingMap[cc] ?: return@runOnUiThread
 
             bindings.forEach { binding ->
                 if (binding.target.startsWith("CMD_") || binding.target.startsWith("PRESET_")) {
-                    if (val7Bit > 64) {
-                        activity.handleMidiCommand(binding.target, val7Bit)
-                    }
+                    if (val7Bit > 64) activity.handleMidiCommand(binding.target, val7Bit)
                     return@forEach
                 }
 
@@ -1263,7 +1244,16 @@ open class PropertyControl(
             gravity = Gravity.CENTER
             background = GradientDrawable().apply { setColor(Color.parseColor("#222222")); setStroke(2, Color.DKGRAY); cornerRadius = 12f }
             isClickable = true
+
+            // Single Click: Toggle Menu
             setOnClickListener { toggleMenu(context) }
+
+            // NEW: Long Press -> MIDI Learn (Default VAL mode)
+            setOnLongClickListener {
+                (context as? MainActivity)?.showMidiLearnOverlay(this@PropertyControl.id, this@PropertyControl.label)
+                true
+            }
+
             val params = if (layoutStyle == LayoutStyle.STACKED) LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 60).apply { bottomMargin = 5 } else LinearLayout.LayoutParams(220, 70).apply { rightMargin = 5 }
             layoutParams = params
         }
@@ -1473,30 +1463,46 @@ open class PropertyControl(
             setPadding(0, 5, 0, 5)
         }
 
-        // Label: Fixed width (130 is enough for "SMOOTH" at 10sp), single line
-        row.addView(TextView(ctx).apply {
+        // Determine Mapping Mode for this specific slider
+        val mapMode = when(name) {
+            "SPEED" -> "RATE"
+            "DEPTH" -> "DEPTH"
+            else -> null
+        }
+
+        // Label with Long Press Support
+        val labelView = TextView(ctx).apply {
             text = name
             textSize = 10f
             setTextColor(Color.LTGRAY)
             maxLines = 1
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(130, ViewGroup.LayoutParams.MATCH_PARENT)
-        })
 
-        // Slider: Weight 1f to fill remaining space, 0 margins
+            if (mapMode != null) {
+                isClickable = true // Ensure it accepts clicks/long clicks
+                setOnLongClickListener {
+                    // Send combined ID: "TARGET|MODE"
+                    (ctx as? MainActivity)?.showMidiLearnOverlay(
+                        "${this@PropertyControl.id}|$mapMode",
+                        "${this@PropertyControl.label} $name"
+                    )
+                    true
+                }
+            }
+        }
+        row.addView(labelView)
+
+        // Slider
         val sb = SeekBar(ctx).apply {
             max = 1000
             progress = current
             thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
-
-            // Remove all internal padding so track goes edge-to-edge
             setPadding(0, 0, 0, 0)
             thumbOffset = 0
-
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
                 setMargins(0, 0, 0, 0)
             }
-
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) onChange(p) }
                 override fun onStartTrackingTouch(s: SeekBar?) {}
@@ -2145,7 +2151,7 @@ class MainActivity : AppCompatActivity() {
         // Removed addContentView here because it's handled in the check at the top
         updateSidebarVisuals()
     }
-    private fun showMidiLearnOverlay(targetId: String, label: String) {
+    fun showMidiLearnOverlay(targetId: String, label: String) {
         if (!midiHelper.isConnected) {
             Toast.makeText(this, "Connect Bluetooth MIDI first", Toast.LENGTH_SHORT).show()
             return
