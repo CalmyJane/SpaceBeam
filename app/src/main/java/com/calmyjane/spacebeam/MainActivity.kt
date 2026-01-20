@@ -1118,10 +1118,11 @@ open class PropertyControl(
 
         modIndicator?.postInvalidate()
 
+        // CHANGE: Use smoothedNormalized instead of targetNormalized for display to show real real value
         val displayVal = if (logPower > 1) {
-            (targetNormalized.toDouble().pow(1.0/logPower) * sliderMax).toInt()
+            (smoothedNormalized.toDouble().pow(1.0/logPower) * sliderMax).toInt()
         } else {
-            (targetNormalized * sliderMax).toInt()
+            (smoothedNormalized * sliderMax).toInt()
         }
         updateLiveValueUI(displayVal)
     }
@@ -1271,7 +1272,17 @@ open class PropertyControl(
         mainRowLayout = sliderRow
 
         if (showValue) {
-            valueDisplay = TextView(context).apply { text = formatValue(value); setTextColor(Color.LTGRAY); textSize = 9f; minWidth = 90; gravity = Gravity.END or Gravity.CENTER_VERTICAL; setPadding(0,0,8,0) }
+            valueDisplay = TextView(context).apply {
+                text = formatValue(value)
+                setTextColor(Color.LTGRAY)
+                textSize = 9f
+                minWidth = 90
+                // CHANGED: Removed Gravity.CENTER_VERTICAL to rely purely on padding
+                gravity = Gravity.END
+                // CHANGED: Increased top padding to 12 to force text down
+                setPadding(0, 12, 8, 0)
+                includeFontPadding = false
+            }
             sliderRow.addView(valueDisplay)
         }
 
@@ -1346,7 +1357,6 @@ open class PropertyControl(
 
         floatingPanel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            // CHANGED: Reduced padding from 30 to 10 to give more space for content
             setPadding(10, 30, 10, 30)
             background = GradientDrawable().apply { setColor(Color.argb(245, 15, 15, 15)); cornerRadius = 20f; setStroke(2, Color.GRAY) }
             elevation = popupElevation; isClickable = true
@@ -1358,42 +1368,25 @@ open class PropertyControl(
 
         val titleRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 } }
         titleRow.addView(TextView(context).apply { text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
-
-        val midiBtn = Button(context).apply {
-            textSize = 11f; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
-            includeFontPadding = false; setPadding(0, 0, 0, 0)
-            layoutParams = LinearLayout.LayoutParams(240, 90).apply { rightMargin = 10 }
-
-            val mappedCC = activity.midiHelper.getMappedCC(this@PropertyControl.id)
-            text = if (mappedCC != null) "CC: $mappedCC" else "MAP MIDI"
-            background = getMidiButtonBackground(isMapped = (mappedCC != null))
-
-            setOnClickListener {
-                if (text.toString().startsWith("CC")) {
-                    activity.midiHelper.unmap(this@PropertyControl.id)
-                    text = "MAP MIDI"; background = getMidiButtonBackground(false)
-                } else if (text == "WAITING...") {
-                    activity.midiHelper.learningTargetId = null
-                    text = "MAP MIDI"; background = getMidiButtonBackground(false)
-                } else {
-                    text = "WAITING..."; setTextColor(Color.RED)
-                    background = GradientDrawable().apply { setColor(Color.parseColor("#440000")); setStroke(2, Color.RED); cornerRadius = 10f }
-                    activity.midiHelper.learningTargetId = this@PropertyControl.id
-                    activity.midiHelper.onLearningComplete = {
-                        val newCC = activity.midiHelper.getMappedCC(this@PropertyControl.id)
-                        text = "CC: $newCC"; setTextColor(Color.WHITE)
-                        background = getMidiButtonBackground(true)
-                    }
-                }
-            }
-        }
-        titleRow.addView(midiBtn)
         floatingPanel?.addView(titleRow)
 
         val numRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, 140).apply { bottomMargin = 10 } }
         val btnDec = createNumButton(context, "-") { setProgress(value - 1) }
+
         baseValueInput = EditText(context).apply {
-            setText(value.toString()); textSize = 28f; setTextColor(Color.WHITE); setTypeface(null, Typeface.BOLD); gravity = Gravity.CENTER; background = null
+            setText(value.toString())
+            textSize = 28f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            background = null
+
+            // --- FIX FOR CLIPPED TEXT ---
+            includeFontPadding = false
+            // Add top padding to push the ascenders down into view
+            setPadding(0, 10, 0, 0)
+            // ----------------------------
+
             inputType = android.text.InputType.TYPE_CLASS_NUMBER; filters = arrayOf(android.text.InputFilter.LengthFilter(6))
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE; layoutParams = LinearLayout.LayoutParams(0, -1, 1.5f)
             setOnEditorActionListener { v, actionId, _ ->
@@ -1411,7 +1404,13 @@ open class PropertyControl(
 
         if (hasModulation) {
             val liveRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 } }
-            liveValueDisplay = TextView(context).apply { text = formatValue(value); textSize = 14f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY) }
+            liveValueDisplay = TextView(context).apply {
+                text = formatValue(value)
+                textSize = 14f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.LTGRAY)
+                setPadding(0, 10, 0, 5)
+            }
             liveRow.addView(liveValueDisplay)
             floatingPanel?.addView(liveRow)
 
