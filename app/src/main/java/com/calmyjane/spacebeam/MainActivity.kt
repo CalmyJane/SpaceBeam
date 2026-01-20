@@ -176,6 +176,38 @@ class MidiHelper(private val activity: MainActivity) {
         }
     }
 
+    // NEW: Get all bindings for a specific target to display in the list
+    fun getBindingsForTarget(targetId: String): List<Pair<Int, MidiBinding>> {
+        val result = mutableListOf<Pair<Int, MidiBinding>>()
+        bindingMap.forEach { (cc, list) ->
+            list.forEach { binding ->
+                if (binding.target == targetId) {
+                    result.add(Pair(cc, binding))
+                }
+            }
+        }
+        return result
+    }
+
+    // NEW: Remove a specific binding
+    fun removeBinding(cc: Int, targetId: String) {
+        // Remove from main map
+        bindingMap[cc]?.removeIf { it.target == targetId }
+        if (bindingMap[cc]?.isEmpty() == true) {
+            bindingMap.remove(cc)
+        }
+
+        // Update reverse map if this was the display CC
+        if (reverseMap[targetId] == cc) {
+            reverseMap.remove(targetId)
+            // Try to find another Value binding for this target to display
+            val other = getBindingsForTarget(targetId).firstOrNull { it.second.mode == "VAL" }
+            if (other != null) {
+                reverseMap[targetId] = other.first
+            }
+        }
+    }
+
     fun getMappedCC(controlId: String): Int? {
         return reverseMap[controlId]
     }
@@ -2121,7 +2153,7 @@ class MainActivity : AppCompatActivity() {
 
         // Reuse the logic from SettingsMenu confirmation style
         val frame = FrameLayout(this).apply {
-            setBackgroundColor(Color.argb(200, 0, 0, 0))
+            setBackgroundColor(Color.argb(220, 0, 0, 0)) // Slightly darker for contrast
             isClickable = true
             elevation = 1000f
             setOnClickListener {
@@ -2133,8 +2165,8 @@ class MainActivity : AppCompatActivity() {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            // CHANGED: Use WRAP_CONTENT for height to prevent cropping
-            layoutParams = FrameLayout.LayoutParams(800, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            // Use WRAP_CONTENT
+            layoutParams = FrameLayout.LayoutParams(900, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#222222"))
                 setStroke(2, Color.RED)
@@ -2147,6 +2179,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { }
         }
 
+        // --- Header ---
         content.addView(TextView(this).apply {
             text = "MAPPING: $label"
             textSize = 20f
@@ -2156,24 +2189,117 @@ class MainActivity : AppCompatActivity() {
         })
 
         content.addView(TextView(this).apply {
-            text = "Press a button on your MIDI controller..."
-            textSize = 16f
+            text = "Press a button/knob on your MIDI controller..."
+            textSize = 14f
             setTextColor(Color.LTGRAY)
             gravity = Gravity.CENTER
-            setPadding(0, 40, 0, 40)
+            setPadding(0, 20, 0, 30)
         })
 
+        // --- Active Mappings List ---
+        content.addView(TextView(this).apply {
+            text = "CURRENT MAPPINGS:"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.GRAY)
+            gravity = Gravity.START
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 }
+        })
+
+        val listContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            minimumHeight = 50
+        }
+
+        fun refreshMappings() {
+            listContainer.removeAllViews()
+            val bindings = midiHelper.getBindingsForTarget(targetId)
+
+            if (bindings.isEmpty()) {
+                listContainer.addView(TextView(this).apply {
+                    text = "No active mappings."
+                    textSize = 14f
+                    setTextColor(Color.DKGRAY)
+                    gravity = Gravity.CENTER
+                    setPadding(0, 20, 0, 20)
+                })
+            } else {
+                bindings.forEach { (cc, binding) ->
+                    val row = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 }
+                        background = GradientDrawable().apply {
+                            setColor(Color.parseColor("#333333"))
+                            cornerRadius = 10f
+                        }
+                        setPadding(20, 15, 10, 15)
+                    }
+
+                    // Info Text
+                    val infoText = TextView(this).apply {
+                        text = "CC $cc  (${binding.mode})"
+                        textSize = 16f
+                        setTextColor(Color.WHITE)
+                        layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+                    }
+
+                    // Delete Button (X)
+                    val delBtn = Button(this).apply {
+                        text = "✕"
+                        textSize = 14f
+                        setTextColor(Color.WHITE)
+                        gravity = Gravity.CENTER
+
+                        // FIX: Remove all padding to prevent clipping and force centering
+                        includeFontPadding = false
+                        setPadding(0, 0, 0, 0)
+
+                        background = GradientDrawable().apply {
+                            setColor(Color.parseColor("#880000")) // Red
+                            cornerRadius = 40f // Perfect circle (half of width 80)
+                        }
+                        layoutParams = LinearLayout.LayoutParams(80, 80).apply { leftMargin = 15 }
+                        setOnClickListener {
+                            midiHelper.removeBinding(cc, targetId)
+                            refreshMappings() // Refresh the list immediately
+                        }
+                    }
+
+                    row.addView(infoText)
+                    row.addView(delBtn)
+                    listContainer.addView(row)
+                }
+            }
+        }
+
+        // Initial Load
+        refreshMappings()
+
+        val scrollView = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(-1, 300) // Limited height for scrolling
+            addView(listContainer)
+            // Add a subtle border or background to the scroll area
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#1A1A1A"))
+                cornerRadius = 15f
+            }
+            setPadding(10,10,10,10)
+        }
+        content.addView(scrollView)
+
+        // --- Cancel Button ---
         val cancelBtn = Button(this).apply {
             text = "CANCEL"
             setTextColor(Color.WHITE)
             textSize = 14f
             setTypeface(null, Typeface.BOLD)
             gravity = Gravity.CENTER
-            background = null // Remove default background to avoid shadow clipping
+            background = null
             includeFontPadding = false
-            // Ensure specific height large enough for text
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120).apply {
-                topMargin = 10
+                topMargin = 20
             }
             setOnClickListener {
                 midiHelper.learningTargetId = null
@@ -2188,10 +2314,11 @@ class MainActivity : AppCompatActivity() {
         // Start Learning
         midiHelper.learningTargetId = targetId
         midiHelper.onLearningComplete = {
+            // Close the frame when learning is complete so they see it worked,
+            // or you can call refreshMappings() here if you prefer it to stay open.
             (frame.parent as? ViewGroup)?.removeView(frame)
         }
     }
-
 
     // Add this inside MainActivity class
     private fun loadScaledBitmap(uri: android.net.Uri): Bitmap? {
