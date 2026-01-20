@@ -86,17 +86,55 @@ import kotlin.math.abs
 import org.json.JSONArray
 
 class MidiHelper(private val activity: MainActivity) {
-    // Standard BLE MIDI UUIDs from your Tester App
+    // Standard BLE MIDI UUIDs
     private val MIDI_SERVICE_UUID = java.util.UUID.fromString("03B80E5A-EDE8-4B33-A751-6CE34EC4C700")
     private val MIDI_CHAR_UUID    = java.util.UUID.fromString("7772E5DB-3868-4112-A1A9-F2669D106BF3")
     private val CCCD_UUID         = java.util.UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     private val bluetoothAdapter: BluetoothAdapter? = (activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
     private var activeGatt: BluetoothGatt? = null
+    var isConnected = false
+        private set
 
-    // Mapping: CC Number (Int) -> PropertyControl ID (String)
-    private val ccMap = java.util.concurrent.ConcurrentHashMap<Int, String>()
-    // Reverse Map: PropertyControl ID -> CC Number
+    // --- MAPPING CONFIGURATION ---
+    // Mapping Modes: VAL (Value), RATE (Mod Speed), DEPTH (Mod Depth), TRIG (Trigger/Button)
+    // Target Special Prefixes: SRC_DYN_x (Dynamic Source Index), PRESET_x (1-9), CMD_ (Global Commands)
+    private val DEFAULT_MAPPING_JSON = """
+    [
+      {"cc":40, "t":"CAM_MAIN", "m":"VAL"},
+      {"cc":41, "t":"SRC_DYN_0", "m":"VAL"},
+      {"cc":42, "t":"SRC_DYN_1", "m":"VAL"},
+      {"cc":43, "t":"SRC_DYN_2", "m":"VAL"},
+      {"cc":44, "t":"M_TILTX", "m":"DEPTH"},
+      {"cc":44, "t":"M_TILTY", "m":"DEPTH"},
+      {"cc":45, "t":"S_SPEED", "m":"VAL"},
+      {"cc":46, "t":"M_ZOOM", "m":"VAL"},
+      {"cc":47, "t":"TRANS_TIME", "m":"VAL"},
+      {"cc":34, "t":"M_TILTX", "m":"RATE"},
+      {"cc":34, "t":"M_TILTY", "m":"RATE", "s":0.8849},
+      {"cc":35, "t":"3D_MIX", "m":"VAL"},
+      {"cc":36, "t":"M_ANGLE", "m":"RATE"},
+      {"cc":37, "t":"AUTO_DUR", "m":"VAL"},
+      {"cc":62, "t":"PRESET_1", "m":"TRIG"},
+      {"cc":61, "t":"PRESET_2", "m":"TRIG"},
+      {"cc":60, "t":"PRESET_3", "m":"TRIG"},
+      {"cc":59, "t":"PRESET_4", "m":"TRIG"},
+      {"cc":58, "t":"PRESET_5", "m":"TRIG"},
+      {"cc":57, "t":"PRESET_6", "m":"TRIG"},
+      {"cc":56, "t":"PRESET_7", "m":"TRIG"},
+      {"cc":55, "t":"PRESET_8", "m":"TRIG"},
+      {"cc":54, "t":"CMD_RECORD", "m":"TRIG"},
+      {"cc":53, "t":"CMD_PHOTO", "m":"TRIG"},
+      {"cc":52, "t":"CMD_AUTOPLAY", "m":"TRIG"}
+    ]
+    """.trimIndent()
+
+    data class MidiBinding(val target: String, val mode: String, val scale: Float = 1.0f)
+
+    // CC -> List of Bindings (Support 1 CC controlling multiple params)
+    private val bindingMap = java.util.concurrent.ConcurrentHashMap<Int, java.util.concurrent.CopyOnWriteArrayList<MidiBinding>>()
+
+    // Reverse Map for UI display (TargetID -> CC). Only stores the FIRST found CC for a target's VALUE mode.
     private val reverseMap = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
     var isScanning = false
@@ -106,6 +144,38 @@ class MidiHelper(private val activity: MainActivity) {
     var learningTargetId: String? = null
     var onLearningComplete: (() -> Unit)? = null
 
+    init {
+        loadMappings()
+    }
+
+    private fun loadMappings() {
+        try {
+            val arr = JSONArray(DEFAULT_MAPPING_JSON)
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val cc = obj.getInt("cc")
+                val t = obj.getString("t")
+                val m = obj.getString("m")
+                val s = obj.optDouble("s", 1.0).toFloat()
+
+                addBinding(cc, t, m, s, updateReverse = true)
+            }
+        } catch (e: Exception) {
+            Log.e("MIDI", "Error parsing mapping JSON", e)
+        }
+    }
+
+    private fun addBinding(cc: Int, target: String, mode: String, scale: Float, updateReverse: Boolean) {
+        if (!bindingMap.containsKey(cc)) {
+            bindingMap[cc] = java.util.concurrent.CopyOnWriteArrayList()
+        }
+        bindingMap[cc]?.add(MidiBinding(target, mode, scale))
+
+        if (updateReverse && mode == "VAL") {
+            reverseMap[target] = cc
+        }
+    }
+
     fun getMappedCC(controlId: String): Int? {
         return reverseMap[controlId]
     }
@@ -113,7 +183,11 @@ class MidiHelper(private val activity: MainActivity) {
     fun unmap(controlId: String) {
         val cc = reverseMap[controlId] ?: return
         reverseMap.remove(controlId)
-        ccMap.remove(cc)
+        // Remove only the VAL binding for this control, leave others on this CC if any
+        bindingMap[cc]?.removeIf { it.target == controlId && it.mode == "VAL" }
+        if (bindingMap[cc]?.isEmpty() == true) {
+            bindingMap.remove(cc)
+        }
     }
 
     fun startLeScan() {
@@ -134,9 +208,7 @@ class MidiHelper(private val activity: MainActivity) {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 val device = result?.device ?: return
                 try {
-                    // Pass found device to UI
                     if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
-                        // Optional: Filter by Service UUID here if desired, but name check is usually enough for list
                         if (device.name != null) onDeviceFound?.invoke(device)
                     } else {
                         if (device.name != null) onDeviceFound?.invoke(device)
@@ -147,7 +219,6 @@ class MidiHelper(private val activity: MainActivity) {
 
         try {
             isScanning = true
-            // Scan for everything, filtering is done in UI or you can add ScanFilter here
             bluetoothAdapter.bluetoothLeScanner?.startScan(scanCallback)
             Handler(Looper.getMainLooper()).postDelayed({ stopLeScan() }, 10000)
         } catch (e: SecurityException) {
@@ -168,83 +239,49 @@ class MidiHelper(private val activity: MainActivity) {
 
     fun connectToDevice(device: BluetoothDevice) {
         stopLeScan()
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
             return
         }
-
-        // Close existing
         close()
-
         try {
-            Log.d("MIDI_DEBUG", "Connecting GATT to ${device.address}")
-            // Connect using manual GATT instead of MidiManager
             activeGatt = device.connectGatt(activity, false, gattCallback)
-
-            activity.runOnUiThread {
-                Toast.makeText(activity, "Connecting...", Toast.LENGTH_SHORT).show()
-            }
-        } catch (e: SecurityException) {
-            Log.e("MIDI_DEBUG", "Connection Failed", e)
-        }
+            activity.runOnUiThread { Toast.makeText(activity, "Connecting...", Toast.LENGTH_SHORT).show() }
+        } catch (e: SecurityException) { }
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                Log.d("MIDI_DEBUG", "GATT Connected. Requesting MTU...")
+                isConnected = true
                 try {
-                    // STEP 1: Request larger MTU (Essential for M-Vave)
                     if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
-                        val success = gatt.requestMtu(512)
-                        if (!success) gatt.discoverServices()
+                        if (!gatt.requestMtu(512)) gatt.discoverServices()
                     }
-                } catch (e: SecurityException) {
-                    gatt.discoverServices()
-                }
-
-                activity.runOnUiThread {
-                    Toast.makeText(activity, "Connected! Initializing...", Toast.LENGTH_SHORT).show()
-                }
+                } catch (e: SecurityException) { gatt.discoverServices() }
+                activity.runOnUiThread { Toast.makeText(activity, "Connected!", Toast.LENGTH_SHORT).show() }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                Log.d("MIDI_DEBUG", "GATT Disconnected")
+                isConnected = false
                 activeGatt = null
-                activity.runOnUiThread {
-                    Toast.makeText(activity, "Disconnected", Toast.LENGTH_SHORT).show()
-                }
+                activity.runOnUiThread { Toast.makeText(activity, "Disconnected", Toast.LENGTH_SHORT).show() }
             }
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
-            Log.d("MIDI_DEBUG", "MTU Changed: $mtu")
-            try {
-                if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
-                    gatt?.discoverServices()
-                }
-            } catch (e: SecurityException) {}
+            try { if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) gatt?.discoverServices() } catch (e: SecurityException) {}
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 val service = gatt.getService(MIDI_SERVICE_UUID)
-                if (service != null) {
-                    val midiChar = service.getCharacteristic(MIDI_CHAR_UUID)
-                    if (midiChar != null) {
-                        enableMidiNotification(gatt, midiChar)
-                    }
-                }
+                service?.getCharacteristic(MIDI_CHAR_UUID)?.let { enableMidiNotification(gatt, it) }
             }
         }
 
         private fun enableMidiNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic) {
             try {
                 if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return
-
-                // 1. Local Enable
                 gatt.setCharacteristicNotification(char, true)
-
-                // 2. Remote Enable (CCCD)
                 val descriptor = char.getDescriptor(CCCD_UUID)
                 if (descriptor != null) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -256,66 +293,27 @@ class MidiHelper(private val activity: MainActivity) {
                         gatt.writeDescriptor(descriptor)
                     }
                 }
-            } catch (e: SecurityException) {
-                Log.e("MIDI_DEBUG", "Perm fail on subscribe")
-            }
-        }
-
-        override fun onDescriptorWrite(gatt: BluetoothGatt?, descriptor: BluetoothGattDescriptor?, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                activity.runOnUiThread {
-                    Toast.makeText(activity, "MIDI Ready!", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-
-        // Android 12 and below
-        @Deprecated("Deprecated in Java")
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            handleRawPacket(characteristic.value)
+            } catch (e: SecurityException) { }
         }
 
         // Android 13+
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-            handleRawPacket(value)
-        }
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) { handleRawPacket(value) }
+        // Android 12-
+        @Deprecated("Deprecated in Java")
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) { handleRawPacket(characteristic.value) }
     }
 
     private fun handleRawPacket(value: ByteArray) {
-        // BLE MIDI Packet Structure from your Tester:
-        // Byte 0: Header
-        // Byte 1: Timestamp
-        // Byte 2: Status (We want this)
-        // Byte 3: Data 1 (Note/CC num)
-        // Byte 4: Data 2 (Velocity/Value)
-
         if (value.size > 2) {
-            // Apply mask to ensure we treat bytes as unsigned integers
             val status = value[2].toInt() and 0xFF
-
-            // 1. Control Change (0xB0 - 0xBF)
-            if ((status and 0xF0) == 0xB0) {
-                if (value.size > 4) {
-                    val ccNum = value[3].toInt() and 0x7F
-                    val ccVal = value[4].toInt() and 0x7F
-                    processCC(ccNum, ccVal)
-                }
+            // CC (0xB0)
+            if ((status and 0xF0) == 0xB0 && value.size > 4) {
+                processCC(value[3].toInt() and 0x7F, value[4].toInt() and 0x7F)
             }
-            // 2. Note On (0x90 - 0x9F) - Treat as button press
-            else if ((status and 0xF0) == 0x90) {
-                if (value.size > 4) {
-                    val noteNum = value[3].toInt() and 0x7F
-                    val velocity = value[4].toInt() and 0x7F
-                    // If velocity > 0, treat as max value, else 0
-                    processCC(noteNum, if (velocity > 0) 127 else 0)
-                }
-            }
-            // 3. Note Off (0x80 - 0x8F)
-            else if ((status and 0xF0) == 0x80) {
-                if (value.size > 3) {
-                    val noteNum = value[3].toInt() and 0x7F
-                    processCC(noteNum, 0)
-                }
+            // Note On (0x90) -> Treat as CC 127
+            else if ((status and 0xF0) == 0x90 && value.size > 4) {
+                val velocity = value[4].toInt() and 0x7F
+                processCC(value[3].toInt() and 0x7F, if (velocity > 0) 127 else 0)
             }
         }
     }
@@ -325,33 +323,64 @@ class MidiHelper(private val activity: MainActivity) {
             // 1. Learning Mode
             if (learningTargetId != null) {
                 val target = learningTargetId!!
-                // Unmap old
-                if (ccMap.containsKey(cc)) reverseMap.remove(ccMap[cc])
-                if (reverseMap.containsKey(target)) ccMap.remove(reverseMap[target])
 
-                // Map new
-                ccMap[cc] = target
-                reverseMap[target] = cc
+                // Unmap old CC if it exists for this target
+                if (reverseMap.containsKey(target)) {
+                    val oldCC = reverseMap[target]!!
+                    bindingMap[oldCC]?.removeIf { it.target == target }
+                }
+
+                // Clear existing bindings for the incoming CC
+                bindingMap.remove(cc)
+
+                // DETERMINE MODE: If it's a Command or Preset, it's a Trigger. Otherwise, Value.
+                val mode = if (target.startsWith("CMD_") || target.startsWith("PRESET_")) "TRIG" else "VAL"
+
+                addBinding(cc, target, mode, 1.0f, true)
+
                 learningTargetId = null
                 onLearningComplete?.invoke()
-                Toast.makeText(activity, "Mapped CC $cc", Toast.LENGTH_SHORT).show()
+                Toast.makeText(activity, "Mapped CC $cc to $target", Toast.LENGTH_SHORT).show()
                 return@runOnUiThread
             }
 
-            // 2. Control Mode
-            val targetId = ccMap[cc] ?: return@runOnUiThread
-            val control = activity.controlsMap[targetId] ?: return@runOnUiThread
+            // 2. Execution Mode (Same as before)
+            val bindings = bindingMap[cc] ?: return@runOnUiThread
 
-            val ratio = val7Bit / 127.0f
-            control.setProgress((ratio * control.sliderMax).toInt())
+            bindings.forEach { binding ->
+                if (binding.target.startsWith("CMD_") || binding.target.startsWith("PRESET_")) {
+                    if (val7Bit > 64) {
+                        activity.handleMidiCommand(binding.target, val7Bit)
+                    }
+                    return@forEach
+                }
+
+                var control: PropertyControl? = null
+                if (binding.target.startsWith("SRC_DYN_")) {
+                    val index = binding.target.removePrefix("SRC_DYN_").toIntOrNull() ?: -1
+                    if (index >= 0 && index < activity.getSourceControlsList().size) {
+                        control = activity.getSourceControlsList()[index]
+                    }
+                } else {
+                    control = activity.controlsMap[binding.target]
+                }
+
+                if (control != null) {
+                    val scaledVal = (val7Bit * binding.scale).coerceIn(0f, 127f)
+                    when (binding.mode) {
+                        "VAL" -> control.setProgress((scaledVal / 127.0f * control.sliderMax).toInt())
+                        "RATE" -> control.updateModRate((scaledVal / 127.0f * 1000).toInt())
+                        "DEPTH" -> control.updateModDepth((scaledVal / 127.0f * 1000).toInt())
+                    }
+                }
+            }
         }
     }
 
     fun close() {
         try {
             if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
-                activeGatt?.disconnect()
-                activeGatt?.close()
+                activeGatt?.disconnect(); activeGatt?.close()
             }
             activeGatt = null
         } catch (e: SecurityException) {}
@@ -1540,7 +1569,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-
+    fun getSourceControlsList(): List<PropertyControl> {
+        return sourceControls
+    }
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -1643,6 +1674,47 @@ class MainActivity : AppCompatActivity() {
         ctrl.removeFromParent()
 
         Toast.makeText(this, "Source Removed", Toast.LENGTH_SHORT).show()
+    }
+
+    // Central handler for Global/Trigger MIDI events
+    fun handleMidiCommand(commandId: String, value: Int) {
+        runOnUiThread {
+            // Handle Presets (PRESET_1 to PRESET_9)
+            if (commandId.startsWith("PRESET_")) {
+                val idx = commandId.removePrefix("PRESET_").toIntOrNull()
+                if (idx != null) {
+                    if (isAutoPlaying) {
+                        isAutoPlaying = false
+                        if (::playBtn.isInitialized) playBtn.setImageDrawable(createPlayIcon(false))
+                    }
+                    applyPreset(idx)
+                }
+                return@runOnUiThread
+            }
+
+            // Handle specific Commands
+            when (commandId) {
+                "CMD_RECORD" -> toggleRecording()
+                "CMD_PHOTO" -> {
+                    renderer.capturePhoto()
+                    triggerFlashPulse()
+                }
+                "CMD_AUTOPLAY" -> toggleAutoPlay()
+                "CMD_CAM_SWITCH" -> switchCamera()
+                "CMD_FLIP_X" -> {
+                    renderer.flipX = if (renderer.flipX == 1f) -1f else 1f
+                    updateSidebarVisuals()
+                }
+                "CMD_FLIP_Y" -> {
+                    renderer.flipY = if (renderer.flipY == 1f) -1f else 1f
+                    updateSidebarVisuals()
+                }
+                "CMD_ROT_180" -> {
+                    renderer.rot180 = !renderer.rot180
+                    updateSidebarVisuals()
+                }
+            }
+        }
     }
 
     private fun createSwitchCameraDrawable(): BitmapDrawable {
@@ -2041,6 +2113,85 @@ class MainActivity : AppCompatActivity() {
         // Removed addContentView here because it's handled in the check at the top
         updateSidebarVisuals()
     }
+    private fun showMidiLearnOverlay(targetId: String, label: String) {
+        if (!midiHelper.isConnected) {
+            Toast.makeText(this, "Connect Bluetooth MIDI first", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Reuse the logic from SettingsMenu confirmation style
+        val frame = FrameLayout(this).apply {
+            setBackgroundColor(Color.argb(200, 0, 0, 0))
+            isClickable = true
+            elevation = 1000f
+            setOnClickListener {
+                midiHelper.learningTargetId = null
+                (parent as ViewGroup).removeView(this)
+            }
+        }
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            // CHANGED: Use WRAP_CONTENT for height to prevent cropping
+            layoutParams = FrameLayout.LayoutParams(800, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#222222"))
+                setStroke(2, Color.RED)
+                cornerRadius = 30f
+            }
+            setPadding(40, 40, 40, 40)
+
+            // Consume clicks to prevent closing when clicking the box itself
+            isClickable = true
+            setOnClickListener { }
+        }
+
+        content.addView(TextView(this).apply {
+            text = "MAPPING: $label"
+            textSize = 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+        })
+
+        content.addView(TextView(this).apply {
+            text = "Press a button on your MIDI controller..."
+            textSize = 16f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 40, 0, 40)
+        })
+
+        val cancelBtn = Button(this).apply {
+            text = "CANCEL"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            background = null // Remove default background to avoid shadow clipping
+            includeFontPadding = false
+            // Ensure specific height large enough for text
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120).apply {
+                topMargin = 10
+            }
+            setOnClickListener {
+                midiHelper.learningTargetId = null
+                (frame.parent as ViewGroup).removeView(frame)
+            }
+        }
+        content.addView(cancelBtn)
+
+        frame.addView(content)
+        overlayHUD.addView(frame)
+
+        // Start Learning
+        midiHelper.learningTargetId = targetId
+        midiHelper.onLearningComplete = {
+            (frame.parent as? ViewGroup)?.removeView(frame)
+        }
+    }
+
 
     // Add this inside MainActivity class
     private fun loadScaledBitmap(uri: android.net.Uri): Bitmap? {
@@ -2345,12 +2496,26 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupCameraOrientationControls(parent: LinearLayout) {
         val orientationRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, 10, 0, 20); layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120) }
-        fun createParamBtn(icon: BitmapDrawable, action: () -> Unit): ImageButton {
-            return ImageButton(this).apply { setImageDrawable(icon); background = GradientDrawable().apply { setColor(Color.parseColor("#22FFFFFF")); cornerRadius = 12f }; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { setMargins(6, 0, 6, 0) }; setOnClickListener { action(); updateSidebarVisuals() } }
+
+        fun createParamBtn(icon: BitmapDrawable, targetId: String, action: () -> Unit): ImageButton {
+            return ImageButton(this).apply {
+                setImageDrawable(icon)
+                background = GradientDrawable().apply { setColor(Color.parseColor("#22FFFFFF")); cornerRadius = 12f }
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { setMargins(6, 0, 6, 0) }
+                setOnClickListener { action(); updateSidebarVisuals() }
+                setOnLongClickListener {
+                    if (midiHelper.isConnected) {
+                        showMidiLearnOverlay(targetId, targetId.replace("CMD_", ""))
+                        true
+                    } else false
+                }
+            }
         }
-        flipXBtn = createParamBtn(createCustomIcon(0)) { renderer.flipX = if (renderer.flipX == 1f) -1f else 1f }
-        flipYBtn = createParamBtn(createCustomIcon(1)) { renderer.flipY = if (renderer.flipY == 1f) -1f else 1f }
-        rot180Btn = createParamBtn(createCustomIcon(2)) { renderer.rot180 = !renderer.rot180 }
+
+        flipXBtn = createParamBtn(createCustomIcon(0), "CMD_FLIP_X") { renderer.flipX = if (renderer.flipX == 1f) -1f else 1f }
+        flipYBtn = createParamBtn(createCustomIcon(1), "CMD_FLIP_Y") { renderer.flipY = if (renderer.flipY == 1f) -1f else 1f }
+        rot180Btn = createParamBtn(createCustomIcon(2), "CMD_ROT_180") { renderer.rot180 = !renderer.rot180 }
+
         orientationRow.addView(flipXBtn); orientationRow.addView(flipYBtn); orientationRow.addView(rot180Btn)
         parent.addView(orientationRow)
     }
@@ -2362,19 +2527,23 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 0)
         }
 
-        fun createSideBtn(drawable: android.graphics.drawable.Drawable, action: () -> Unit) = ImageButton(this).apply {
-            setImageDrawable(drawable)
+        val switchBtn = ImageButton(this).apply {
+            setImageDrawable(createSwitchCameraDrawable())
             setColorFilter(Color.WHITE)
             setBackgroundColor(Color.TRANSPARENT)
             alpha = 0.9f
             scaleType = ImageView.ScaleType.FIT_CENTER
-            // CHANGED: 150x150 to match Record Buttons exactly
             layoutParams = LinearLayout.LayoutParams(150, 150)
-            setOnClickListener { action(); updateSidebarVisuals() }
+            setOnClickListener { switchCamera(); updateSidebarVisuals() }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_CAM_SWITCH", "SWITCH CAMERA")
+                    true
+                } else false
+            }
         }
 
-        cameraSettingsPanel.addView(createSideBtn(createSwitchCameraDrawable()) { switchCamera() })
-
+        cameraSettingsPanel.addView(switchBtn)
         return cameraSettingsPanel
     }
 
@@ -2396,6 +2565,12 @@ class MainActivity : AppCompatActivity() {
             scaleY = 1.2f;
             layoutParams = LinearLayout.LayoutParams(150, 150);
             setOnClickListener { renderer.capturePhoto(); triggerFlashPulse() }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_PHOTO", "TAKE PHOTO")
+                    true
+                } else false
+            }
         }
         recordBtn = ImageButton(this).apply {
             setImageDrawable(ContextCompat.getDrawable(context, android.R.drawable.presence_video_online))
@@ -2405,6 +2580,12 @@ class MainActivity : AppCompatActivity() {
             scaleType = ImageView.ScaleType.FIT_CENTER
             layoutParams = LinearLayout.LayoutParams(150, 150)
             setOnClickListener { toggleRecording() }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_RECORD", "TOGGLE RECORDING")
+                    true
+                } else false
+            }
         }
         recordControls.addView(photoBtn); recordControls.addView(recordBtn)
         return recordControls
@@ -2427,7 +2608,6 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
-        // Transition Time Control
         val transId = "TRANS_TIME"
         var transCtrl = controlsMap[transId]
         if (transCtrl == null) {
@@ -2442,20 +2622,16 @@ class MainActivity : AppCompatActivity() {
                 logPower = 3,
                 showValue = true,
                 valueFormatter = { "%.1fs".format(it / 1000f) }
-            ) {
-                transitionMs = it.toLong()
-            }
+            ) { transitionMs = it.toLong() }
             controls.add(transCtrl)
             controlsMap[transId] = transCtrl
         }
 
-        val sliderWrapper = LinearLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-        }
+        val sliderWrapper = LinearLayout(this).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) }
         transCtrl.attachTo(this, sliderWrapper)
         transContainer.addView(sliderWrapper)
 
-        // --- Play Button ---
+        // Play Button with Long Press Mapping
         playBtn = ImageButton(this).apply {
             setImageDrawable(createPlayIcon(isAutoPlaying))
             background = null
@@ -2463,6 +2639,12 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(110, 110).apply { leftMargin = 0 }
             setPadding(10, 10, 10, 10)
             setOnClickListener { toggleAutoPlay() }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_AUTOPLAY", "AUTO-PLAY")
+                    true
+                } else false
+            }
         }
         updatePlayButtonState()
         transContainer.addView(playBtn)
@@ -2487,30 +2669,68 @@ class MainActivity : AppCompatActivity() {
         presetAnimators.values.forEach { it.cancel() }
         presetAnimators.clear()
 
-        (9 downTo 1).forEach { idx ->
-            val pd = ProgressButtonDrawable(idx.toString())
+        // Container for the Long-Press Option Buttons (Save/Map)
+        val optionsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            background = GradientDrawable().apply { setColor(Color.argb(240, 0,0,0)); cornerRadius = 15f }
+            // Increased height from 110 to 120 to fit text comfortably
+            layoutParams = FrameLayout.LayoutParams(-2, 120, Gravity.CENTER)
+            elevation = 100f
+            isClickable = true
+        }
 
-            if (idx == activePreset) {
-                pd.isActive = true
-                val timePassed = System.currentTimeMillis() - transitionStartTime
-                if (timePassed < transitionMs && transitionMs > 0) {
-                    val startProgress = (timePassed.toFloat() / transitionMs).coerceIn(0f, 1f)
-                    pd.setProgress(startProgress)
-                    val anim = ValueAnimator.ofFloat(startProgress, 1f).apply {
-                        duration = (transitionMs - timePassed).coerceAtLeast(0)
-                        interpolator = android.view.animation.LinearInterpolator()
-                        addUpdateListener { va ->
-                            pd.setProgress(va.animatedValue as Float)
-                            pd.invalidateSelf()
-                        }
-                        start()
-                    }
-                    presetAnimators[idx] = anim
-                } else {
-                    pd.setProgress(1f)
+        // We need references to add buttons dynamically
+        fun showOptionsForPreset(idx: Int) {
+            optionsContainer.removeAllViews()
+            pendingSaveIndex = idx
+
+            // SAVE BUTTON
+            optionsContainer.addView(Button(this).apply {
+                text = "SAVE $idx"
+                setTextColor(Color.BLACK)
+                textSize = 14f // Increased text size slightly
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                includeFontPadding = false // Important for centering
+                setPadding(0, 0, 0, 0) // Remove padding to prevent clipping
+                background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = 12f }
+                layoutParams = LinearLayout.LayoutParams(180, 100).apply { setMargins(15,10,10,10) }
+                setOnClickListener {
+                    savePreset(idx)
+                    optionsContainer.visibility = View.GONE
                 }
+            })
+
+            // MAP BUTTON (Only if connected)
+            if (midiHelper.isConnected) {
+                optionsContainer.addView(Button(this).apply {
+                    text = "MAP"
+                    setTextColor(Color.WHITE)
+                    textSize = 14f
+                    setTypeface(null, Typeface.BOLD)
+                    gravity = Gravity.CENTER
+                    includeFontPadding = false
+                    setPadding(0, 0, 0, 0)
+                    background = GradientDrawable().apply { setColor(Color.parseColor("#004400")); setStroke(2, Color.GREEN); cornerRadius = 12f }
+                    layoutParams = LinearLayout.LayoutParams(160, 100).apply { setMargins(5,10,15,10) }
+                    setOnClickListener {
+                        optionsContainer.visibility = View.GONE
+                        showMidiLearnOverlay("PRESET_$idx", "PRESET $idx")
+                    }
+                })
             }
 
+            optionsContainer.visibility = View.VISIBLE
+        }
+
+        (9 downTo 1).forEach { idx ->
+            val pd = ProgressButtonDrawable(idx.toString())
+            if (idx == activePreset) {
+                pd.isActive = true
+                pd.setProgress(1f)
+            }
             presetDrawables[idx] = pd
 
             val b = TextView(this).apply {
@@ -2520,11 +2740,13 @@ class MainActivity : AppCompatActivity() {
                 isClickable = true
                 isFocusable = true
                 layoutParams = LinearLayout.LayoutParams(83, 110).apply { setMargins(2, 0, 2, 0) }
-                setOnClickListener { stopAutoPlay(); applyPreset(idx) }
+                setOnClickListener {
+                    optionsContainer.visibility = View.GONE
+                    stopAutoPlay()
+                    applyPreset(idx)
+                }
                 setOnLongClickListener {
-                    pendingSaveIndex = idx
-                    saveConfirmBtn.visibility = View.VISIBLE
-                    saveConfirmBtn.text = "SAVE $idx?"
+                    showOptionsForPreset(idx)
                     true
                 }
             }
@@ -2533,20 +2755,11 @@ class MainActivity : AppCompatActivity() {
 
         scroller.addView(btnRow)
         presetRow.addView(scroller)
+        presetRow.addView(optionsContainer)
 
-        saveConfirmBtn = Button(this).apply {
-            visibility = View.GONE
-            setTextColor(Color.BLACK)
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = 12f }
-            layoutParams = FrameLayout.LayoutParams(280, 90, Gravity.CENTER)
-            setOnClickListener { pendingSaveIndex?.let { savePreset(it) }; visibility = View.GONE }
-        }
-        presetRow.addView(saveConfirmBtn)
+        saveConfirmBtn = Button(this) // Dummy ref
 
         presetPanel.addView(presetRow)
-
         return presetPanel
     }
 
