@@ -98,34 +98,40 @@ class MidiHelper(private val activity: MainActivity) {
 
     // --- MAPPING CONFIGURATION ---
     private val DEFAULT_MAPPING_JSON = """
-    [
-      {"cc":40, "t":"CAM_MAIN", "m":"VAL"},
-      {"cc":41, "t":"SRC_DYN_0", "m":"VAL"},
-      {"cc":42, "t":"SRC_DYN_1", "m":"VAL"},
-      {"cc":43, "t":"SRC_DYN_2", "m":"VAL"},
-      {"cc":44, "t":"M_TILTX", "m":"DEPTH"},
-      {"cc":44, "t":"M_TILTY", "m":"DEPTH"},
-      {"cc":45, "t":"S_SPEED", "m":"VAL"},
-      {"cc":46, "t":"M_ZOOM", "m":"VAL"},
-      {"cc":47, "t":"TRANS_TIME", "m":"VAL"},
-      {"cc":34, "t":"M_TILTX", "m":"RATE"},
-      {"cc":34, "t":"M_TILTY", "m":"RATE", "s":0.8849},
-      {"cc":35, "t":"3D_MIX", "m":"VAL"},
-      {"cc":36, "t":"M_ANGLE", "m":"RATE"},
-      {"cc":37, "t":"AUTO_DUR", "m":"VAL"},
-      {"cc":62, "t":"PRESET_1", "m":"TRIG"},
-      {"cc":61, "t":"PRESET_2", "m":"TRIG"},
-      {"cc":60, "t":"PRESET_3", "m":"TRIG"},
-      {"cc":59, "t":"PRESET_4", "m":"TRIG"},
-      {"cc":58, "t":"PRESET_5", "m":"TRIG"},
-      {"cc":57, "t":"PRESET_6", "m":"TRIG"},
-      {"cc":56, "t":"PRESET_7", "m":"TRIG"},
-      {"cc":55, "t":"PRESET_8", "m":"TRIG"},
-      {"cc":54, "t":"CMD_RECORD", "m":"TRIG"},
-      {"cc":53, "t":"CMD_PHOTO", "m":"TRIG"},
-      {"cc":52, "t":"CMD_AUTOPLAY", "m":"TRIG"}
-    ]
+    {
+      "name": "Factory Default",
+      "map": [
+          {"cc":40, "t":"CAM_MAIN", "m":"VAL"},
+          {"cc":41, "t":"SRC_DYN_0", "m":"VAL"},
+          {"cc":42, "t":"SRC_DYN_1", "m":"VAL"},
+          {"cc":43, "t":"SRC_DYN_2", "m":"VAL"},
+          {"cc":44, "t":"M_TILTX", "m":"DEPTH"},
+          {"cc":44, "t":"M_TILTY", "m":"DEPTH"},
+          {"cc":45, "t":"S_SPEED", "m":"VAL"},
+          {"cc":46, "t":"M_ZOOM", "m":"VAL"},
+          {"cc":47, "t":"TRANS_TIME", "m":"VAL"},
+          {"cc":34, "t":"M_TILTX", "m":"RATE"},
+          {"cc":34, "t":"M_TILTY", "m":"RATE", "s":0.8849},
+          {"cc":35, "t":"3D_MIX", "m":"VAL"},
+          {"cc":36, "t":"M_ANGLE", "m":"RATE"},
+          {"cc":37, "t":"AUTO_DUR", "m":"VAL"},
+          {"cc":62, "t":"PRESET_1", "m":"TRIG"},
+          {"cc":61, "t":"PRESET_2", "m":"TRIG"},
+          {"cc":60, "t":"PRESET_3", "m":"TRIG"},
+          {"cc":59, "t":"PRESET_4", "m":"TRIG"},
+          {"cc":58, "t":"PRESET_5", "m":"TRIG"},
+          {"cc":57, "t":"PRESET_6", "m":"TRIG"},
+          {"cc":56, "t":"PRESET_7", "m":"TRIG"},
+          {"cc":55, "t":"PRESET_8", "m":"TRIG"},
+          {"cc":54, "t":"CMD_RECORD", "m":"TRIG"},
+          {"cc":53, "t":"CMD_PHOTO", "m":"TRIG"},
+          {"cc":52, "t":"CMD_AUTOPLAY", "m":"TRIG"}
+      ]
+    }
     """.trimIndent()
+
+    var mappingName: String = "Default"
+        private set
 
     data class MidiBinding(val target: String, val mode: String, val scale: Float = 1.0f)
 
@@ -141,7 +147,61 @@ class MidiHelper(private val activity: MainActivity) {
     var onLearningComplete: (() -> Unit)? = null
 
     init {
-        loadMappings()
+        importConfig(DEFAULT_MAPPING_JSON)
+    }
+
+    fun exportConfig(): String {
+        val root = JSONObject()
+        root.put("name", mappingName)
+
+        val mapArray = JSONArray()
+        bindingMap.forEach { (cc, bindings) ->
+            bindings.forEach { b ->
+                val obj = JSONObject()
+                obj.put("cc", cc)
+                obj.put("t", b.target)
+                obj.put("m", b.mode)
+                if (b.scale != 1.0f) obj.put("s", b.scale.toDouble())
+                mapArray.put(obj)
+            }
+        }
+        root.put("map", mapArray)
+        return root.toString() // You might want .toString(2) for pretty print if using a newer JSON lib, but standard org.json is compact
+    }
+
+    // NEW: Imports JSON string, clears old map, fills new map
+    fun importConfig(jsonString: String): Boolean {
+        return try {
+            // Clear current
+            bindingMap.clear()
+            reverseMap.clear()
+
+            // Detect if it's the old array format or new object format
+            val isArray = jsonString.trim().startsWith("[")
+
+            val mapArray: JSONArray
+            if (isArray) {
+                mapArray = JSONArray(jsonString)
+                mappingName = "Imported Legacy"
+            } else {
+                val root = JSONObject(jsonString)
+                mappingName = root.optString("name", "Imported")
+                mapArray = root.getJSONArray("map")
+            }
+
+            for (i in 0 until mapArray.length()) {
+                val obj = mapArray.getJSONObject(i)
+                val cc = obj.getInt("cc")
+                val t = obj.getString("t")
+                val m = obj.getString("m")
+                val s = obj.optDouble("s", 1.0).toFloat()
+                addBinding(cc, t, m, s, updateReverse = true)
+            }
+            true
+        } catch (e: Exception) {
+            Log.e("MIDI", "Import failed", e)
+            false
+        }
     }
 
     private fun loadMappings() {
@@ -503,7 +563,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 
         contentLayout.addView(createStyledDivider())
 
-        // --- MIDI SECTION ---
+        // --- MIDI CONTROLLER CONNECTION ---
         contentLayout.addView(TextView(activity).apply {
             text = "MIDI CONTROLLER"
             textSize = 14f
@@ -516,6 +576,62 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         contentLayout.addView(createStyledButton("connect bluetooth midi") {
             showMidiScanner()
         })
+
+        // --- MIDI MAPPING SECTION (Visible only if connected) ---
+        if (activity.midiHelper.isConnected) {
+            contentLayout.addView(createStyledDivider())
+
+            contentLayout.addView(TextView(activity).apply {
+                text = "MIDI MAPPING"
+                textSize = 14f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.LTGRAY)
+                gravity = Gravity.CENTER
+                setPadding(0, 10, 0, 5)
+            })
+
+            contentLayout.addView(TextView(activity).apply {
+                text = "CURRENT: \"${activity.midiHelper.mappingName}\""
+                textSize = 12f
+                setTextColor(Color.GREEN)
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, 20)
+            })
+
+            val mapRow = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120).apply {
+                    bottomMargin = 10
+                }
+            }
+
+            val btnLoad = Button(activity).apply {
+                text = "LOAD"
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                background = getButtonBg()
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                    rightMargin = 15
+                }
+                setOnClickListener { showLoadOptions() }
+            }
+
+            val btnSave = Button(activity).apply {
+                text = "SAVE"
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                background = getButtonBg()
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                    leftMargin = 15
+                }
+                setOnClickListener { showSaveOptions() }
+            }
+
+            mapRow.addView(btnLoad)
+            mapRow.addView(btnSave)
+            contentLayout.addView(mapRow)
+        }
 
         contentLayout.addView(createStyledDivider())
 
@@ -562,7 +678,6 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         val filterContainer = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            // Match parent width, no scroll
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = 15
             }
@@ -572,7 +687,6 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             val cbContainer = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
-                // Weight 1 distributes them evenly across the width
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
 
@@ -580,7 +694,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
                 isChecked = activity.autoPlayFilter.contains(i)
                 buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
                 scaleX = 0.8f; scaleY = 0.8f; setPadding(0,0,0,0)
-                layoutParams = LinearLayout.LayoutParams(-2, -2) // Wrap content
+                layoutParams = LinearLayout.LayoutParams(-2, -2)
                 setOnCheckedChangeListener { _, isChecked ->
                     if (isChecked) activity.autoPlayFilter.add(i) else activity.autoPlayFilter.remove(i)
                     activity.updatePlayButtonState()
@@ -623,8 +737,182 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         overlay!!.bringToFront()
     }
 
+    private fun getButtonBg(): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(Color.parseColor("#333333"))
+            cornerRadius = 15f
+            setStroke(1, Color.GRAY)
+        }
+    }
+
+    private fun showSaveOptions() {
+        showCustomDialog("SAVE MAPPING", "Select destination:") { container ->
+            container.addView(createStyledButton("save to file") {
+                val json = activity.midiHelper.exportConfig()
+                val safeName = activity.midiHelper.mappingName.replace("[^a-zA-Z0-9]".toRegex(), "_")
+                activity.saveMidiMappingToFile("MidiMap_$safeName.json", json)
+                dismissConfirmation()
+            })
+
+            container.addView(createStyledButton("copy to clipboard") {
+                val json = activity.midiHelper.exportConfig()
+                val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("SpaceBeam Map", json)
+                clipboard.setPrimaryClip(clip)
+                Toast.makeText(activity, "Copied to Clipboard", Toast.LENGTH_SHORT).show()
+                dismissConfirmation()
+            })
+        }
+    }
+
+    private fun showLoadOptions() {
+        showCustomDialog("LOAD MAPPING", "Select source:") { container ->
+            container.addView(createStyledButton("load from file") {
+                activity.loadMappingLauncher.launch(arrayOf("application/json"))
+                dismissConfirmation()
+                dismiss() // Close settings to refresh name
+            })
+
+            container.addView(createStyledButton("ENTER TEXT") {
+                dismissConfirmation()
+                // Use the new fullscreen dialog method
+                showPasteDialog()
+            })
+        }
+    }
+
+    // --- UPDATED: Fullscreen System Dialog implementation ---
+    private fun showPasteDialog() {
+        val dialog = android.app.Dialog(activity, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+
+        // Root container (Black background)
+        val root = FrameLayout(activity).apply {
+            setBackgroundColor(Color.parseColor("#121212"))
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            isClickable = true
+            isFocusable = true
+        }
+
+        // Close Button (Top Right)
+        val closeBtn = Button(activity).apply {
+            text = "✕"
+            textSize = 24f
+            setTextColor(Color.GRAY)
+            background = null
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(150, 150).apply {
+                gravity = Gravity.TOP or Gravity.END
+                topMargin = 30
+                rightMargin = 30
+            }
+            setOnClickListener {
+                dialog.dismiss()
+                activity.hideSystemUI()
+            }
+        }
+
+        // Content Container (Centered)
+        val panel = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.CENTER
+                leftMargin = 50
+                rightMargin = 50
+            }
+        }
+
+        // Title
+        panel.addView(TextView(activity).apply {
+            text = "ENTER TEXT"
+            textSize = 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 30)
+        })
+
+        // Input Field (Big, Multi-line)
+        val inputObj = EditText(activity).apply {
+            hint = "Paste JSON code here..."
+            setHintTextColor(Color.DKGRAY)
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#222222"))
+                setStroke(2, Color.DKGRAY)
+                cornerRadius = 15f
+            }
+            // Multi-line configuration
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            gravity = Gravity.TOP or Gravity.START
+            setPadding(30, 30, 30, 30)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 600) // Taller height
+            setHorizontallyScrolling(false)
+            minLines = 10
+        }
+        panel.addView(inputObj)
+
+        // Buttons Row
+        val btnRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2).apply { topMargin = 40 }
+        }
+
+        val pasteBtn = Button(activity).apply {
+            text = "PASTE"
+            setTextColor(Color.BLACK)
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply { setColor(Color.LTGRAY); cornerRadius = 15f }
+            layoutParams = LinearLayout.LayoutParams(0, 120, 1f).apply { rightMargin = 20 }
+            setOnClickListener {
+                val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                if (clipboard.hasPrimaryClip()) {
+                    val text = clipboard.primaryClip?.getItemAt(0)?.text
+                    if (text != null) inputObj.setText(text)
+                }
+            }
+        }
+
+        val loadBtn = Button(activity).apply {
+            text = "LOAD"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply { setColor(Color.parseColor("#0066CC")); cornerRadius = 15f }
+            layoutParams = LinearLayout.LayoutParams(0, 120, 1f).apply { leftMargin = 20 }
+            setOnClickListener {
+                val txt = inputObj.text.toString()
+                if (txt.isNotEmpty()) {
+                    val success = activity.midiHelper.importConfig(txt)
+                    if (success) {
+                        Toast.makeText(activity, "Loaded: ${activity.midiHelper.mappingName}", Toast.LENGTH_SHORT).show()
+                        dialog.dismiss()
+                        dismiss() // Close the underlying settings menu
+                        activity.hideSystemUI()
+                    } else {
+                        Toast.makeText(activity, "Invalid Mapping Data", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+
+        btnRow.addView(pasteBtn)
+        btnRow.addView(loadBtn)
+        panel.addView(btnRow)
+
+        root.addView(panel)
+        root.addView(closeBtn)
+
+        dialog.setContentView(root)
+        dialog.setOnDismissListener { activity.hideSystemUI() }
+        // Force soft keyboard mode for visibility
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
+        dialog.show()
+    }
+
     private fun showMidiScanner() {
-        // Create a new overlay for scanning
         val scanOverlay = FrameLayout(activity).apply {
             setBackgroundColor(Color.argb(230, 0, 0, 0))
             elevation = 600f
@@ -632,10 +920,8 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             isFocusable = true
         }
 
-        // 1. Close scanner when clicking the black background
         scanOverlay.setOnClickListener {
             activity.midiHelper.stopLeScan()
-            // FIX: Remove via class property
             this@SettingsMenu.overlay?.removeView(scanOverlay)
         }
 
@@ -645,8 +931,6 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             layoutParams = FrameLayout.LayoutParams(800, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
             background = getPanelBackground()
             setPadding(40,40,40,40)
-
-            // 2. Consume clicks inside the box so they don't trigger the background close
             isClickable = true
             setOnClickListener { }
         }
@@ -668,7 +952,6 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
                 if (!foundMacs.contains(device.address)) {
                     foundMacs.add(device.address)
                     val btn = Button(activity).apply {
-                        // Handle null name gracefully
                         val dName = if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) device.name else "Unknown"
                         text = "${dName ?: "Unknown"}\n${device.address}"
 
@@ -683,6 +966,9 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
                         setOnClickListener {
                             activity.midiHelper.connectToDevice(device)
                             this@SettingsMenu.overlay?.removeView(scanOverlay)
+                            // Refresh menu to show mapping section
+                            dismiss()
+                            show()
                         }
                     }
                     listContainer.addView(btn)
@@ -704,6 +990,57 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         overlay?.addView(scanOverlay, ViewGroup.LayoutParams(-1,-1))
 
         activity.midiHelper.startLeScan()
+    }
+
+    private fun showCustomDialog(title: String, subtitle: String, contentFiller: (LinearLayout) -> Unit) {
+        if (confirmationOverlay != null) return
+
+        confirmationOverlay = FrameLayout(activity).apply {
+            setBackgroundColor(Color.argb(200, 0, 0, 0))
+            isClickable = true
+            elevation = 550f
+            setOnClickListener { dismissConfirmation() }
+            alpha = 0f
+            animate().alpha(1f).setDuration(150).start()
+        }
+
+        val dm = activity.resources.displayMetrics
+        val targetWidth = (min(dm.widthPixels, dm.heightPixels) * 0.85f).toInt()
+
+        val panel = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = FrameLayout.LayoutParams(targetWidth, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            background = getPanelBackground()
+            setPadding(40, 40, 40, 40)
+            setOnClickListener { }
+        }
+
+        panel.addView(TextView(activity).apply {
+            text = title
+            textSize = 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+        })
+        panel.addView(TextView(activity).apply {
+            text = subtitle
+            textSize = 14f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 10, 0, 30)
+        })
+
+        contentFiller(panel)
+
+        val cancelBtn = Button(activity).apply {
+            text = "CANCEL"
+            setTextColor(Color.GRAY)
+            background = null
+            setOnClickListener { dismissConfirmation() }
+        }
+        panel.addView(cancelBtn)
+
+        confirmationOverlay!!.addView(panel)
+        overlay!!.addView(confirmationOverlay, ViewGroup.LayoutParams(-1, -1))
     }
 
     fun dismiss() {
@@ -1565,6 +1902,51 @@ class MainActivity : AppCompatActivity() {
     private lateinit var flipXBtn: ImageButton
     private lateinit var flipYBtn: ImageButton
     private lateinit var rot180Btn: ImageButton
+
+    private var pendingMidiExportJson: String? = null
+
+    val saveMappingLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null && pendingMidiExportJson != null) {
+            try {
+                contentResolver.openOutputStream(uri)?.use { os ->
+                    os.write(pendingMidiExportJson!!.toByteArray())
+                }
+                Toast.makeText(this, "Mapping Saved", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val loadMappingLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                contentResolver.openInputStream(uri)?.use { inputStream ->
+                    val json = inputStream.bufferedReader().use { it.readText() }
+                    val success = midiHelper.importConfig(json)
+                    if (success) {
+                        Toast.makeText(this, "Loaded: ${midiHelper.mappingName}", Toast.LENGTH_LONG).show()
+                        // If Settings is open, refresh it (Close and Reopen or strictly refresh UI)
+                        // Simple approach: Close settings if open to reflect name change next time
+                        if (settingsMenu?.isOpen() == true) {
+                            settingsMenu?.dismiss()
+                            // Optionally immediately reopen:
+                            // settingsMenu = SettingsMenu(this, overlayHUD); settingsMenu?.show()
+                        }
+                    } else {
+                        Toast.makeText(this, "Invalid Mapping File", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Toast.makeText(this, "Load Failed", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun saveMidiMappingToFile(filename: String, json: String) {
+        pendingMidiExportJson = json
+        saveMappingLauncher.launch(filename)
+    }
 
     private var settingsMenu: SettingsMenu? = null
     private lateinit var photoBtn: ImageButton
