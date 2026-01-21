@@ -1279,7 +1279,8 @@ open class PropertyControl(
     val logPower: Int = 1,
     val showValue: Boolean = false,
     val valueSuffix: String = "",
-    val allowSmoothing: Boolean = true, // Flag to disable smoothing
+    val allowSmoothing: Boolean = true,
+    val defaultLocked: Boolean = false, // NEW: Default lock state
     val valueFormatter: ((Int) -> String)? = null,
     private val onValueChanged: ((Int) -> Unit)? = null
 ) {
@@ -1302,6 +1303,10 @@ open class PropertyControl(
         private set
     @Volatile var preciseValue: Float = defaultValue.toFloat()
         private set
+
+    // NEW: Locking State
+    var isLocked: Boolean = defaultLocked
+    private var lockButton: Button? = null
 
     // Default Smoothing: 50%
     var smoothing: Int = 500
@@ -1356,25 +1361,24 @@ open class PropertyControl(
     private var isDepthDragging = false
 
     init {
-        // Initialize normalized value strictly based on ratio (linear 0..1 of the value range)
-        // Log mapping happens in Input (Slider->Value) and Output (Value->Visual), not here.
         val ratio = (defaultValue.toFloat() / sliderMax.toFloat()).coerceAtLeast(0f)
         smoothedNormalized = ratio
         modulatedNormalized = ratio
     }
 
-    // --- OUTPUT ---
     val computedValue: Float
         get() {
             return outMin + (modulatedNormalized * (outMax - outMin))
         }
 
-    // --- SNAPSHOTS ---
     data class Snapshot(val value: Int, val active: Boolean, val rate: Int, val depth: Int, val shape: String, val smoothing: Int)
 
     fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name, smoothing)
 
+    // UPDATED: Now respects isLocked
     fun restore(s: Snapshot, durationSec: Float) {
+        if (isLocked) return
+
         animateTo(s.value.toFloat(), durationSec, s.shape)
         if (hasModulation) {
             animateModulation(s.rate.toFloat(), s.depth.toFloat(), durationSec)
@@ -1405,7 +1409,6 @@ open class PropertyControl(
         modDepthTarget = targetDepth
     }
 
-    // --- MAIN UPDATE LOOP ---
     fun update(deltaTime: Float) {
         // 1. Handle Animations (Presets)
         val t = if (isAnimating && animDuration > 0) (animTime / animDuration).coerceIn(0f, 1f) else 1f
@@ -1413,23 +1416,32 @@ open class PropertyControl(
 
         if (isAnimating && animTarget != null) {
             animTime += deltaTime
+
+            // Calculate new value
+            val newValueInt: Int
+
             if (animTime >= animDuration) {
                 preciseValue = animTarget!!
-                value = preciseValue.toInt()
+                newValueInt = preciseValue.toInt()
                 modRateTarget?.let { preciseModRate = it; modRate = it.toInt() }
                 modDepthTarget?.let { preciseModDepth = it; modDepth = it.toInt() }
                 modRateTarget = null; modDepthTarget = null
                 isAnimating = false
             } else {
                 preciseValue = animStart + (animTarget!! - animStart) * ease
-                value = preciseValue.toInt()
+                newValueInt = preciseValue.toInt()
                 modRateTarget?.let { preciseModRate = modRateStart + (it - modRateStart) * ease }
                 modDepthTarget?.let { preciseModDepth = modDepthStart + (it - modDepthStart) * ease }
+            }
+
+            // CRITICAL FIX: If the value changed due to animation, trigger the callback (Updates Axis)
+            if (newValueInt != value) {
+                value = newValueInt
+                onValueChanged?.invoke(value)
             }
         }
 
         // 2. Calculate Smoothing Factor (Base Lerp)
-        // If smoothing is disabled/0 or we are animating a preset, snap instantly (1.0f)
         val baseLerp = if (smoothing == 0 || !allowSmoothing) 1.0f else {
             val s = smoothing / 1000f
             val speed = 10.0f * (1.0f - s) * (1.0f - s) + 0.1f
@@ -1437,7 +1449,6 @@ open class PropertyControl(
         }
 
         // 3. Smooth Main Value
-        // Target is simply the current Value % of Max. No log curve applied here (that's for UI mapping).
         val targetNormalized = (preciseValue / sliderMax.toFloat()).coerceAtLeast(0f)
 
         if (isAnimating || baseLerp >= 1.0f) {
@@ -1446,7 +1457,7 @@ open class PropertyControl(
             smoothedNormalized += (targetNormalized - smoothedNormalized) * baseLerp
         }
 
-        // 4. Smooth LFO Params (Rate/Depth) using the same smoothing factor
+        // 4. Smooth LFO Params
         smoothedModRate += (preciseModRate - smoothedModRate) * baseLerp
         smoothedModDepth += (preciseModDepth - smoothedModDepth) * baseLerp
 
@@ -1472,7 +1483,6 @@ open class PropertyControl(
             if (modMode == ModMode.WRAP) {
                 tempOutput = (smoothedNormalized + (rawWave.toFloat() * depthNorm)) % 1.0f
             } else {
-                // Bipolar Shift Logic
                 tempOutput = (smoothedNormalized * (1.0f - depthNorm)) + (rawWave.toFloat() * depthNorm)
             }
         }
@@ -1483,7 +1493,6 @@ open class PropertyControl(
         syncUiElements()
         modIndicator?.postInvalidate()
 
-        // Text display shows the smoothed slider value
         val displayVal = if (logPower > 1) {
             (smoothedNormalized.toDouble().pow(1.0/logPower) * sliderMax).toInt()
         } else {
@@ -1493,9 +1502,7 @@ open class PropertyControl(
     }
 
     private fun syncUiElements() {
-        // MAIN SLIDER: Visualizes smoothedNormalized
         if (mainSeekBar != null && !isMainDragging) {
-            // Reverse Log Curve for Visual Slider: val^(1/log)
             val visualT = if (logPower > 1) smoothedNormalized.toDouble().pow(1.0/logPower).toFloat() else smoothedNormalized
             val seekProgress = (visualT * 1000).toInt()
 
@@ -1508,20 +1515,16 @@ open class PropertyControl(
 
         if (showValue) valueDisplay?.post { valueDisplay?.text = formatValue(value) }
 
-        // MENU CONTROLS
         if (activeControl == this) {
             baseValueInput?.post {
                 if (baseValueInput?.hasFocus() == false) baseValueInput?.setText(value.toString())
             }
-
-            // LFO SLIDERS: Visualize smoothedRate/Depth
             modPanelSpeedSeekBar?.post {
                 if (!isRateDragging) modPanelSpeedSeekBar?.progress = smoothedModRate.toInt()
             }
             modPanelDepthSeekBar?.post {
                 if (!isDepthDragging) modPanelDepthSeekBar?.progress = smoothedModDepth.toInt()
             }
-
             floatingPanel?.findViewWithTag<SeekBar>("SMOOTH_SEEK")?.let {
                 if (!it.isPressed) it.progress = smoothing
             }
@@ -1541,7 +1544,6 @@ open class PropertyControl(
     private fun setProgressFromSlider(p: Int) {
         if (isAnimating) stopAnimation()
         val t = p / 1000f
-        // Apply Log Curve for Logic: val^log
         val curvedT = if (logPower > 1) t.toDouble().pow(logPower.toDouble()).toFloat() else t
         val calcVal = (curvedT * sliderMax).toInt().coerceIn(min, max)
         value = calcVal
@@ -1579,9 +1581,10 @@ open class PropertyControl(
 
     fun reset() {
         stopAnimation()
+        // If locked, do not reset value? Usually Global Reset overrides lock.
+        // Assuming global reset should still reset everything.
         setProgress(defaultValue)
 
-        // Reset smoothing accumulators instantly
         val ratio = (defaultValue.toFloat() / sliderMax.toFloat()).coerceAtLeast(0f)
         smoothedNormalized = ratio
         modulatedNormalized = ratio
@@ -1621,7 +1624,6 @@ open class PropertyControl(
         detach()
         currentContext = context
 
-        // 1. Main Container
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1630,7 +1632,6 @@ open class PropertyControl(
         }
         rootLayout = container
 
-        // 2. Label Container
         val labelContainer = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1667,7 +1668,6 @@ open class PropertyControl(
         })
         container.addView(labelContainer)
 
-        // 3. Slider Row
         val sliderRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1690,7 +1690,6 @@ open class PropertyControl(
 
         val sb = SeekBar(context).apply {
             max = 1000
-            // Initial progress
             val ratio = (value.toFloat() / sliderMax.toFloat()).coerceIn(0f, 1f)
             val t = if (logPower > 1) ratio.toDouble().pow(1.0/logPower).toFloat() else ratio
             progress = (t * 1000).toInt()
@@ -1762,12 +1761,13 @@ open class PropertyControl(
             val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
             baseValueInput?.windowToken?.let { imm?.hideSoftInputFromWindow(it, 0) }
             (floatingPanel?.parent as? ViewGroup)?.removeView(floatingPanel)
-            floatingPanel = null; modPanelSpeedSeekBar = null; modPanelDepthSeekBar = null; liveValueDisplay = null; baseValueInput = null; shapeBtn = null
+            floatingPanel = null; modPanelSpeedSeekBar = null; modPanelDepthSeekBar = null; liveValueDisplay = null; baseValueInput = null; shapeBtn = null; lockButton = null
             (ctx as? MainActivity)?.hideSystemUI()
         }
         if (activeControl == this) activeControl = null
     }
 
+    // UPDATED: Now adds Lock Button
     open fun openMenu(context: Context) {
         val activity = context as? MainActivity ?: return
         val rootLayout = activity.overlayHUD
@@ -1785,9 +1785,28 @@ open class PropertyControl(
 
         addExtraControls(floatingPanel!!, context)
 
-        val titleRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 } }
+        // --- LOCK BUTTON ROW ---
+        val titleRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 } }
+
         titleRow.addView(TextView(context).apply { text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+
+        lockButton = Button(context).apply {
+            textSize = 10f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setPadding(0,0,0,0)
+            layoutParams = LinearLayout.LayoutParams(180, 70)
+            setOnClickListener {
+                isLocked = !isLocked
+                updateLockButtonVisuals()
+            }
+        }
+        updateLockButtonVisuals()
+        titleRow.addView(lockButton)
+
         floatingPanel?.addView(titleRow)
+        // -----------------------
 
         val numRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, 140).apply { bottomMargin = 10 } }
         val btnDec = createNumButton(context, "-") { setProgress(value - 1) }
@@ -1838,7 +1857,6 @@ open class PropertyControl(
             }
             floatingPanel?.addView(shapeBtn)
 
-            // Setup LFO sliders with drag tracking
             modPanelSpeedSeekBar = addSliderToPanel(context, "SPEED", modRate) { updateModRate(it) }
             modPanelSpeedSeekBar?.setOnTouchListener { v, event ->
                 if(event.action == MotionEvent.ACTION_DOWN) isRateDragging = true
@@ -1871,6 +1889,16 @@ open class PropertyControl(
         activeControl = this
     }
 
+    private fun updateLockButtonVisuals() {
+        lockButton?.text = if (isLocked) "LOCKED" else "UNLOCKED"
+        lockButton?.setTextColor(if (isLocked) Color.parseColor("#FF6666") else Color.parseColor("#66FF66"))
+        lockButton?.background = GradientDrawable().apply {
+            setColor(Color.parseColor("#333333"))
+            setStroke(2, if (isLocked) Color.parseColor("#AA3333") else Color.parseColor("#33AA33"))
+            cornerRadius = 10f
+        }
+    }
+
     private fun getMidiButtonBackground(isMapped: Boolean): GradientDrawable {
         return GradientDrawable().apply { cornerRadius = 10f; if (isMapped) { setColor(Color.parseColor("#004400")); setStroke(2, Color.GREEN) } else { setColor(Color.parseColor("#333333")); setStroke(1, Color.GRAY) } }
     }
@@ -1887,13 +1915,11 @@ open class PropertyControl(
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, 5, 0, 5)
         }
-
         val mapMode = when(name) {
             "SPEED" -> "RATE"
             "DEPTH" -> "DEPTH"
             else -> null
         }
-
         val labelView = TextView(ctx).apply {
             text = name
             textSize = 10f
@@ -1901,7 +1927,6 @@ open class PropertyControl(
             maxLines = 1
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(130, ViewGroup.LayoutParams.MATCH_PARENT)
-
             if (mapMode != null) {
                 isClickable = true
                 setOnLongClickListener {
@@ -1914,7 +1939,6 @@ open class PropertyControl(
             }
         }
         row.addView(labelView)
-
         val sb = SeekBar(ctx).apply {
             max = 1000
             progress = current
@@ -1935,7 +1959,6 @@ open class PropertyControl(
         return sb
     }
 }
-
 
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
@@ -3128,11 +3151,12 @@ class MainActivity : AppCompatActivity() {
                 min = 1, max = 25, sliderMax = 25,
                 defaultValue = 2,
                 layoutStyle = PropertyControl.LayoutStyle.ROW,
-                includeInPreset = false,
+                includeInPreset = true, // MUST BE TRUE
                 hasModulation = false,
                 logPower = 1,
                 showValue = true,
-                allowSmoothing = false // DISABLE SMOOTHING FOR AXIS
+                allowSmoothing = false,
+                defaultLocked = true    // Default to locked
             ) {
                 renderer.axisCount = it.toFloat()
             }
@@ -3141,6 +3165,7 @@ class MainActivity : AppCompatActivity() {
         }
         axisCtrl.attachTo(this, parent)
     }
+
     private fun setupCameraOrientationControls(parent: LinearLayout) {
         val orientationRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, 10, 0, 20); layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120) }
 
@@ -4128,7 +4153,7 @@ class MainActivity : AppCompatActivity() {
         if (btnDrawable != null) {
             val anim = ValueAnimator.ofFloat(0f, 1f).apply {
                 duration = transitionMs
-                interpolator = android.view.animation.LinearInterpolator() // Matches time flow
+                interpolator = android.view.animation.LinearInterpolator()
                 addUpdateListener { va ->
                     val progress = va.animatedValue as Float
                     btnDrawable.setProgress(progress)
@@ -4139,13 +4164,6 @@ class MainActivity : AppCompatActivity() {
             presetAnimators[idx] = anim
         }
 
-        // 3. GL & Control Animations
-        if (!axisLocked) {
-            renderer.axisCount = p.axis.toFloat()
-            axisSb.progress = p.axis - 1
-            controlsMap["AXIS"]?.setProgress(p.axis - 1)
-        }
-
         val startMRot = renderer.mRotAccum
         val startCRot = renderer.cRotAccum
         val targetMRot = round(startMRot / 360.0) * 360.0
@@ -4154,22 +4172,23 @@ class MainActivity : AppCompatActivity() {
         renderer.animateRotationTo(targetMRot, targetCRot, durationSec)
 
         controls.forEach { control ->
-            // FIX: Explicitly skip controls that should not be part of the preset (like TRANS_TIME)
-            if (control.id == "AXIS" || !control.includeInPreset) return@forEach
+            // FIX: Removed 'control.id == "AXIS"' so it is NOT skipped
+            if (!control.includeInPreset) return@forEach
 
-            val snap = p.controlSnapshots[control.id]
+            var snap = p.controlSnapshots[control.id]
+
+            // Legacy support: If loading an old preset where AXIS wasn't in the map
+            if (snap == null && control.id == "AXIS") {
+                snap = PropertyControl.Snapshot(
+                    value = p.axis, // Direct value (e.g. 6 remains 6)
+                    active = false,
+                    rate = 0, depth = 0, shape = "SINE", smoothing = 0
+                )
+            }
+
             if (snap != null) {
-                control.animateTo(snap.value.toFloat(), durationSec, snap.shape)
-                if (control.hasModulation) {
-                    control.animateTo(snap.value.toFloat(), durationSec, snap.shape)
-
-                    // 2. Animate LFO
-                    if (control.hasModulation) {
-                        control.animateModulation(snap.rate.toFloat(), snap.depth.toFloat(), durationSec)
-                    }
-
-                    // 3. FIX: Load Smoothing!
-                    control.smoothing = snap.smoothing                }
+                // The 'restore' function handles the "isLocked" check internally
+                control.restore(snap, durationSec)
             }
         }
         updateSidebarVisuals()
@@ -4182,8 +4201,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun savePreset(idx: Int) {
-        val snapshots = controls.filter { it.id != "AXIS" && it.includeInPreset }.associate { it.id to it.getSnapshot() }
+        val snapshots = controls.filter { it.includeInPreset }.associate { it.id to it.getSnapshot() }
+
         val axisVal = controlsMap["AXIS"]?.value ?: 0
+
         val newPreset = Preset(snapshots, renderer.flipX, renderer.flipY, renderer.rot180, axisVal + 1)
         presets[idx] = newPreset
         activePreset = idx
@@ -4201,7 +4222,6 @@ class MainActivity : AppCompatActivity() {
                 snapObj.put("r", snap.rate)
                 snapObj.put("d", snap.depth)
                 snapObj.put("shape", snap.shape)
-                // SAVE SMOOTHING
                 snapObj.put("s", snap.smoothing)
                 controlsObj.put(key, snapObj)
             }
@@ -4966,6 +4986,10 @@ class MainActivity : AppCompatActivity() {
             val vMTiltY = ctx.controlsMap["M_TILTY"]?.computedValue ?: 0f
             val v3DMix = ctx.controlsMap["3D_MIX"]?.computedValue ?: 0f
 
+            val axisCtrl = ctx.controlsMap["AXIS"]
+            val currentAxis = axisCtrl?.value?.toFloat() ?: axisCount
+            safeUni("uAx", currentAxis)
+
             safeUni("uAx", axisCount)
             safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f)
             safeUni("uMZ", vMZoom)
@@ -5319,7 +5343,8 @@ abstract class SourcePropertyControl(
     hasModulation = true,
     includeInPreset = false,
     layoutStyle = LayoutStyle.ROW,
-    iconResId = android.R.drawable.presence_video_online
+    iconResId = android.R.drawable.presence_video_online,
+    defaultLocked = true
 ) {
     // Override openMenu to append content at the bottom instead of injecting at top via addExtraControls
     override fun openMenu(context: Context) {
@@ -5368,7 +5393,8 @@ class CameraSourceControl(mainActivity: MainActivity) : PropertyControl(
     hasModulation = true,
     includeInPreset = true,
     layoutStyle = LayoutStyle.ROW,
-    iconResId = android.R.drawable.ic_menu_camera
+    iconResId = android.R.drawable.ic_menu_camera,
+    defaultLocked = true
 )
 
 class MediaSourceControl(
