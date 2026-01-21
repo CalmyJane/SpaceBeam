@@ -1279,6 +1279,7 @@ open class PropertyControl(
     val logPower: Int = 1,
     val showValue: Boolean = false,
     val valueSuffix: String = "",
+    val allowSmoothing: Boolean = true, // Flag to disable smoothing
     val valueFormatter: ((Int) -> String)? = null,
     private val onValueChanged: ((Int) -> Unit)? = null
 ) {
@@ -1304,7 +1305,16 @@ open class PropertyControl(
 
     // Default Smoothing: 50%
     var smoothing: Int = 500
+
+    // Base value (slider position) smoothed over time
     private var smoothedNormalized: Float = 0f
+
+    // Final Output (Base + LFO)
+    @Volatile private var modulatedNormalized: Float = 0f
+
+    // LFO Smoothing State
+    private var smoothedModRate: Float = 200f
+    private var smoothedModDepth: Float = 0f
 
     // Animation / LFO State
     private var animTarget: Float? = null
@@ -1340,15 +1350,23 @@ open class PropertyControl(
     private var shapeBtn: Button? = null
     protected var currentContext: Context? = null
 
+    // Interaction Flags
+    private var isMainDragging = false
+    private var isRateDragging = false
+    private var isDepthDragging = false
+
     init {
+        // Initialize normalized value strictly based on ratio (linear 0..1 of the value range)
+        // Log mapping happens in Input (Slider->Value) and Output (Value->Visual), not here.
         val ratio = (defaultValue.toFloat() / sliderMax.toFloat()).coerceAtLeast(0f)
-        smoothedNormalized = if (logPower > 1) ratio.toDouble().pow(logPower.toDouble()).toFloat() else ratio
+        smoothedNormalized = ratio
+        modulatedNormalized = ratio
     }
 
     // --- OUTPUT ---
     val computedValue: Float
         get() {
-            return outMin + (smoothedNormalized * (outMax - outMin))
+            return outMin + (modulatedNormalized * (outMax - outMin))
         }
 
     // --- SNAPSHOTS ---
@@ -1389,6 +1407,7 @@ open class PropertyControl(
 
     // --- MAIN UPDATE LOOP ---
     fun update(deltaTime: Float) {
+        // 1. Handle Animations (Presets)
         val t = if (isAnimating && animDuration > 0) (animTime / animDuration).coerceIn(0f, 1f) else 1f
         val ease = 1f - (1f - t).toDouble().pow(3.0).toFloat()
 
@@ -1401,7 +1420,6 @@ open class PropertyControl(
                 modDepthTarget?.let { preciseModDepth = it; modDepth = it.toInt() }
                 modRateTarget = null; modDepthTarget = null
                 isAnimating = false
-                syncUiElements()
             } else {
                 preciseValue = animStart + (animTarget!! - animStart) * ease
                 value = preciseValue.toInt()
@@ -1410,13 +1428,33 @@ open class PropertyControl(
             }
         }
 
-        val ratio = (preciseValue / sliderMax.toFloat()).coerceAtLeast(0f)
-        val curvedNorm = if (logPower > 1) ratio.toDouble().pow(logPower.toDouble()).toFloat() else ratio
+        // 2. Calculate Smoothing Factor (Base Lerp)
+        // If smoothing is disabled/0 or we are animating a preset, snap instantly (1.0f)
+        val baseLerp = if (smoothing == 0 || !allowSmoothing) 1.0f else {
+            val s = smoothing / 1000f
+            val speed = 10.0f * (1.0f - s) * (1.0f - s) + 0.1f
+            (speed * deltaTime).coerceIn(0f, 1f)
+        }
 
-        var targetNormalized = curvedNorm
+        // 3. Smooth Main Value
+        // Target is simply the current Value % of Max. No log curve applied here (that's for UI mapping).
+        val targetNormalized = (preciseValue / sliderMax.toFloat()).coerceAtLeast(0f)
 
-        if (hasModulation && (preciseModRate > 0f || preciseModDepth > 0f || modDepthTarget != null)) {
-            val baseSpeed = (preciseModRate / 1000f + 0.05f).toDouble().pow(3.0).toFloat()
+        if (isAnimating || baseLerp >= 1.0f) {
+            smoothedNormalized = targetNormalized
+        } else {
+            smoothedNormalized += (targetNormalized - smoothedNormalized) * baseLerp
+        }
+
+        // 4. Smooth LFO Params (Rate/Depth) using the same smoothing factor
+        smoothedModRate += (preciseModRate - smoothedModRate) * baseLerp
+        smoothedModDepth += (preciseModDepth - smoothedModDepth) * baseLerp
+
+        // 5. Calculate LFO Output
+        var tempOutput = smoothedNormalized
+
+        if (hasModulation && (smoothedModRate > 1f || smoothedModDepth > 1f)) {
+            val baseSpeed = (smoothedModRate / 1000f + 0.05f).toDouble().pow(3.0).toFloat()
             lfoPhase += baseSpeed * deltaTime * 2.0 * Math.PI
             if (lfoPhase > 2.0 * Math.PI) lfoPhase -= 2.0 * Math.PI
 
@@ -1429,33 +1467,23 @@ open class PropertyControl(
                 WaveShape.RANDOM_STEP -> Math.random()
             }
 
-            val depthNorm = (preciseModDepth / 1000f).toDouble().pow(2.0).toFloat()
+            val depthNorm = (smoothedModDepth / 1000f).toDouble().pow(2.0).toFloat()
 
             if (modMode == ModMode.WRAP) {
-                targetNormalized = (curvedNorm + (rawWave.toFloat() * depthNorm)) % 1.0f
+                tempOutput = (smoothedNormalized + (rawWave.toFloat() * depthNorm)) % 1.0f
             } else {
-                // Smart Bipolar Shift Logic
-                targetNormalized = (curvedNorm * (1.0f - depthNorm)) + (rawWave.toFloat() * depthNorm)
+                // Bipolar Shift Logic
+                tempOutput = (smoothedNormalized * (1.0f - depthNorm)) + (rawWave.toFloat() * depthNorm)
             }
         }
 
-        if (isAnimating) {
-            targetNormalized = (modSnapshotValue * (1.0f - ease)) + (targetNormalized * ease)
-        }
+        modulatedNormalized = tempOutput
 
-        // 5. Smoothing
-        if (smoothing == 0 || isAnimating) {
-            smoothedNormalized = targetNormalized
-        } else {
-            val s = smoothing / 1000f
-            val speed = 10.0f * (1.0f - s) * (1.0f - s) + 0.1f
-            val lerpFactor = (speed * deltaTime).coerceIn(0f, 1f)
-            smoothedNormalized += (targetNormalized - smoothedNormalized) * lerpFactor
-        }
-
+        // 6. Update Visuals
+        syncUiElements()
         modIndicator?.postInvalidate()
 
-        // CHANGE: Use smoothedNormalized instead of targetNormalized for display to show real real value
+        // Text display shows the smoothed slider value
         val displayVal = if (logPower > 1) {
             (smoothedNormalized.toDouble().pow(1.0/logPower) * sliderMax).toInt()
         } else {
@@ -1465,23 +1493,38 @@ open class PropertyControl(
     }
 
     private fun syncUiElements() {
-        val ratio = (value.toFloat() / sliderMax.toFloat()).coerceIn(0f, 1f)
-        val sliderT = if (logPower > 1) ratio.toDouble().pow(1.0 / logPower).toFloat() else ratio
-        val seekProgress = (sliderT * 1000).toInt()
+        // MAIN SLIDER: Visualizes smoothedNormalized
+        if (mainSeekBar != null && !isMainDragging) {
+            // Reverse Log Curve for Visual Slider: val^(1/log)
+            val visualT = if (logPower > 1) smoothedNormalized.toDouble().pow(1.0/logPower).toFloat() else smoothedNormalized
+            val seekProgress = (visualT * 1000).toInt()
 
-        mainSeekBar?.post {
-            if (mainSeekBar?.progress != seekProgress) {
-                try { mainSeekBar?.progress = seekProgress } catch (e: Exception) {}
+            if (mainSeekBar!!.progress != seekProgress) {
+                mainSeekBar!!.post {
+                    if (!isMainDragging) mainSeekBar!!.progress = seekProgress
+                }
             }
         }
 
         if (showValue) valueDisplay?.post { valueDisplay?.text = formatValue(value) }
 
+        // MENU CONTROLS
         if (activeControl == this) {
-            baseValueInput?.post { if (baseValueInput?.hasFocus() == false) baseValueInput?.setText(value.toString()) }
-            modPanelSpeedSeekBar?.post { modPanelSpeedSeekBar?.progress = preciseModRate.toInt() }
-            modPanelDepthSeekBar?.post { modPanelDepthSeekBar?.progress = preciseModDepth.toInt() }
-            floatingPanel?.findViewWithTag<SeekBar>("SMOOTH_SEEK")?.progress = smoothing
+            baseValueInput?.post {
+                if (baseValueInput?.hasFocus() == false) baseValueInput?.setText(value.toString())
+            }
+
+            // LFO SLIDERS: Visualize smoothedRate/Depth
+            modPanelSpeedSeekBar?.post {
+                if (!isRateDragging) modPanelSpeedSeekBar?.progress = smoothedModRate.toInt()
+            }
+            modPanelDepthSeekBar?.post {
+                if (!isDepthDragging) modPanelDepthSeekBar?.progress = smoothedModDepth.toInt()
+            }
+
+            floatingPanel?.findViewWithTag<SeekBar>("SMOOTH_SEEK")?.let {
+                if (!it.isPressed) it.progress = smoothing
+            }
         }
     }
 
@@ -1498,6 +1541,7 @@ open class PropertyControl(
     private fun setProgressFromSlider(p: Int) {
         if (isAnimating) stopAnimation()
         val t = p / 1000f
+        // Apply Log Curve for Logic: val^log
         val curvedT = if (logPower > 1) t.toDouble().pow(logPower.toDouble()).toFloat() else t
         val calcVal = (curvedT * sliderMax).toInt().coerceIn(min, max)
         value = calcVal
@@ -1515,7 +1559,6 @@ open class PropertyControl(
         val clamped = v.coerceIn(min, max)
         value = clamped
         preciseValue = clamped.toFloat()
-        syncUiElements()
         onValueChanged?.invoke(clamped)
     }
 
@@ -1537,9 +1580,18 @@ open class PropertyControl(
     fun reset() {
         stopAnimation()
         setProgress(defaultValue)
+
+        // Reset smoothing accumulators instantly
+        val ratio = (defaultValue.toFloat() / sliderMax.toFloat()).coerceAtLeast(0f)
+        smoothedNormalized = ratio
+        modulatedNormalized = ratio
+
         if (hasModulation) {
             updateModRate(200)
             updateModDepth(0)
+            smoothedModRate = 200f
+            smoothedModDepth = 0f
+
             updateSmoothing(500)
             modShape = if (modMode == ModMode.WRAP) WaveShape.RAMP else WaveShape.SINE
             updateIndicatorVisuals()
@@ -1569,16 +1621,16 @@ open class PropertyControl(
         detach()
         currentContext = context
 
-        // 1. Main Container: Horizontal Row
+        // 1. Main Container
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 4, 0, 4) // Slight vertical padding for spacing
+            setPadding(0, 4, 0, 4)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         rootLayout = container
 
-        // 2. Label Container: Fixed Width on the Left
+        // 2. Label Container
         val labelContainer = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1588,20 +1640,12 @@ open class PropertyControl(
                 cornerRadius = 12f
             }
             isClickable = true
-
-            // Single Click: Toggle Menu
             setOnClickListener { toggleMenu(context) }
-
-            // Long Press: MIDI Learn
             setOnLongClickListener {
                 (context as? MainActivity)?.showMidiLearnOverlay(this@PropertyControl.id, this@PropertyControl.label)
                 true
             }
-
-            // Fixed width (210) ensures sliders align; Height 70 matches button style
-            layoutParams = LinearLayout.LayoutParams(210, 70).apply {
-                rightMargin = 12
-            }
+            layoutParams = LinearLayout.LayoutParams(210, 70).apply { rightMargin = 12 }
         }
 
         if (iconResId != null) {
@@ -1623,7 +1667,7 @@ open class PropertyControl(
         })
         container.addView(labelContainer)
 
-        // 3. Slider Row: Fills remaining space
+        // 3. Slider Row
         val sliderRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1637,7 +1681,7 @@ open class PropertyControl(
                 setTextColor(Color.LTGRAY)
                 textSize = 9f
                 minWidth = 90
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL // Reverted to center for inline look
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
                 setPadding(0, 0, 8, 0)
                 includeFontPadding = false
             }
@@ -1646,25 +1690,36 @@ open class PropertyControl(
 
         val sb = SeekBar(context).apply {
             max = 1000
+            // Initial progress
             val ratio = (value.toFloat() / sliderMax.toFloat()).coerceIn(0f, 1f)
             val t = if (logPower > 1) ratio.toDouble().pow(1.0/logPower).toFloat() else ratio
             progress = (t * 1000).toInt()
+
             thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
             setPadding(0,0,0,0); thumbOffset = 0; splitTrack = false
-
-            // Flex width to fill space between value and mod indicator
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
 
             setOnTouchListener { v, event ->
                 v.parent.requestDisallowInterceptTouchEvent(true)
-                if (event.actionMasked == MotionEvent.ACTION_DOWN) { stopAnimation(); if (activeControl != null && activeControl != this@PropertyControl) closeActiveMenu() }
-                if (event.actionMasked == MotionEvent.ACTION_UP) v.parent.requestDisallowInterceptTouchEvent(false)
-                v.onTouchEvent(event); true
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    isMainDragging = true
+                    stopAnimation()
+                    if (activeControl != null && activeControl != this@PropertyControl) closeActiveMenu()
+                }
+                if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                    isMainDragging = false
+                    v.parent.requestDisallowInterceptTouchEvent(false)
+                }
+                v.onTouchEvent(event)
+                true
             }
+
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { if (fromUser) setProgressFromSlider(p) }
-                override fun onStartTrackingTouch(s: SeekBar?) {}
-                override fun onStopTrackingTouch(s: SeekBar?) {}
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                    if (fromUser) setProgressFromSlider(p)
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) { isMainDragging = true }
+                override fun onStopTrackingTouch(s: SeekBar?) { isMainDragging = false }
             })
         }
         mainSeekBar = sb
@@ -1680,7 +1735,7 @@ open class PropertyControl(
                     paint.style = Paint.Style.FILL; paint.color = if (modDepth > 0) Color.WHITE else Color.LTGRAY; paint.alpha = if (modDepth > 0) 255 else 100
                     var dotRadius = r * 0.3f
                     if (modDepth > 0) {
-                        val normDiff = smoothedNormalized - (preciseValue / sliderMax.toFloat())
+                        val normDiff = modulatedNormalized - (preciseValue / sliderMax.toFloat())
                         dotRadius = (r * (0.3 + (abs(normDiff) * 3.0))).toFloat().coerceAtMost(r)
                     }
                     canvas.drawCircle(cx, cy, dotRadius, paint)
@@ -1744,13 +1799,8 @@ open class PropertyControl(
             setTypeface(null, Typeface.BOLD)
             gravity = Gravity.CENTER
             background = null
-
-            // --- FIX FOR CLIPPED TEXT ---
             includeFontPadding = false
-            // Add top padding to push the ascenders down into view
             setPadding(0, 10, 0, 0)
-            // ----------------------------
-
             inputType = android.text.InputType.TYPE_CLASS_NUMBER; filters = arrayOf(android.text.InputFilter.LengthFilter(6))
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE; layoutParams = LinearLayout.LayoutParams(0, -1, 1.5f)
             setOnEditorActionListener { v, actionId, _ ->
@@ -1788,8 +1838,20 @@ open class PropertyControl(
             }
             floatingPanel?.addView(shapeBtn)
 
+            // Setup LFO sliders with drag tracking
             modPanelSpeedSeekBar = addSliderToPanel(context, "SPEED", modRate) { updateModRate(it) }
+            modPanelSpeedSeekBar?.setOnTouchListener { v, event ->
+                if(event.action == MotionEvent.ACTION_DOWN) isRateDragging = true
+                if(event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) isRateDragging = false
+                v.onTouchEvent(event); true
+            }
+
             modPanelDepthSeekBar = addSliderToPanel(context, "DEPTH", modDepth) { updateModDepth(it) }
+            modPanelDepthSeekBar?.setOnTouchListener { v, event ->
+                if(event.action == MotionEvent.ACTION_DOWN) isDepthDragging = true
+                if(event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) isDepthDragging = false
+                v.onTouchEvent(event); true
+            }
 
             val smoothSb = addSliderToPanel(context, "SMOOTH", smoothing) { updateSmoothing(it) }
             smoothSb.tag = "SMOOTH_SEEK"
@@ -1826,14 +1888,12 @@ open class PropertyControl(
             setPadding(0, 5, 0, 5)
         }
 
-        // Determine Mapping Mode for this specific slider
         val mapMode = when(name) {
             "SPEED" -> "RATE"
             "DEPTH" -> "DEPTH"
             else -> null
         }
 
-        // Label with Long Press Support
         val labelView = TextView(ctx).apply {
             text = name
             textSize = 10f
@@ -1843,9 +1903,8 @@ open class PropertyControl(
             layoutParams = LinearLayout.LayoutParams(130, ViewGroup.LayoutParams.MATCH_PARENT)
 
             if (mapMode != null) {
-                isClickable = true // Ensure it accepts clicks/long clicks
+                isClickable = true
                 setOnLongClickListener {
-                    // Send combined ID: "TARGET|MODE"
                     (ctx as? MainActivity)?.showMidiLearnOverlay(
                         "${this@PropertyControl.id}|$mapMode",
                         "${this@PropertyControl.label} $name"
@@ -1856,7 +1915,6 @@ open class PropertyControl(
         }
         row.addView(labelView)
 
-        // Slider
         val sb = SeekBar(ctx).apply {
             max = 1000
             progress = current
@@ -1877,7 +1935,6 @@ open class PropertyControl(
         return sb
     }
 }
-
 
 
 // --- MAIN ACTIVITY ---
@@ -3025,7 +3082,8 @@ class MainActivity : AppCompatActivity() {
                 includeInPreset = false,
                 hasModulation = false,
                 logPower = 1,
-                showValue = true
+                showValue = true,
+                allowSmoothing = false // DISABLE SMOOTHING FOR AXIS
             ) {
                 renderer.axisCount = it.toFloat()
             }
@@ -3034,7 +3092,6 @@ class MainActivity : AppCompatActivity() {
         }
         axisCtrl.attachTo(this, parent)
     }
-
     private fun setupCameraOrientationControls(parent: LinearLayout) {
         val orientationRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, 10, 0, 20); layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120) }
 
@@ -3162,6 +3219,7 @@ class MainActivity : AppCompatActivity() {
                 hasModulation = false,
                 logPower = 3,
                 showValue = true,
+                allowSmoothing = false, // DISABLE SMOOTHING FOR TRANSITION TIME
                 valueFormatter = { "%.1fs".format(it / 1000f) }
             ) { transitionMs = it.toLong() }
             controls.add(transCtrl)
