@@ -1960,6 +1960,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var flipYBtn: ImageButton
     private lateinit var rot180Btn: ImageButton
 
+    private var isDraggingOrGesturing = false
+    private var touchDownX = 0f
+    private var touchDownY = 0f
+    private val CLICK_DRAG_TOLERANCE = 10f
+
     private var pendingMidiExportJson: String? = null
 
     val saveMappingLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
@@ -2459,32 +2464,76 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun handleInteraction(event: MotionEvent) {
+        // 1. Handle Multi-touch Gestures (Pinch/Rotate)
         if (event.pointerCount >= 2) {
+            isDraggingOrGesturing = true // Mark as gesture
+
             val p1x = event.getX(0); val p1y = event.getY(0)
             val p2x = event.getX(1); val p2y = event.getY(1)
             val focusX = (p1x + p2x) / 2f; val focusY = (p1y + p2y) / 2f
             val dist = hypot(p1x - p2x, p1y - p2y)
             val angle = Math.toDegrees(atan2((p1y - p2y).toDouble(), (p1x - p2x).toDouble())).toFloat()
+
             if (event.actionMasked == MotionEvent.ACTION_MOVE) {
+                // Initialize start values if this is the first move frame of the gesture
+                if (lastFingerDist == 0f) {
+                    lastFingerDist = dist
+                    lastFingerAngle = angle
+                    lastFingerFocusX = focusX
+                    lastFingerFocusY = focusY
+                }
+
                 val dx = (focusX - lastFingerFocusX) / glView.width.toFloat() * 2.0f
                 val dy = (focusY - lastFingerFocusY) / glView.height.toFloat() * 2.0f
+
                 controlsMap["M_TX"]?.let { it.setProgress((it.value - (dx * 500).toInt()).coerceIn(0, 1000)) }
                 controlsMap["M_TY"]?.let { it.setProgress((it.value + (dy * 500).toInt()).coerceIn(0, 1000)) }
+
                 val scaleFactor = dist / lastFingerDist
-                if (scaleFactor > 0) {
+                if (scaleFactor > 0 && lastFingerDist > 0) { // Safety check
                     controlsMap["M_ZOOM"]?.let { it.setProgress((it.value - (log2(scaleFactor) * 300).toInt()).coerceIn(0, 1000)) }
                 }
+
                 val dAngle = angle - lastFingerAngle
                 controlsMap["M_ANGLE"]?.let { it.setProgress((it.value - (dAngle * (1000f / 360f)).toInt() + 1000) % 1000) }
             }
+
             lastFingerDist = dist; lastFingerAngle = angle; lastFingerFocusX = focusX; lastFingerFocusY = focusY
-        } else if (event.action == MotionEvent.ACTION_UP) {
-            if (PropertyControl.activeControl != null) {
-                // Action 1: If a menu is open, close it.
-                PropertyControl.closeActiveMenu()
-            } else {
-                // Action 2: If no menu is open, toggle the HUD.
-                toggleHud()
+        }
+        // 2. Handle Single Pointer
+        else {
+            // Reset multi-touch tracking when fingers lift
+            if (event.pointerCount < 2) {
+                lastFingerDist = 0f
+            }
+
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    isDraggingOrGesturing = false
+                    touchDownX = event.x
+                    touchDownY = event.y
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = abs(event.x - touchDownX)
+                    val dy = abs(event.y - touchDownY)
+
+                    // If moved beyond tolerance, invalidate the "tap"
+                    if (dx > CLICK_DRAG_TOLERANCE || dy > CLICK_DRAG_TOLERANCE) {
+                        isDraggingOrGesturing = true
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    // Only toggle if it wasn't a drag or gesture
+                    if (!isDraggingOrGesturing) {
+                        if (PropertyControl.activeControl != null) {
+                            PropertyControl.closeActiveMenu()
+                        } else {
+                            toggleHud()
+                        }
+                    }
+                    // Reset flags
+                    isDraggingOrGesturing = false
+                }
             }
         }
     }
