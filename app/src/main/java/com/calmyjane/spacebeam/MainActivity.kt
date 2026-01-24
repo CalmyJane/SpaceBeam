@@ -84,6 +84,11 @@ import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.abs
 import org.json.JSONArray
+import android.annotation.SuppressLint
+import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.widget.*
+import kotlin.math.*
 
 class MidiHelper(private val activity: MainActivity) {
     // Standard BLE MIDI UUIDs
@@ -1328,7 +1333,7 @@ open class PropertyControl(
     private var animTime: Float = 0f
     private var isAnimating = false
 
-    // --- NEW: Transition Crossfade State ---
+    // Transition Crossfade State
     private var isTransitioning = false
     private var transitionStartVal: Float = 0f
     private var transitionTotalTime: Float = 0f
@@ -1349,9 +1354,8 @@ open class PropertyControl(
     private var modDepthTarget: Float? = null
 
     // UI References
-    private var mainSeekBar: SeekBar? = null
+    private var sliderView: SliderBox? = null
     private var modIndicator: View? = null
-    private var valueDisplay: TextView? = null
     private var mainRowLayout: LinearLayout? = null
     protected var floatingPanel: LinearLayout? = null
     private var modPanelSpeedSeekBar: SeekBar? = null
@@ -1384,13 +1388,11 @@ open class PropertyControl(
     fun restore(s: Snapshot, durationSec: Float) {
         if (isLocked) return
 
-        // 1. "Freeze" the current output value to start the crossfade
         transitionStartVal = modulatedNormalized
         transitionTotalTime = durationSec
         transitionElapsed = 0f
         isTransitioning = true
 
-        // 2. Start animating parameters to new targets
         animateTo(s.value.toFloat(), durationSec, s.shape)
         if (hasModulation) {
             animateModulation(s.rate.toFloat(), s.depth.toFloat(), durationSec)
@@ -1405,9 +1407,6 @@ open class PropertyControl(
         animDuration = durationSec
         animTime = 0f
         isAnimating = true
-
-        // Update shape immediately. The "jump" caused by this is hidden
-        // by the crossfade logic in update().
         if (newShape != null) {
             try {
                 modShape = WaveShape.valueOf(newShape)
@@ -1424,13 +1423,12 @@ open class PropertyControl(
     }
 
     fun update(deltaTime: Float) {
-        // 1. Handle Parameter Animations (Base Value, Rate, Depth)
+        // 1. Handle Animations
         val t = if (isAnimating && animDuration > 0) (animTime / animDuration).coerceIn(0f, 1f) else 1f
         val ease = 1f - (1f - t).toDouble().pow(3.0).toFloat()
 
         if (isAnimating && animTarget != null) {
             animTime += deltaTime
-
             val newValueInt: Int
             if (animTime >= animDuration) {
                 preciseValue = animTarget!!
@@ -1445,21 +1443,20 @@ open class PropertyControl(
                 modRateTarget?.let { preciseModRate = modRateStart + (it - modRateStart) * ease }
                 modDepthTarget?.let { preciseModDepth = modDepthStart + (it - modDepthStart) * ease }
             }
-
             if (newValueInt != value) {
                 value = newValueInt
                 onValueChanged?.invoke(value)
             }
         }
 
-        // 2. Smoothing Factor
+        // 2. Smoothing
         val baseLerp = if (smoothing == 0 || !allowSmoothing) 1.0f else {
             val s = smoothing / 1000f
             val speed = 10.0f * (1.0f - s) * (1.0f - s) + 0.1f
             (speed * deltaTime).coerceIn(0f, 1f)
         }
 
-        // 3. Smooth Internal Values
+        // 3. Smooth Main Value
         val targetNormalized = (preciseValue / sliderMax.toFloat()).coerceAtLeast(0f)
         if (isAnimating || baseLerp >= 1.0f) {
             smoothedNormalized = targetNormalized
@@ -1470,7 +1467,7 @@ open class PropertyControl(
         smoothedModRate += (preciseModRate - smoothedModRate) * baseLerp
         smoothedModDepth += (preciseModDepth - smoothedModDepth) * baseLerp
 
-        // 4. Calculate "Theoretical" New LFO Output (The Destination)
+        // 4. Calculate LFO Output
         var currentCalculatedOutput = smoothedNormalized
 
         if (hasModulation && (smoothedModRate > 1f || smoothedModDepth > 1f)) {
@@ -1496,7 +1493,7 @@ open class PropertyControl(
             }
         }
 
-        // 5. Apply Crossfade (The Fix for Jumping)
+        // 5. Crossfade Logic
         if (isTransitioning) {
             transitionElapsed += deltaTime
             if (transitionElapsed >= transitionTotalTime) {
@@ -1504,7 +1501,6 @@ open class PropertyControl(
                 modulatedNormalized = currentCalculatedOutput
             } else {
                 val progress = (transitionElapsed / transitionTotalTime).coerceIn(0f, 1f)
-                // Use a slight ease-in-out for the crossfade
                 val fadeT = progress * progress * (3.0f - 2.0f * progress)
                 modulatedNormalized = transitionStartVal + (currentCalculatedOutput - transitionStartVal) * fadeT
             }
@@ -1512,7 +1508,7 @@ open class PropertyControl(
             modulatedNormalized = currentCalculatedOutput
         }
 
-        // 6. Visual Updates
+        // 6. Update Visuals
         syncUiElements()
         modIndicator?.postInvalidate()
 
@@ -1525,18 +1521,10 @@ open class PropertyControl(
     }
 
     private fun syncUiElements() {
-        if (mainSeekBar != null && !isMainDragging) {
+        if (sliderView != null) {
             val visualT = if (logPower > 1) smoothedNormalized.toDouble().pow(1.0/logPower).toFloat() else smoothedNormalized
-            val seekProgress = (visualT * 1000).toInt()
-
-            if (mainSeekBar!!.progress != seekProgress) {
-                mainSeekBar!!.post {
-                    if (!isMainDragging) mainSeekBar!!.progress = seekProgress
-                }
-            }
+            sliderView!!.setVisualState(visualT, formatValue(value))
         }
-
-        if (showValue) valueDisplay?.post { valueDisplay?.text = formatValue(value) }
 
         if (activeControl == this) {
             baseValueInput?.post {
@@ -1564,21 +1552,6 @@ open class PropertyControl(
         }
     }
 
-    private fun setProgressFromSlider(p: Int) {
-        if (isAnimating) stopAnimation()
-        val t = p / 1000f
-        val curvedT = if (logPower > 1) t.toDouble().pow(logPower.toDouble()).toFloat() else t
-        val calcVal = (curvedT * sliderMax).toInt().coerceIn(min, max)
-        value = calcVal
-        preciseValue = calcVal.toFloat()
-
-        if (showValue) valueDisplay?.text = formatValue(value)
-        if (activeControl == this && baseValueInput?.hasFocus() == false) {
-            baseValueInput!!.setText("$calcVal")
-        }
-        onValueChanged?.invoke(calcVal)
-    }
-
     fun setProgress(v: Int) {
         if (isAnimating) stopAnimation()
         val clamped = v.coerceIn(min, max)
@@ -1604,7 +1577,7 @@ open class PropertyControl(
 
     fun reset() {
         stopAnimation()
-        isTransitioning = false // Stop any crossfades
+        isTransitioning = false
         setProgress(defaultValue)
 
         val ratio = (defaultValue.toFloat() / sliderMax.toFloat()).coerceAtLeast(0f)
@@ -1625,12 +1598,11 @@ open class PropertyControl(
     }
 
     fun stopAnimation() {
-        isAnimating = false; animTarget = null; modRateTarget = null; modDepthTarget = null
-        isTransitioning = false
+        isAnimating = false; animTarget = null; modRateTarget = null; modDepthTarget = null; isTransitioning = false
     }
 
     fun detach() {
-        mainSeekBar = null; modIndicator = null; valueDisplay = null; mainRowLayout = null
+        sliderView = null; modIndicator = null; mainRowLayout = null
         if (activeControl == this) closeMenu()
         currentContext = null
     }
@@ -1655,6 +1627,7 @@ open class PropertyControl(
         }
         rootLayout = container
 
+        // --- LABEL BOX ---
         val labelContainer = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1691,62 +1664,28 @@ open class PropertyControl(
         })
         container.addView(labelContainer)
 
+        // --- CUSTOM SLIDER BOX ---
         val sliderRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, 60, 1f)
+            layoutParams = LinearLayout.LayoutParams(0, 70, 1f) // Matches label height
         }
         mainRowLayout = sliderRow
 
-        if (showValue) {
-            valueDisplay = TextView(context).apply {
-                text = formatValue(value)
-                setTextColor(Color.LTGRAY)
-                textSize = 9f
-                minWidth = 90
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                setPadding(0, 0, 8, 0)
-                includeFontPadding = false
+        val ratio = (value.toFloat() / sliderMax.toFloat()).coerceIn(0f, 1f)
+        val initialT = if (logPower > 1) ratio.toDouble().pow(1.0/logPower).toFloat() else ratio
+
+        // Create Custom Slider View
+        sliderView = SliderBox(context).apply {
+            setVisualState(initialT, formatValue(value))
+            // Apply margins to mimic original SeekBar padding so it doesn't look too wide/touch edges
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                setMargins(15, 0, 15, 0)
             }
-            sliderRow.addView(valueDisplay)
         }
+        sliderRow.addView(sliderView)
 
-        val sb = SeekBar(context).apply {
-            max = 1000
-            val ratio = (value.toFloat() / sliderMax.toFloat()).coerceIn(0f, 1f)
-            val t = if (logPower > 1) ratio.toDouble().pow(1.0/logPower).toFloat() else ratio
-            progress = (t * 1000).toInt()
-
-            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
-            setPadding(0,0,0,0); thumbOffset = 0; splitTrack = false
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-
-            setOnTouchListener { v, event ->
-                v.parent.requestDisallowInterceptTouchEvent(true)
-                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                    isMainDragging = true
-                    stopAnimation()
-                    if (activeControl != null && activeControl != this@PropertyControl) closeActiveMenu()
-                }
-                if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
-                    isMainDragging = false
-                    v.parent.requestDisallowInterceptTouchEvent(false)
-                }
-                v.onTouchEvent(event)
-                true
-            }
-
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                    if (fromUser) setProgressFromSlider(p)
-                }
-                override fun onStartTrackingTouch(s: SeekBar?) { isMainDragging = true }
-                override fun onStopTrackingTouch(s: SeekBar?) { isMainDragging = false }
-            })
-        }
-        mainSeekBar = sb
-        sliderRow.addView(sb)
-
+        // --- LFO INDICATOR ---
         if (hasModulation) {
             modIndicator = object : View(context) {
                 private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -1840,9 +1779,9 @@ open class PropertyControl(
             includeFontPadding = false
             setPadding(0, 10, 0, 0)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER; filters = arrayOf(android.text.InputFilter.LengthFilter(6))
-            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE; layoutParams = LinearLayout.LayoutParams(0, -1, 1.5f)
+            imeOptions = EditorInfo.IME_ACTION_DONE; layoutParams = LinearLayout.LayoutParams(0, -1, 1.5f)
             setOnEditorActionListener { v, actionId, _ ->
-                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                if (actionId == EditorInfo.IME_ACTION_DONE) {
                     val num = v.text.toString().toIntOrNull() ?: value; setProgress(num); v.clearFocus()
                     val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
                     imm?.hideSoftInputFromWindow(v.windowToken, 0); (context as? MainActivity)?.hideSystemUI()
@@ -1918,9 +1857,6 @@ open class PropertyControl(
         }
     }
 
-    private fun getMidiButtonBackground(isMapped: Boolean): GradientDrawable {
-        return GradientDrawable().apply { cornerRadius = 10f; if (isMapped) { setColor(Color.parseColor("#004400")); setStroke(2, Color.GREEN) } else { setColor(Color.parseColor("#333333")); setStroke(1, Color.GRAY) } }
-    }
     open fun addExtraControls(panel: LinearLayout, context: Context) {}
     protected fun createNumButton(ctx: Context, txt: String, action: () -> Unit): Button {
         return Button(ctx).apply { text = txt; textSize = 24f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; includeFontPadding = false; setPadding(0, 0, 0, 0)
@@ -1976,6 +1912,118 @@ open class PropertyControl(
         row.addView(sb)
         floatingPanel?.addView(row)
         return sb
+    }
+
+    // --- INNER CLASS: Custom SliderBox View ---
+    private inner class SliderBox(context: Context) : View(context) {
+        private var visualProgress = 0f
+        private var displayText = ""
+        private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#222222")
+            style = Paint.Style.FILL
+        }
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#CCCCCC") // Light Grey Fill
+            style = Paint.Style.FILL
+        }
+        private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.DKGRAY
+            style = Paint.Style.STROKE
+            strokeWidth = 2f
+        }
+        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 32f // Will be adjusted in onSizeChanged if needed
+            typeface = Typeface.DEFAULT_BOLD
+            textAlign = Paint.Align.CENTER
+        }
+        private val cornerRadius = 12f
+
+        fun setVisualState(p: Float, text: String) {
+            visualProgress = p.coerceIn(0f, 1f)
+            displayText = text
+            invalidate()
+        }
+
+        @SuppressLint("ClickableViewAccessibility")
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            parent.requestDisallowInterceptTouchEvent(true)
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    isMainDragging = true
+                    stopAnimation()
+                    if (activeControl != null && activeControl != this@PropertyControl) closeActiveMenu()
+                    updateFromTouch(event.x)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    updateFromTouch(event.x)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    isMainDragging = false
+                    parent.requestDisallowInterceptTouchEvent(false)
+                }
+            }
+            return true
+        }
+
+        private fun updateFromTouch(x: Float) {
+            val w = width.toFloat()
+            if (w <= 0) return
+            val t = (x / w).coerceIn(0f, 1f)
+            // Apply curve logic matching PropertyControl's logic
+            val curvedT = if (logPower > 1) t.toDouble().pow(logPower.toDouble()).toFloat() else t
+            val calcVal = (curvedT * sliderMax).toInt().coerceIn(min, max)
+
+            // Update PropertyControl
+            value = calcVal
+            preciseValue = calcVal.toFloat()
+            onValueChanged?.invoke(calcVal)
+
+            // Update local visual immediately for responsiveness
+            visualProgress = t
+            displayText = formatValue(calcVal)
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val w = width.toFloat()
+            val h = height.toFloat()
+            val box = RectF(0f, 0f, w, h)
+
+            // 1. Background
+            canvas.drawRoundRect(box, cornerRadius, cornerRadius, bgPaint)
+
+            // 2. Fill (Clipped to progress)
+            val fillW = w * visualProgress
+            if (fillW > 0) {
+                canvas.save()
+                canvas.clipRect(0f, 0f, fillW, h)
+                canvas.drawRoundRect(box, cornerRadius, cornerRadius, fillPaint)
+                canvas.restore()
+            }
+
+            // 3. Border
+            canvas.drawRoundRect(box, cornerRadius, cornerRadius, strokePaint)
+
+            // 4. Text - Center coordinates
+            val cx = w / 2f
+            val cy = (h / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f)
+
+            // 5. Draw Text (Double Draw for Contrast)
+            // Pass 1: White text on Dark Background (Right Side)
+            canvas.save()
+            canvas.clipRect(fillW, 0f, w, h)
+            textPaint.color = Color.WHITE
+            canvas.drawText(displayText, cx, cy, textPaint)
+            canvas.restore()
+
+            // Pass 2: Black text on Light Fill (Left Side)
+            canvas.save()
+            canvas.clipRect(0f, 0f, fillW, h)
+            textPaint.color = Color.BLACK
+            canvas.drawText(displayText, cx, cy, textPaint)
+            canvas.restore()
+        }
     }
 }
 
@@ -3297,7 +3345,8 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
             setPadding(10, 0, 10, 5)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            // UPDATED: Set fixed width (850px) to match the preset buttons row below
+            layoutParams = LinearLayout.LayoutParams(850, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
         val transId = "TRANS_TIME"
