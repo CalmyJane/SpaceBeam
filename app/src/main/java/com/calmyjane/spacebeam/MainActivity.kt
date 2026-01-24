@@ -1280,7 +1280,7 @@ open class PropertyControl(
     val showValue: Boolean = false,
     val valueSuffix: String = "",
     val allowSmoothing: Boolean = true,
-    val defaultLocked: Boolean = false, // NEW: Default lock state
+    val defaultLocked: Boolean = false,
     val valueFormatter: ((Int) -> String)? = null,
     private val onValueChanged: ((Int) -> Unit)? = null
 ) {
@@ -1304,7 +1304,7 @@ open class PropertyControl(
     @Volatile var preciseValue: Float = defaultValue.toFloat()
         private set
 
-    // NEW: Locking State
+    // Locking State
     var isLocked: Boolean = defaultLocked
     private var lockButton: Button? = null
 
@@ -1327,6 +1327,12 @@ open class PropertyControl(
     private var animDuration: Float = 0f
     private var animTime: Float = 0f
     private var isAnimating = false
+
+    // --- NEW: Transition Crossfade State ---
+    private var isTransitioning = false
+    private var transitionStartVal: Float = 0f
+    private var transitionTotalTime: Float = 0f
+    private var transitionElapsed: Float = 0f
 
     var modRate: Int = 200
     var modDepth: Int = 0
@@ -1375,10 +1381,16 @@ open class PropertyControl(
 
     fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name, smoothing)
 
-    // UPDATED: Now respects isLocked
     fun restore(s: Snapshot, durationSec: Float) {
         if (isLocked) return
 
+        // 1. "Freeze" the current output value to start the crossfade
+        transitionStartVal = modulatedNormalized
+        transitionTotalTime = durationSec
+        transitionElapsed = 0f
+        isTransitioning = true
+
+        // 2. Start animating parameters to new targets
         animateTo(s.value.toFloat(), durationSec, s.shape)
         if (hasModulation) {
             animateModulation(s.rate.toFloat(), s.depth.toFloat(), durationSec)
@@ -1393,10 +1405,12 @@ open class PropertyControl(
         animDuration = durationSec
         animTime = 0f
         isAnimating = true
+
+        // Update shape immediately. The "jump" caused by this is hidden
+        // by the crossfade logic in update().
         if (newShape != null) {
             try {
-                val targetShape = WaveShape.valueOf(newShape)
-                modShape = targetShape
+                modShape = WaveShape.valueOf(newShape)
                 shapeBtn?.text = modShape.name
             } catch (e: Exception) {}
         }
@@ -1410,16 +1424,14 @@ open class PropertyControl(
     }
 
     fun update(deltaTime: Float) {
-        // 1. Handle Animations (Presets)
+        // 1. Handle Parameter Animations (Base Value, Rate, Depth)
         val t = if (isAnimating && animDuration > 0) (animTime / animDuration).coerceIn(0f, 1f) else 1f
         val ease = 1f - (1f - t).toDouble().pow(3.0).toFloat()
 
         if (isAnimating && animTarget != null) {
             animTime += deltaTime
 
-            // Calculate new value
             val newValueInt: Int
-
             if (animTime >= animDuration) {
                 preciseValue = animTarget!!
                 newValueInt = preciseValue.toInt()
@@ -1434,35 +1446,32 @@ open class PropertyControl(
                 modDepthTarget?.let { preciseModDepth = modDepthStart + (it - modDepthStart) * ease }
             }
 
-            // CRITICAL FIX: If the value changed due to animation, trigger the callback (Updates Axis)
             if (newValueInt != value) {
                 value = newValueInt
                 onValueChanged?.invoke(value)
             }
         }
 
-        // 2. Calculate Smoothing Factor (Base Lerp)
+        // 2. Smoothing Factor
         val baseLerp = if (smoothing == 0 || !allowSmoothing) 1.0f else {
             val s = smoothing / 1000f
             val speed = 10.0f * (1.0f - s) * (1.0f - s) + 0.1f
             (speed * deltaTime).coerceIn(0f, 1f)
         }
 
-        // 3. Smooth Main Value
+        // 3. Smooth Internal Values
         val targetNormalized = (preciseValue / sliderMax.toFloat()).coerceAtLeast(0f)
-
         if (isAnimating || baseLerp >= 1.0f) {
             smoothedNormalized = targetNormalized
         } else {
             smoothedNormalized += (targetNormalized - smoothedNormalized) * baseLerp
         }
 
-        // 4. Smooth LFO Params
         smoothedModRate += (preciseModRate - smoothedModRate) * baseLerp
         smoothedModDepth += (preciseModDepth - smoothedModDepth) * baseLerp
 
-        // 5. Calculate LFO Output
-        var tempOutput = smoothedNormalized
+        // 4. Calculate "Theoretical" New LFO Output (The Destination)
+        var currentCalculatedOutput = smoothedNormalized
 
         if (hasModulation && (smoothedModRate > 1f || smoothedModDepth > 1f)) {
             val baseSpeed = (smoothedModRate / 1000f + 0.05f).toDouble().pow(3.0).toFloat()
@@ -1481,15 +1490,29 @@ open class PropertyControl(
             val depthNorm = (smoothedModDepth / 1000f).toDouble().pow(2.0).toFloat()
 
             if (modMode == ModMode.WRAP) {
-                tempOutput = (smoothedNormalized + (rawWave.toFloat() * depthNorm)) % 1.0f
+                currentCalculatedOutput = (smoothedNormalized + (rawWave.toFloat() * depthNorm)) % 1.0f
             } else {
-                tempOutput = (smoothedNormalized * (1.0f - depthNorm)) + (rawWave.toFloat() * depthNorm)
+                currentCalculatedOutput = (smoothedNormalized * (1.0f - depthNorm)) + (rawWave.toFloat() * depthNorm)
             }
         }
 
-        modulatedNormalized = tempOutput
+        // 5. Apply Crossfade (The Fix for Jumping)
+        if (isTransitioning) {
+            transitionElapsed += deltaTime
+            if (transitionElapsed >= transitionTotalTime) {
+                isTransitioning = false
+                modulatedNormalized = currentCalculatedOutput
+            } else {
+                val progress = (transitionElapsed / transitionTotalTime).coerceIn(0f, 1f)
+                // Use a slight ease-in-out for the crossfade
+                val fadeT = progress * progress * (3.0f - 2.0f * progress)
+                modulatedNormalized = transitionStartVal + (currentCalculatedOutput - transitionStartVal) * fadeT
+            }
+        } else {
+            modulatedNormalized = currentCalculatedOutput
+        }
 
-        // 6. Update Visuals
+        // 6. Visual Updates
         syncUiElements()
         modIndicator?.postInvalidate()
 
@@ -1581,8 +1604,7 @@ open class PropertyControl(
 
     fun reset() {
         stopAnimation()
-        // If locked, do not reset value? Usually Global Reset overrides lock.
-        // Assuming global reset should still reset everything.
+        isTransitioning = false // Stop any crossfades
         setProgress(defaultValue)
 
         val ratio = (defaultValue.toFloat() / sliderMax.toFloat()).coerceAtLeast(0f)
@@ -1604,6 +1626,7 @@ open class PropertyControl(
 
     fun stopAnimation() {
         isAnimating = false; animTarget = null; modRateTarget = null; modDepthTarget = null
+        isTransitioning = false
     }
 
     fun detach() {
@@ -1767,7 +1790,6 @@ open class PropertyControl(
         if (activeControl == this) activeControl = null
     }
 
-    // UPDATED: Now adds Lock Button
     open fun openMenu(context: Context) {
         val activity = context as? MainActivity ?: return
         val rootLayout = activity.overlayHUD
@@ -1785,9 +1807,7 @@ open class PropertyControl(
 
         addExtraControls(floatingPanel!!, context)
 
-        // --- LOCK BUTTON ROW ---
         val titleRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 } }
-
         titleRow.addView(TextView(context).apply { text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
 
         lockButton = Button(context).apply {
@@ -1806,7 +1826,6 @@ open class PropertyControl(
         titleRow.addView(lockButton)
 
         floatingPanel?.addView(titleRow)
-        // -----------------------
 
         val numRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, 140).apply { bottomMargin = 10 } }
         val btnDec = createNumButton(context, "-") { setProgress(value - 1) }
@@ -1959,6 +1978,7 @@ open class PropertyControl(
         return sb
     }
 }
+
 
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
@@ -4330,13 +4350,18 @@ class MainActivity : AppCompatActivity() {
     private fun initDefaultPresets() {
         // Robust Helper Function
         fun p(ax: Int, vararg overrides: Any): Preset {
-            val baseSnapshots = controls.associate { it.id to it.getSnapshot() }.toMutableMap()
-
-            // Default M_ANGLE to 0 if not specified
-            if (!overrides.contains("M_ANGLE")) {
-                // FIXED: Default smoothing to 500
-                baseSnapshots["M_ANGLE"] = PropertyControl.Snapshot(0, false, 0, 0, "SINE", 500)
-            }
+            // FIXED: Use defaultValue instead of current snapshot to ensure resets are clean
+            // FIXED: Default LFO settings (Rate 200, Depth 0) so modulation is off by default unless overridden
+            val baseSnapshots = controls.associate {
+                it.id to PropertyControl.Snapshot(
+                    value = it.defaultValue,
+                    active = false,
+                    rate = 200,
+                    depth = 0,
+                    shape = "SINE",
+                    smoothing = 500
+                )
+            }.toMutableMap()
 
             var i = 0
             while (i < overrides.size) {
@@ -4357,12 +4382,11 @@ class MainActivity : AppCompatActivity() {
                         val isValid = try { PropertyControl.WaveShape.valueOf(potentialShape); true } catch (e: Exception) { false }
                         if (isValid) { shape = potentialShape; step = 5 }
                     }
-                    // FIXED: Default smoothing to 500 (was 0)
+                    // Default smoothing to 500
                     baseSnapshots[key] = PropertyControl.Snapshot(value, true, rate, depth, shape, 500)
                     i += step
                 } else {
-                    // Static value
-                    // FIXED: Default smoothing to 500 (was 0)
+                    // Static value, default smoothing to 500
                     baseSnapshots[key] = PropertyControl.Snapshot(value, false, 0, 0, "SINE", 500)
                     i += 2
                 }
@@ -4407,7 +4431,6 @@ class MainActivity : AppCompatActivity() {
                             snapObj.optInt("r", 0),
                             snapObj.optInt("d", 0),
                             snapObj.optString("shape", "SINE"),
-                            // FIXED: Use 500 as fallback if 's' is missing in old JSON
                             snapObj.optInt("s", 500)
                         )
                     }
