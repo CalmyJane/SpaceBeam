@@ -3140,6 +3140,7 @@ class MainActivity : AppCompatActivity() {
 
         createGroup("3D")
         addControl(PropertyControl("3D_MIX", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("UTWIRL", "TWIRLS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
         addControl(PropertyControl("S_SHAPE", "SHAPE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
         addControl(PropertyControl("S_FOV", "FISHEYE", defaultValue = 500, outMin=0.2f, outMax=1.5f, hasModulation = true))
         addControl(PropertyControl("S_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
@@ -4850,17 +4851,34 @@ class MainActivity : AppCompatActivity() {
             }""".trimIndent()
             copy2dProgram = createProgram(vSrc, fSrcCopy2d)
 
-            // 3. MIXER SHADER
             val fSrcKaleido = """
             precision highp float; varying vec2 v; 
             uniform sampler2D uTex[8];
             uniform float uMix[8];
             uniform int uActiveCount;
             uniform float uMR, uCR, uCZ, uA, uMZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB, uWarp;
-            uniform float uBrit, uTHueStr, uTHuePos, uTWaveStr, uTWavePos;
+            uniform float uBrit, uTHueStr, uTHuePos, uTWaveStr, uTWavePos, uTwirl;
             uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
             uniform float uCurve, uTwist, uFlux, uSShape, uSFov, uScroll, uMode;
+            
+            #define PI 3.14159265
+            
+            // --- Helper Functions for 3D Twirl ---
+            mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+            mat3 lookAt(vec3 dir) {
+                vec3 up = vec3(0.0, 1.0, 0.0);
+                vec3 rt = normalize(cross(dir, up));
+                return mat3(rt, cross(rt, dir), dir);
+            }
+            float gyroid(vec3 p) { return dot(cos(p), sin(p.zxy)) + 1.0; }
+            float map(vec3 p) {
+                float d1 = gyroid(p);
+                float d2 = gyroid(p - vec3(0.0, 0.0, PI));
+                return min(d1, d2);
+            }
+            
             vec3 hueShift(vec3 color, float hue) { const vec3 k = vec3(0.57735, 0.57735, 0.57735); float cosAngle = cos(hue); return vec3(color * cosAngle + cross(k, color) * sin(hue) + k * dot(k, color) * (1.0 - cosAngle)); }
+            
             vec3 sampleSourceByIndex(int index, vec2 uv) {
                 if (index == 0) return texture2D(uTex[0], uv).rgb;
                 if (index == 1) return texture2D(uTex[1], uv).rgb;
@@ -4872,31 +4890,81 @@ class MainActivity : AppCompatActivity() {
                 if (index == 7) return texture2D(uTex[7], uv).rgb;
                 return vec3(0.0);
             }
+
             void main() {
                 vec3 finalColor = vec3(0.0);
                 float a1 = -uMR * 0.01745329; float cosA1 = cos(a1); float sinA1 = sin(a1);
                 float modeBlend = smoothstep(0.0, 1.0, uMode);
                 vec2 effectiveTilt = mix(uMTilt, vec2(0.0), modeBlend);
                 vec2 effectiveTrans = uMT + mix(vec2(0.0), uMTilt * 2.0, modeBlend);
+                
                 for(int i=0; i<3; i++) {
                     float mOff = (i==0) ? uMRGB : (i==2) ? -uMRGB : 0.0;
                     vec2 uv = v - 0.5;
-                    float zM = 1.0 + (uv.x * effectiveTilt.x) + (uv.y * effectiveTilt.y); uv /= max(zM, 0.1); uv.x *= uA; uv.x += mOff;
+                    
+                    // --- ORIGINAL SHADER LOGIC RESTORED ---
+                    float zM = 1.0 + (uv.x * effectiveTilt.x) + (uv.y * effectiveTilt.y); 
+                    uv /= max(zM, 0.1); 
+                    uv.x *= uA; 
+                    uv.x += mOff;
+                    
+                    // The standard camera transform (No extra offsets added here)
                     uv = (uv + effectiveTrans) * uMZ * 4.0;
                     uv = vec2(uv.x * cosA1 - uv.y * sinA1, uv.x * sinA1 + uv.y * cosA1);
+                    
                     if(uAx > 1.1) {
                         float r = length(uv); float slice = 6.2831853 / uAx; float angle = atan(uv.y, uv.x);
                         float a = mod(angle, slice); if(mod(uAx, 2.0) < 0.1) a = abs(a - slice * 0.5);
                         uv = vec2(cos(a), sin(a)) * r;
                     }
+                    
                     float rCircle = length(uv); float rBox = max(abs(uv.x), abs(uv.y)); float dist = mix(rCircle, rBox, uSShape);
                     float angle = atan(uv.y, uv.x); dist += sin(angle * 4.0 + dist * 10.0) * uFlux * dist; float safeDist = max(dist, 0.01);
                     float projection = (uSFov * 0.8 + 0.2) / safeDist;
                     vec2 tunnelUV; tunnelUV.x = (angle + (1.0/safeDist) * uTwist) / 3.14159; tunnelUV.y = projection;
                     if(abs(uCurve - 1.0) > 0.01) tunnelUV *= 1.0 + (uCurve - 1.0) * (1.0 - safeDist);
+                    
                     vec2 flatUV = uv; flatUV.x /= uA;
                     vec2 mixedUV = mix(flatUV, tunnelUV * 0.8, modeBlend);
+                    
+                    // --- TWIRL INJECTION (ONLY affects mixedUV if uTwirl > 0) ---
+                    float freck = 1.0;
+                    if (uTwirl > 0.01) {
+                        float tTime = uScroll * 4.0;
+                        
+                        // Use screen coordinates for ray direction (corrected for aspect)
+                        vec2 screenUV = v - 0.5;
+                        vec3 ro = vec3(PI/2.0, 0.0, -tTime);
+                        vec3 rd = normalize(vec3(screenUV.x * uA, screenUV.y, -0.6));
+                        
+                        // Apply Camera Path Swerve
+                        rd.xy = rot(sin(tTime * 0.4)) * rd.xy;
+                        vec3 ta = vec3(cos(tTime * 0.8), sin(tTime * 0.8), 4.0);
+                        rd = lookAt(normalize(ta)) * rd;
+                        
+                        float t = 0.0;
+                        for(int j=0; j<35; j++) {
+                            float d = map(ro + rd * t);
+                            if(abs(d) < 0.005 || t > 20.0) break;
+                            t += d;
+                        }
+                        vec3 hit = ro + rd * t;
+                        
+                        // PINNED TEXTURE LOGIC:
+                        // 1. Calculate UV based on World Hit Position
+                        float hitAngle = atan(hit.y, hit.x);
+                        
+                        // 2. Subtract global uScroll to neutralize the addition below
+                        vec2 worldUV = (vec2(hit.z * 0.1, hitAngle / PI) * 2.0) - vec2(0.0, uScroll);
+                        
+                        // 3. Freckle Detail
+                        freck = max(0.6, step(2.5, dot(cos(hit * 23.0), vec3(1.0))));
+                        
+                        mixedUV = mix(mixedUV, worldUV, uTwirl);
+                    }
+                    
                     mixedUV.y += uScroll;
+                    
                     vec2 centered = abs(mod(mixedUV + 1.0, 2.0) - 1.0) - 0.5;
                     float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y); centered /= max(z, 0.1);
                     centered *= uCZ;
@@ -4914,13 +4982,17 @@ class MainActivity : AppCompatActivity() {
                             pixelAccum += sampleSourceByIndex(k, finalUV) * uMix[k];
                         }
                     }
+                    
                     vec3 smp = clamp(pixelAccum, 0.0, 1.0);
+                    if (uTwirl > 0.01) smp *= freck; // Apply freckles only in Twirl mode
+                    
                     if (uMode > 0.01) {
                         if (uTHueStr > 0.01) { float hueArg = (mixedUV.y * 0.5) + uTHuePos; vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (hueArg + vec3(0.0, 0.33, 0.67))); smp = mix(smp, smp * rainbow * 2.0, uTHueStr * uMode); }
                         if (uTWaveStr > 0.01) { float waveDomain = mixedUV.y - (uTWavePos * 10.0); float distFromWave = abs(fract(waveDomain) - 0.5); float width = 0.15 + (uTWaveStr * 0.2); float wavePulse = smoothstep(width, 0.0, distFromWave); wavePulse = wavePulse * wavePulse; float intensity = (uTWaveStr * uTWaveStr) * 0.8; vec3 waveColor = vec3(0.5, 0.8, 1.0) * wavePulse * intensity; smp += waveColor; }
                     }
                     if(i==0) finalColor.r = smp.r; else if(i==1) finalColor.g = smp.g; else finalColor.b = smp.b;
                 }
+                
                 finalColor = abs(finalColor - uSol);
                 if(uHue > 0.01) finalColor = hueShift(finalColor, uHue * 6.28318);
                 finalColor = (finalColor - 0.5) * uC + 0.5;
@@ -5080,6 +5152,8 @@ class MainActivity : AppCompatActivity() {
             safeUni("uCurve", ctx.controlsMap["CURVE"]?.computedValue ?: 1.0f)
             safeUni("uTwist", ctx.controlsMap["TWIST"]?.computedValue ?: 0f)
             safeUni("uFlux", ctx.controlsMap["FLUX"]?.computedValue ?: 0f)
+
+            safeUni("uTwirl", ctx.controlsMap["UTWIRL"]?.computedValue ?: 0f)
 
             val vCZoom = ctx.controlsMap["C_ZOOM"]?.computedValue ?: 1f
             val vCAngle = ctx.controlsMap["C_ANGLE"]?.computedValue ?: 0f
