@@ -1346,6 +1346,8 @@ open class PropertyControl(
     var preciseModRate: Float = 200f
     var preciseModDepth: Float = 0f
     var lfoPhase: Double = 0.0
+    private var noiseValA: Float = Math.random().toFloat()
+    private var noiseValB: Float = Math.random().toFloat()
 
     private var modSnapshotValue: Float = 0f
     private var modRateStart = 0f
@@ -1480,15 +1482,32 @@ open class PropertyControl(
         if (hasModulation && (smoothedModRate > 1f || smoothedModDepth > 1f)) {
             val baseSpeed = (smoothedModRate / 1000f + 0.05f).toDouble().pow(3.0).toFloat()
             lfoPhase += baseSpeed * deltaTime * 2.0 * Math.PI
-            if (lfoPhase > 2.0 * Math.PI) lfoPhase -= 2.0 * Math.PI
+
+            // --- NEW: Handle Phase Wrapping & Random Generation ---
+            if (lfoPhase > 2.0 * Math.PI) {
+                lfoPhase -= 2.0 * Math.PI
+                // Shift the random targets: Target becomes Start, generate new Target
+                noiseValA = noiseValB
+                noiseValB = Math.random().toFloat()
+            }
 
             val rawWave: Double = when (modShape) {
                 WaveShape.SINE -> sin(lfoPhase) * 0.5 + 0.5
                 WaveShape.TRIANGLE -> { val p = (lfoPhase / (2.0 * Math.PI)); if (p < 0.5) p * 2.0 else 2.0 - (p * 2.0) }
                 WaveShape.RAMP -> (lfoPhase / (2.0 * Math.PI)) % 1.0
                 WaveShape.WOBBLE_SINE -> { val w = sin(lfoPhase + sin(lfoPhase)); w * 0.5 + 0.5 }
-                WaveShape.RANDOM_SMOOTH -> (sin(lfoPhase) * 0.5 + 0.5 + sin(lfoPhase * 2.3) * 0.2) / 1.4
-                WaveShape.RANDOM_STEP -> Math.random()
+
+                // NEW TRUE SMOOTH RANDOM
+                // Interpolates from A to B using Cosine interpolation
+                WaveShape.RANDOM_SMOOTH -> {
+                    val progress = (lfoPhase / (2.0 * Math.PI)).toFloat() // 0.0 to 1.0
+                    val smoothT = (1.0 - cos(progress * Math.PI)) * 0.5 // Ease in/out
+                    (noiseValA * (1.0 - smoothT) + noiseValB * smoothT)
+                }
+
+                // NEW SAMPLE & HOLD (Step Random)
+                // Just holds value A until the phase wraps
+                WaveShape.RANDOM_STEP -> noiseValA.toDouble()
             }
 
             val depthNorm = (smoothedModDepth / 1000f).toDouble().pow(2.0).toFloat()
@@ -3129,7 +3148,6 @@ class MainActivity : AppCompatActivity() {
         if (!controlsMap.containsKey("CAM_MAIN")) {
             val camCtrl = CameraSourceControl(this)
             addControl(camCtrl)
-            // Register source in renderer
             renderer.addSource(SourceType.CAMERA, "CAM_MAIN")
         } else {
             addControl(controlsMap["CAM_MAIN"]!!)
@@ -3141,11 +3159,11 @@ class MainActivity : AppCompatActivity() {
         // 3. Add "+" button
         val addBtn = Button(this).apply {
             text = "+"
-            textSize = 24f // Slightly larger for better visibility
+            textSize = 24f
             setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER // Fixes vertical alignment
-            includeFontPadding = false // Fixes clipping at the bottom
-            setPadding(0, 0, 0, 0) // Removes default button padding
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setPadding(0, 0, 0, 0)
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#333333"))
                 cornerRadius = 15f
@@ -3165,9 +3183,9 @@ class MainActivity : AppCompatActivity() {
         setupCameraOrientationControls(currentGroupContent!!)
         setupGeometrySpecifics(currentGroupContent!!)
 
-        createGroup("3D")
-        addControl(PropertyControl("3D_MIX", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("UTWIRL", "TWIRLS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        createGroup("3D TUNNEL")
+        addControl(PropertyControl("3D_MIX", "TUNNEL", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        // UTWIRL REMOVED FROM HERE
         addControl(PropertyControl("S_SHAPE", "SHAPE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
         addControl(PropertyControl("S_FOV", "FISHEYE", defaultValue = 500, outMin=0.2f, outMax=1.5f, hasModulation = true))
         addControl(PropertyControl("S_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
@@ -3175,6 +3193,11 @@ class MainActivity : AppCompatActivity() {
         addControl(PropertyControl("T_HUE_POS", "RAINBOW POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
         addControl(PropertyControl("T_WAVE_STR", "WAVE STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
         addControl(PropertyControl("T_WAVE_POS", "WAVE POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
+
+        // NEW SWIRL GROUP
+        createGroup("SWIRL")
+        addControl(PropertyControl("UTWIRL", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+        addControl(PropertyControl("S_WIDE", "WIDENESS", defaultValue = 500, outMin=0.0f, outMax=2.0f, hasModulation = true))
 
         createGroup("MORPH (Careful)")
         addControl(PropertyControl("CURVE", "CURVE", defaultValue = 250, outMin=0.0f, outMax=4.0f, hasModulation = true))
@@ -4892,10 +4915,11 @@ class MainActivity : AppCompatActivity() {
             uniform float uBrit, uTHueStr, uTHuePos, uTWaveStr, uTWavePos, uTwirl;
             uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
             uniform float uCurve, uTwist, uFlux, uSShape, uSFov, uScroll, uMode;
+            // NEW UNIFORM
+            uniform float uSwirlWide;
             
             #define PI 3.14159265
             
-            // --- Helper Functions for 3D Twirl ---
             mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
             mat3 lookAt(vec3 dir) {
                 vec3 up = vec3(0.0, 1.0, 0.0);
@@ -4934,13 +4958,11 @@ class MainActivity : AppCompatActivity() {
                     float mOff = (i==0) ? uMRGB : (i==2) ? -uMRGB : 0.0;
                     vec2 uv = v - 0.5;
                     
-                    // --- ORIGINAL SHADER LOGIC RESTORED ---
                     float zM = 1.0 + (uv.x * effectiveTilt.x) + (uv.y * effectiveTilt.y); 
                     uv /= max(zM, 0.1); 
                     uv.x *= uA; 
                     uv.x += mOff;
                     
-                    // The standard camera transform (No extra offsets added here)
                     uv = (uv + effectiveTrans) * uMZ * 4.0;
                     uv = vec2(uv.x * cosA1 - uv.y * sinA1, uv.x * sinA1 + uv.y * cosA1);
                     
@@ -4957,20 +4979,23 @@ class MainActivity : AppCompatActivity() {
                     if(abs(uCurve - 1.0) > 0.01) tunnelUV *= 1.0 + (uCurve - 1.0) * (1.0 - safeDist);
                     
                     vec2 flatUV = uv; flatUV.x /= uA;
+                    
+                    // Base UV is a blend between Plane and Tunnel (3D_MIX)
                     vec2 mixedUV = mix(flatUV, tunnelUV * 0.8, modeBlend);
                     
-                    // --- TWIRL INJECTION (ONLY affects mixedUV if uTwirl > 0) ---
-                    float freck = 1.0;
+                    // --- SWIRL LOGIC (Merged) ---
+                    // Only perform expensive raymarch if Swirl Strength > 0
                     if (uTwirl > 0.01) {
                         float tTime = uScroll * 4.0;
                         
-                        // Use screen coordinates for ray direction (corrected for aspect)
                         vec2 screenUV = v - 0.5;
                         vec3 ro = vec3(PI/2.0, 0.0, -tTime);
                         vec3 rd = normalize(vec3(screenUV.x * uA, screenUV.y, -0.6));
                         
-                        // Apply Camera Path Swerve
-                        rd.xy = rot(sin(tTime * 0.4)) * rd.xy;
+                        // Apply Camera Path Swerve scaled by uSwirlWide
+                        // "Wideness" controls magnitude of rotation
+                        rd.xy = rot(sin(tTime * 0.4) * uSwirlWide) * rd.xy;
+                        
                         vec3 ta = vec3(cos(tTime * 0.8), sin(tTime * 0.8), 4.0);
                         rd = lookAt(normalize(ta)) * rd;
                         
@@ -4982,16 +5007,12 @@ class MainActivity : AppCompatActivity() {
                         }
                         vec3 hit = ro + rd * t;
                         
-                        // PINNED TEXTURE LOGIC:
-                        // 1. Calculate UV based on World Hit Position
                         float hitAngle = atan(hit.y, hit.x);
-                        
-                        // 2. Subtract global uScroll to neutralize the addition below
                         vec2 worldUV = (vec2(hit.z * 0.1, hitAngle / PI) * 2.0) - vec2(0.0, uScroll);
                         
-                        // 3. Freckle Detail
-                        freck = max(0.6, step(2.5, dot(cos(hit * 23.0), vec3(1.0))));
+                        // Removed Freckles/Dots Logic here
                         
+                        // Blend the Swirl result into the existing UVs based on UTWIRL strength
                         mixedUV = mix(mixedUV, worldUV, uTwirl);
                     }
                     
@@ -5016,7 +5037,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     
                     vec3 smp = clamp(pixelAccum, 0.0, 1.0);
-                    if (uTwirl > 0.01) smp *= freck; // Apply freckles only in Twirl mode
+                    // Removed Freckle application
                     
                     if (uMode > 0.01) {
                         if (uTHueStr > 0.01) { float hueArg = (mixedUV.y * 0.5) + uTHuePos; vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (hueArg + vec3(0.0, 0.33, 0.67))); smp = mix(smp, smp * rainbow * 2.0, uTHueStr * uMode); }
@@ -5033,6 +5054,7 @@ class MainActivity : AppCompatActivity() {
                 finalColor *= uBrit;
                 gl_FragColor = vec4(finalColor, 1.0);
             }""".trimIndent()
+
 
             kaleidoProgram = createProgram(vSrc, fSrcKaleido)
             val activeUniforms = IntArray(1); GLES20.glGetProgramiv(kaleidoProgram, GLES20.GL_ACTIVE_UNIFORMS, activeUniforms, 0)
@@ -5117,13 +5139,23 @@ class MainActivity : AppCompatActivity() {
                 val rawSpeed = speedCtrl.computedValue
                 val sign = sign(rawSpeed)
                 val curvedSpeed = sign * (abs(rawSpeed)).pow(2.2f)
+
+                // Add speed to accumulator
                 scrollAccum += curvedSpeed * d * 0.6f
+
+                // This prevents the image from stopping "halfway" through a cycle.
                 if (abs(rawSpeed) < 0.05f) {
                     val nearestCenter = round(scrollAccum)
                     val distToCenter = nearestCenter - scrollAccum
+                    // Smoothly interpolate towards the integer (origin)
                     scrollAccum += distToCenter * d * 3.0f
                 }
-                if (abs(scrollAccum) > 1000.0f) scrollAccum %= 2.0f
+
+                // Keep numbers sane to prevent float precision issues over long run times
+                // Modulo 2.0 keeps the phase correct for the shader logic
+                if (abs(scrollAccum) > 1000.0f) {
+                    scrollAccum %= 2.0f
+                }
             }
         }
 
@@ -5184,6 +5216,7 @@ class MainActivity : AppCompatActivity() {
             safeUni("uCurve", ctx.controlsMap["CURVE"]?.computedValue ?: 1.0f)
             safeUni("uTwist", ctx.controlsMap["TWIST"]?.computedValue ?: 0f)
             safeUni("uFlux", ctx.controlsMap["FLUX"]?.computedValue ?: 0f)
+            safeUni("uSwirlWide", ctx.controlsMap["S_WIDE"]?.computedValue ?: 1.0f)
 
             safeUni("uTwirl", ctx.controlsMap["UTWIRL"]?.computedValue ?: 0f)
 
