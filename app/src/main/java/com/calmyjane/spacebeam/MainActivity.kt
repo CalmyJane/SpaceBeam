@@ -1370,6 +1370,13 @@ open class PropertyControl(
     private var isRateDragging = false
     private var isDepthDragging = false
 
+    // --- OPTIMIZATION FLAGS ---
+    // Prevent flooding the UI thread with redundant posts
+    private var lastDisplayedValue: Int = -Int.MAX_VALUE
+    private var lastSyncedModRate: Int = -1
+    private var lastSyncedModDepth: Int = -1
+    private var lastSyncedSmoothing: Int = -1
+
     init {
         val ratio = (defaultValue.toFloat() / sliderMax.toFloat()).coerceAtLeast(0f)
         smoothedNormalized = ratio
@@ -1521,23 +1528,39 @@ open class PropertyControl(
     }
 
     private fun syncUiElements() {
+        // SliderBox uses postInvalidate(), safe to call frequently
         if (sliderView != null) {
             val visualT = if (logPower > 1) smoothedNormalized.toDouble().pow(1.0/logPower).toFloat() else smoothedNormalized
             sliderView!!.setVisualState(visualT, formatValue(value))
         }
 
+        // Dirty Checks: Only post to UI thread if values actually changed visually
         if (activeControl == this) {
-            baseValueInput?.post {
-                if (baseValueInput?.hasFocus() == false) baseValueInput?.setText(value.toString())
+            // Text Input
+            if (baseValueInput?.hasFocus() == false) {
+                // Only update text input if drastically different (user is not typing)
+                // Ignored here to prevent cursor jumping, logic handled in openMenu
             }
-            modPanelSpeedSeekBar?.post {
-                if (!isRateDragging) modPanelSpeedSeekBar?.progress = smoothedModRate.toInt()
+
+            // SeekBars - Only post if value changed
+            val curRate = smoothedModRate.toInt()
+            if (curRate != lastSyncedModRate && !isRateDragging) {
+                lastSyncedModRate = curRate
+                modPanelSpeedSeekBar?.post { modPanelSpeedSeekBar?.progress = curRate }
             }
-            modPanelDepthSeekBar?.post {
-                if (!isDepthDragging) modPanelDepthSeekBar?.progress = smoothedModDepth.toInt()
+
+            val curDepth = smoothedModDepth.toInt()
+            if (curDepth != lastSyncedModDepth && !isDepthDragging) {
+                lastSyncedModDepth = curDepth
+                modPanelDepthSeekBar?.post { modPanelDepthSeekBar?.progress = curDepth }
             }
-            floatingPanel?.findViewWithTag<SeekBar>("SMOOTH_SEEK")?.let {
-                if (!it.isPressed) it.progress = smoothing
+
+            val curSmooth = smoothing
+            if (curSmooth != lastSyncedSmoothing) {
+                lastSyncedSmoothing = curSmooth
+                floatingPanel?.findViewWithTag<SeekBar>("SMOOTH_SEEK")?.let {
+                    if (!it.isPressed) it.post { it.progress = curSmooth }
+                }
             }
         }
     }
@@ -1547,8 +1570,12 @@ open class PropertyControl(
     }
 
     private fun updateLiveValueUI(v: Int) {
+        // Dirty Check: Only Post if text value changed
         if (activeControl == this && liveValueDisplay != null) {
-            liveValueDisplay?.post { liveValueDisplay?.text = formatValue(v) }
+            if (v != lastDisplayedValue) {
+                lastDisplayedValue = v
+                liveValueDisplay?.post { liveValueDisplay?.text = formatValue(v) }
+            }
         }
     }
 
@@ -1711,7 +1738,7 @@ open class PropertyControl(
         parent.addView(container)
     }
 
-    private fun updateIndicatorVisuals() { modIndicator?.invalidate() }
+    private fun updateIndicatorVisuals() { modIndicator?.postInvalidate() }
 
     fun toggleMenu(ctx: Context? = currentContext) {
         if (activeControl == this) closeMenu() else { activeControl?.closeMenu(); if (ctx != null) openMenu(ctx) }
@@ -1942,7 +1969,8 @@ open class PropertyControl(
         fun setVisualState(p: Float, text: String) {
             visualProgress = p.coerceIn(0f, 1f)
             displayText = text
-            invalidate()
+            // FIX: Use postInvalidate to be thread-safe from GL Thread
+            postInvalidate()
         }
 
         @SuppressLint("ClickableViewAccessibility")
@@ -2608,21 +2636,21 @@ class MainActivity : AppCompatActivity() {
                     val dx = abs(event.x - touchDownX)
                     val dy = abs(event.y - touchDownY)
 
-                    // If moved beyond tolerance, invalidate the "tap"
                     if (dx > CLICK_DRAG_TOLERANCE || dy > CLICK_DRAG_TOLERANCE) {
                         isDraggingOrGesturing = true
                     }
                 }
-                MotionEvent.ACTION_UP -> {
-                    // Only toggle if it wasn't a drag or gesture
-                    if (!isDraggingOrGesturing) {
+                // MODIFY ACTION_UP to include ACTION_CANCEL
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    // Only toggle if it wasn't a drag or gesture (and it's a clean UP)
+                    if (event.actionMasked == MotionEvent.ACTION_UP && !isDraggingOrGesturing) {
                         if (PropertyControl.activeControl != null) {
                             PropertyControl.closeActiveMenu()
                         } else {
                             toggleHud()
                         }
                     }
-                    // Reset flags
+                    // Always reset flags on UP or CANCEL
                     isDraggingOrGesturing = false
                 }
             }
@@ -3050,7 +3078,6 @@ class MainActivity : AppCompatActivity() {
             // Adjust bottom padding to ensure the last item isn't cut off by the rounded corners
             setPadding(25, 20, 10, if (isPortrait) 60 else 240)
             layoutDirection = View.LAYOUT_DIRECTION_LTR
-            layoutTransition = LayoutTransition().apply { enableTransitionType(LayoutTransition.CHANGING) }
         }
         parameterPanel.addView(menuLayout)
 
@@ -3688,7 +3715,12 @@ class MainActivity : AppCompatActivity() {
         return BitmapDrawable(resources, b)
     }
 
-    private fun createFlashView() = View(this).apply { setBackgroundColor(Color.WHITE); alpha = 0f; layoutParams = FrameLayout.LayoutParams(-1, -1) }
+    private fun createFlashView() = View(this).apply { setBackgroundColor(Color.WHITE)
+        alpha = 0f
+        layoutParams = FrameLayout.LayoutParams(-1, -1)
+        isClickable = false
+        isFocusable = false
+    }
     private fun createLogoView() = ImageView(this).apply { setImageDrawable(createLogoDrawable()); alpha = 0.4f; layoutParams = FrameLayout.LayoutParams(180, 180).apply { gravity = Gravity.TOP or Gravity.START; topMargin = 40; leftMargin = 40 } }
     private fun createMenuUtilityButton() = Button(this).apply {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
@@ -3716,7 +3748,7 @@ class MainActivity : AppCompatActivity() {
         val effectivelyOpen = if (expandedGroups.contains(title)) true else startOpen
         if (effectivelyOpen) expandedGroups.add(title)
 
-        val groupContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8 }; layoutTransition = LayoutTransition() }
+        val groupContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8 } }
         val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(15, 12, 15, 12); background = GradientDrawable().apply { setColor(Color.parseColor("#33FFFFFF")); cornerRadius = 8f; setStroke(1, Color.parseColor("#44FFFFFF")) } }
         val arrow = TextView(this).apply { text = "▶"; textSize = 9f; setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(50, -2); rotation = if (effectivelyOpen) 90f else 0f }
         val label = TextView(this).apply { text = title; textSize = 10f; setTypeface(null, Typeface.BOLD); setTextColor(Color.WHITE); letterSpacing = 0.15f }
