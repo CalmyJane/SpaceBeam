@@ -63,7 +63,6 @@ import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.common.VideoSize
 import androidx.media3.common.Player
 import android.util.Log
-import android.animation.LayoutTransition
 import android.widget.LinearLayout
 import android.view.Gravity
 import android.graphics.Color
@@ -87,8 +86,6 @@ import org.json.JSONArray
 import android.annotation.SuppressLint
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
-import android.widget.*
-import kotlin.math.*
 
 class MidiHelper(private val activity: MainActivity) {
     // Standard BLE MIDI UUIDs
@@ -2077,6 +2074,7 @@ open class PropertyControl(
 
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
+    val effectChain = EffectChain()
     private lateinit var glView: GLSurfaceView
     private val sourceControls = mutableListOf<PropertyControl>()
     private var mixerGroupContainer: LinearLayout? = null
@@ -2092,11 +2090,7 @@ class MainActivity : AppCompatActivity() {
     val controlsMap = java.util.concurrent.ConcurrentHashMap<String, PropertyControl>()
     private val presetButtons = mutableMapOf<Int, Button>()
     private lateinit var menuBtn: Button
-    // private var currentAnimator: ValueAnimator? = null // REMOVED
     private var activePreset: Int = -1
-    private lateinit var flipXBtn: ImageButton
-    private lateinit var flipYBtn: ImageButton
-    private lateinit var rot180Btn: ImageButton
 
     private var isDraggingOrGesturing = false
     private var touchDownX = 0f
@@ -2203,6 +2197,546 @@ class MainActivity : AppCompatActivity() {
     private var presetAnimators = mutableMapOf<Int, ValueAnimator>()
     private val presetDrawables = mutableMapOf<Int, ProgressButtonDrawable>()
 
+    // --- 1. SHARED GL UTILITIES (Renamed to avoid conflict) ---
+    object ShaderHelper {
+        var pBuf: FloatBuffer = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
+            put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)).position(0)
+        }
+        var tBuf: FloatBuffer = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
+            put(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)).position(0)
+        }
+
+        fun compile(type: Int, src: String): Int {
+            val shader = GLES20.glCreateShader(type)
+            GLES20.glShaderSource(shader, src)
+            GLES20.glCompileShader(shader)
+            val compiled = IntArray(1)
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
+            if (compiled[0] == 0) {
+                Log.e("GL", "Compile Failed: ${GLES20.glGetShaderInfoLog(shader)}")
+                GLES20.glDeleteShader(shader)
+                return 0
+            }
+            return shader
+        }
+
+        fun createProgram(vSrc: String, fSrc: String): Int {
+            val v = compile(GLES20.GL_VERTEX_SHADER, vSrc)
+            val f = compile(GLES20.GL_FRAGMENT_SHADER, fSrc)
+            if (v == 0 || f == 0) return 0
+            val p = GLES20.glCreateProgram()
+            GLES20.glAttachShader(p, v); GLES20.glAttachShader(p, f); GLES20.glLinkProgram(p)
+            val linkStatus = IntArray(1)
+            GLES20.glGetProgramiv(p, GLES20.GL_LINK_STATUS, linkStatus, 0)
+            if (linkStatus[0] == 0) {
+                Log.e("GL", "Link Failed: ${GLES20.glGetProgramInfoLog(p)}")
+                GLES20.glDeleteProgram(p)
+                return 0
+            }
+            return p
+        }
+
+        fun bindQuad(prog: Int) {
+            val pL = GLES20.glGetAttribLocation(prog, "p"); val tL = GLES20.glGetAttribLocation(prog, "t")
+            GLES20.glEnableVertexAttribArray(pL); GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf)
+            GLES20.glEnableVertexAttribArray(tL); GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
+        }
+    }
+
+    class EffectChain {
+        val effects = mutableListOf<MainActivity.ShaderEffect>()
+        private var fboA = 0
+        private var texA = 0
+        private var fboB = 0
+        private var texB = 0
+        private var width = 0
+        private var height = 0
+        private var isReady = false
+
+        fun init(w: Int, h: Int) {
+            if (isReady && width == w && height == h) return
+            width = w; height = h
+            release() // Re-create if size changed
+
+            fun createFBO(): Pair<Int, Int> {
+                val f = IntArray(1); val t = IntArray(1)
+                GLES20.glGenFramebuffers(1, f, 0); GLES20.glGenTextures(1, t, 0)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, t[0])
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, f[0])
+                GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, t[0], 0)
+                return Pair(f[0], t[0])
+            }
+
+            val a = createFBO(); fboA = a.first; texA = a.second
+            val b = createFBO(); fboB = b.first; texB = b.second
+            isReady = true
+            effects.forEach { it.init() }
+        }
+
+        fun process(renderer: MainActivity.KaleidoscopeRenderer): Int {
+            if (!isReady || effects.isEmpty()) return 0
+
+            // 1. First pass: Mixer (Special case, takes no single input texture, uses source list)
+            // We render the first effect into FBO A
+            effects[0].render(0, fboA, width, height)
+
+            var currentInput = texA
+            var currentOutputFbo = fboB
+            var currentOutputTex = texB
+
+            // 2. Subsequent passes
+            for (i in 1 until effects.size) {
+                val effect = effects[i]
+                if (effect.active) {
+                    effect.render(currentInput, currentOutputFbo, width, height)
+
+                    // Output becomes next Input
+                    currentInput = currentOutputTex
+
+                    // Swap Ping-Pong
+                    if (currentOutputFbo == fboA) {
+                        currentOutputFbo = fboB; currentOutputTex = texB
+                    } else {
+                        currentOutputFbo = fboA; currentOutputTex = texA
+                    }
+                }
+            }
+            return currentInput
+        }
+
+        fun release() {
+            if (fboA != 0) { val f = IntArray(2){ if(it==0) fboA else fboB }; val t = IntArray(2){ if(it==0) texA else texB }; GLES20.glDeleteFramebuffers(2, f, 0); GLES20.glDeleteTextures(2, t, 0) }
+            fboA = 0; isReady = false
+            effects.forEach { it.release() }
+        }
+    }
+
+    // SHADERS
+    class MixerEffect(val activity: MainActivity) : MainActivity.ShaderEffect("FX_MIXER", "MIXER", activity) {
+        private var prog = 0
+        override fun init() {
+            val fSrc = """
+            precision mediump float; varying vec2 v; 
+            uniform sampler2D uTex[8]; uniform float uMix[8]; uniform int uCount;
+            void main() {
+                vec4 sum = vec4(0.0);
+                if (uCount > 0 && uMix[0] > 0.0) sum += texture2D(uTex[0], v) * uMix[0];
+                if (uCount > 1 && uMix[1] > 0.0) sum += texture2D(uTex[1], v) * uMix[1];
+                if (uCount > 2 && uMix[2] > 0.0) sum += texture2D(uTex[2], v) * uMix[2];
+                if (uCount > 3 && uMix[3] > 0.0) sum += texture2D(uTex[3], v) * uMix[3];
+                if (uCount > 4 && uMix[4] > 0.0) sum += texture2D(uTex[4], v) * uMix[4];
+                if (uCount > 5 && uMix[5] > 0.0) sum += texture2D(uTex[5], v) * uMix[5];
+                if (uCount > 6 && uMix[6] > 0.0) sum += texture2D(uTex[6], v) * uMix[6];
+                if (uCount > 7 && uMix[7] > 0.0) sum += texture2D(uTex[7], v) * uMix[7];
+                gl_FragColor = clamp(sum, 0.0, 1.0);
+            }"""
+            // Use ShaderHelper here
+            prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+        }
+
+        override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glUseProgram(prog)
+
+            val sources = activity.renderer.sources
+            val cnt = min(sources.size, 8)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uCount"), cnt)
+
+            for(i in 0 until cnt) {
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + i); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, sources[i].fboTexId)
+                GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex[$i]"), i)
+                val v = activity.controlsMap[sources[i].id]?.computedValue ?: 0f
+                GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uMix[$i]"), v)
+            }
+            // Use ShaderHelper here
+            ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+        override fun release() { GLES20.glDeleteProgram(prog) }
+    }
+
+    class TransformEffect(idPrefix: String, title: String, activity: MainActivity) : MainActivity.ShaderEffect(idPrefix, title, activity) {
+        private var prog = 0
+        private val pZoom = "${idPrefix}_ZOOM"
+        private val pAngle = "${idPrefix}_ANGLE"
+        private val pTx = "${idPrefix}_TX"
+        private val pTy = "${idPrefix}_TY"
+        private val pTiltX = "${idPrefix}_TILTX"
+        private val pTiltY = "${idPrefix}_TILTY"
+        private val pRgb = "${idPrefix}_RGB"
+
+        init {
+            // Keep original defaults (130/320) so your presets work
+            val defZoom = if(idPrefix=="C") 320 else 130
+
+            addControl(PropertyControl(pAngle, "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+            addControl(PropertyControl(pZoom, "ZOOM", defaultValue = defZoom, outMin=0.1f, outMax=4.0f, hasModulation = true))
+            addControl(PropertyControl(pTx, "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+            addControl(PropertyControl(pTy, "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+            addControl(PropertyControl(pTiltX, "TILT X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+            addControl(PropertyControl(pTiltY, "TILT Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+            if(idPrefix == "C") addControl(PropertyControl("WARP", "DISTORT", defaultValue = 0, outMin=0f, outMax=1f))
+            addControl(PropertyControl(pRgb, "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.1f, hasModulation = true))
+        }
+
+        override fun init() {
+            val fSrc = """
+            precision highp float; varying vec2 v; uniform sampler2D uTex;
+            uniform float uZ, uA, uR, uTx, uTy, uTiX, uTiY, uWarp, uRGB, uRatio;
+            void main() {
+                vec3 col = vec3(0.0);
+                for(int i=0; i<3; i++) {
+                    float off = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
+                    vec2 uv = v - 0.5;
+                    
+                    // 1. Tilt (Perspective)
+                    float z = 1.0 + (uv.x * uTiX) + (uv.y * uTiY); 
+                    uv /= max(z, 0.1);
+                    
+                    // 2. Zoom (Divide to behave like standard camera zoom)
+                    // Low uZ (0.6) -> Divides UV -> UV Range increases -> Zoom Out
+                    // High uZ (4.0) -> Divides UV -> UV Range decreases -> Zoom In
+                    uv /= uZ;
+                    
+                    // 3. Distort
+                    float af = mix(uRatio, 1.0, uWarp); 
+                    uv.x *= af;
+                    
+                    // 4. Rotation
+                    float c = cos(uR); float s = sin(uR);
+                    uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+                    
+                    uv.x /= af; 
+                    
+                    // 5. Move
+                    uv += vec2(uTx, uTy);
+                    uv.x += off;
+                    
+                    // 6. Wrap/Mirror
+                    vec2 f = abs(mod(uv + 0.5, 2.0) - 1.0);
+                    
+                    vec4 sC = texture2D(uTex, f);
+                    if(i==0) col.r = sC.r; else if(i==1) col.g = sC.g; else col.b = sC.b;
+                }
+                gl_FragColor = vec4(col, 1.0);
+            }"""
+            prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+        }
+
+        override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
+
+            val rotAccum = if (id.startsWith("M")) mainActivity.getRendererMRot() else mainActivity.getRendererCRot()
+            val angle = (mainActivity.controlsMap[pAngle]?.computedValue ?: 0f) * 360f + rotAccum
+
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uZ"), mainActivity.controlsMap[pZoom]?.computedValue ?: 1f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uR"), Math.toRadians(angle).toFloat())
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTx"), mainActivity.controlsMap[pTx]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTy"), mainActivity.controlsMap[pTy]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTiX"), (mainActivity.controlsMap[pTiltX]?.computedValue ?: 0f) * 1.5f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTiY"), (mainActivity.controlsMap[pTiltY]?.computedValue ?: 0f) * 1.5f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWarp"), mainActivity.controlsMap["WARP"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRGB"), mainActivity.controlsMap[pRgb]?.computedValue ?: 0f)
+
+            ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+        override fun release() { GLES20.glDeleteProgram(prog) }
+    }
+
+    class KaleidoscopeEffect(activity: MainActivity) : MainActivity.ShaderEffect("FX_KALEIDO", "KALEIDOSCOPE", activity) {
+        private var prog = 0
+        init {
+            addControl(PropertyControl("AXIS", "AXIS", min=1, max=25, sliderMax=25, defaultValue=2, includeInPreset=true, defaultLocked=true, allowSmoothing=false))
+            addControl(PropertyControl("K_AMT", "AMOUNT", defaultValue=1000, outMin=0f, outMax=1f, hasModulation=true))
+        }
+
+        override fun init() {
+            val fSrc = """
+            precision highp float; varying vec2 v; uniform sampler2D uTex;
+            uniform float uAx, uAmt, uRatio;
+            void main() {
+                vec2 uv = v - 0.5;
+                
+                // Transition:
+                // Amt 0 -> Scale 1.0 (Normal View)
+                // Amt 1 -> Scale 2.0 (2x2 Grid View)
+                float zoom = mix(1.0, 2.0, uAmt);
+                float shift = mix(0.5, 0.0, uAmt);
+                
+                uv *= zoom;
+                
+                // Radial Logic (Axis > 2)
+                if (uAx > 2.1) {
+                    vec2 rUV = uv;
+                    rUV.x *= uRatio;
+                    
+                    float r = length(rUV);
+                    float angle = atan(rUV.y, rUV.x);
+                    
+                    float slice = 6.2831853 / uAx;
+                    float a = mod(angle, slice);
+                    a = abs(a - slice * 0.5);
+                    
+                    rUV = vec2(cos(a), sin(a)) * r;
+                    rUV.x /= uRatio;
+                    
+                    uv = mix(uv, rUV, smoothstep(0.0, 1.0, uAmt));
+                }
+                
+                // Mirroring
+                uv += shift;
+                uv = abs(uv);
+                
+                // Clamp
+                uv = clamp(uv, 0.001, 0.999);
+                
+                gl_FragColor = texture2D(uTex, uv);
+            }"""
+            prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+        }
+
+        override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
+
+            val axis = mainActivity.controlsMap["AXIS"]?.value?.toFloat() ?: 2f
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uAx"), axis)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uAmt"), mainActivity.controlsMap["K_AMT"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
+
+            ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+        override fun release() { GLES20.glDeleteProgram(prog) }
+    }
+
+    class TunnelEffect(activity: MainActivity) : MainActivity.ShaderEffect("FX_TUNNEL", "3D TUNNEL", activity) {
+        private var prog = 0
+        private var scrollAccum = 0.0f
+
+        init {
+            addControl(PropertyControl("3D_MIX", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+            addControl(PropertyControl("S_SHAPE", "SHAPE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+            addControl(PropertyControl("S_FOV", "FISHEYE", defaultValue = 500, outMin=0.2f, outMax=1.5f, hasModulation = true))
+            addControl(PropertyControl("S_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
+            addControl(PropertyControl("T_HUE_STR", "RAINBOW STR", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+            addControl(PropertyControl("T_HUE_POS", "RAINBOW POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
+            addControl(PropertyControl("T_WAVE_STR", "WAVE STR", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+            addControl(PropertyControl("T_WAVE_POS", "WAVE POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
+            addControl(PropertyControl("CURVE", "CURVE", defaultValue = 250, outMin=0.0f, outMax=4.0f, hasModulation = true))
+            addControl(PropertyControl("TWIST", "VORTEX", defaultValue = 500, outMin=-5.0f, outMax=5.0f, hasModulation = true))
+            addControl(PropertyControl("FLUX", "FLUX", defaultValue = 0, outMin=0f, outMax=0.5f, hasModulation = true))
+        }
+
+        // Reset internal scroll state
+        override fun reset() {
+            scrollAccum = 0.0f
+        }
+
+        override fun update(deltaTime: Float) {
+            val speedCtrl = mainActivity.controlsMap["S_SPEED"] ?: return
+            val rawSpeed = speedCtrl.computedValue
+            val sign = sign(rawSpeed)
+            val curvedSpeed = sign * (abs(rawSpeed)).pow(2.2f)
+            scrollAccum += curvedSpeed * deltaTime * 0.6f
+            if (abs(scrollAccum) > 2.0f) scrollAccum %= 2.0f
+        }
+
+        override fun init() {
+            val fSrc = """
+            precision highp float; varying vec2 v; uniform sampler2D uTex;
+            uniform float uMix, uShape, uFov, uScroll, uHStr, uHPos, uWStr, uWPos, uRatio;
+            uniform float uCurve, uTwist, uFlux;
+            void main() {
+                vec2 uv = v - 0.5; 
+                vec2 flatUV = uv;
+                uv.x *= uRatio;
+                float rC = length(uv); float rB = max(abs(uv.x), abs(uv.y)); float dist = mix(rC, rB, uShape);
+                float ang = atan(uv.y, uv.x);
+                dist += sin(ang * 4.0 + dist * 10.0) * uFlux * dist; 
+                float safe = max(dist, 0.01);
+                float proj = (uFov * 0.8 + 0.2) / safe;
+                vec2 tUV; 
+                tUV.x = (ang + (1.0/safe) * uTwist) / 3.14159; 
+                tUV.y = proj + uScroll;
+                if(abs(uCurve - 1.0) > 0.01) tUV *= 1.0 + (uCurve - 1.0) * (1.0 - safe);
+                vec2 finalUV = mix(flatUV, tUV, uMix * uMix);
+                vec4 col = texture2D(uTex, abs(mod(finalUV + 0.5, 2.0) - 1.0));
+                if (uHStr > 0.01) { float ha = (finalUV.y * 0.5) + uHPos; vec3 rb = 0.5 + 0.5 * cos(6.28 * (ha + vec3(0.0, 0.33, 0.67))); col.rgb = mix(col.rgb, col.rgb * rb * 2.0, uHStr); }
+                if (uWStr > 0.01) { float wd = finalUV.y - (uWPos * 10.0); float dw = abs(fract(wd) - 0.5); float wp = smoothstep(0.15 + uWStr*0.2, 0.0, dw); col.rgb += vec3(0.5, 0.8, 1.0) * wp * uWStr; }
+                gl_FragColor = col;
+            }"""
+            prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+        }
+
+        override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uMix"), mainActivity.controlsMap["3D_MIX"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uShape"), mainActivity.controlsMap["S_SHAPE"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFov"), mainActivity.controlsMap["S_FOV"]?.computedValue ?: 0.5f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uScroll"), scrollAccum)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uHStr"), mainActivity.controlsMap["T_HUE_STR"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uHPos"), mainActivity.controlsMap["T_HUE_POS"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWStr"), mainActivity.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWPos"), mainActivity.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uCurve"), mainActivity.controlsMap["CURVE"]?.computedValue ?: 1.0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTwist"), mainActivity.controlsMap["TWIST"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFlux"), mainActivity.controlsMap["FLUX"]?.computedValue ?: 0f)
+            ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+        override fun release() { GLES20.glDeleteProgram(prog) }
+    }
+
+    class SwirlEffect(activity: MainActivity) : MainActivity.ShaderEffect("FX_SWIRL", "SWIRL", activity) {
+        private var prog = 0
+        private var scrollAccum = 0.0f
+        private var swayTime = 0.0f // Separate time for camera sway
+
+        init {
+            addControl(PropertyControl("UTWIRL", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+            addControl(PropertyControl("S_WIDE", "WIDENESS", defaultValue = 500, outMin=0.0f, outMax=2.0f, hasModulation = true))
+            addControl(PropertyControl("SWIRL_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
+        }
+
+        override fun reset() {
+            scrollAccum = 0.0f
+        }
+
+        override fun update(deltaTime: Float) {
+            val speedCtrl = mainActivity.controlsMap["SWIRL_SPEED"] ?: return
+            val rawSpeed = speedCtrl.computedValue
+            val sign = sign(rawSpeed)
+            val curvedSpeed = sign * (abs(rawSpeed)).pow(2.2f)
+
+            // 1. Scroll (Forward Movement) - Controlled by Speed Slider
+            scrollAccum += curvedSpeed * deltaTime * 0.8f
+            if (abs(scrollAccum) > 1000.0f) scrollAccum %= 1000.0f
+
+            // 2. Sway (Camera Look) - Constant slow movement
+            swayTime += deltaTime * 0.5f
+        }
+
+        override fun init() {
+            val fSrc = """
+            precision highp float; varying vec2 v; uniform sampler2D uTex;
+            uniform float uStr, uWide, uScroll, uSway, uRatio;
+            #define PI 3.14159
+            mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+            float gyroid(vec3 p) { return dot(cos(p), sin(p.zxy)) + 1.0; }
+            float map(vec3 p) { return min(gyroid(p), gyroid(p - vec3(0.,0.,PI))); }
+            
+            void main() {
+                vec2 uv = v - 0.5; 
+                vec2 flatUV = uv;
+                uv.x *= uRatio;
+                
+                vec3 ro = vec3(PI/2.0, 0.0, 0.0);
+                vec3 rd = normalize(vec3(uv, -0.6));
+                
+                // 1. Camera Lookaround (Driven by uSway + Wideness)
+                // This is now independent of forward speed
+                rd.xy = rot(sin(uSway) * uWide) * rd.xy;
+                
+                vec3 ta = vec3(cos(uSway * 0.6), sin(uSway * 0.6), 4.0);
+                vec3 f = normalize(ta); vec3 r = normalize(cross(f, vec3(0.,1.,0.))); vec3 u = cross(r, f);
+                rd = mat3(r, u, f) * rd;
+                
+                float t = 0.0;
+                for(int i=0; i<35; i++) {
+                    float d = map(ro + rd * t);
+                    if(abs(d) < 0.01 || t > 25.0) break;
+                    t += d;
+                }
+                
+                vec3 hit = ro + rd * t;
+                float ang = atan(hit.y, hit.x);
+                
+                // 2. Forward Movement
+                // Driven by uScroll (Speed Slider)
+                vec2 wUV = vec2(ang / PI, (hit.z * 0.15) + uScroll);
+                
+                // Mix Flat vs Swirl
+                vec2 finalUV = mix(flatUV, wUV, smoothstep(0.0, 1.0, uStr));
+                
+                // Wrap texture
+                gl_FragColor = texture2D(uTex, abs(mod(finalUV + 0.5, 2.0) - 1.0));
+            }"""
+            prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+        }
+
+        override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
+
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uStr"), mainActivity.controlsMap["UTWIRL"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWide"), mainActivity.controlsMap["S_WIDE"]?.computedValue ?: 1f)
+
+            // Pass independent variables
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uScroll"), scrollAccum)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uSway"), swayTime)
+
+            ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+        override fun release() { GLES20.glDeleteProgram(prog) }
+    }
+
+    class ColorEffect(activity: MainActivity) : MainActivity.ShaderEffect("FX_COLOR", "COLOR", activity) {
+        private var prog = 0
+        init {
+            addControl(PropertyControl("BRIT", "BRIGHTNESS", defaultValue = 500, outMin=0f, outMax=2f))
+            addControl(PropertyControl("HUE", "HUE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+            addControl(PropertyControl("NEG", "NEGATIVE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+            addControl(PropertyControl("GLOW", "GLOW", defaultValue = 0, outMin=0f, outMax=2f, hasModulation = true))
+            addControl(PropertyControl("CONTRAST", "CONTRAST", defaultValue = 500, outMin=0f, outMax=2f))
+            addControl(PropertyControl("VIBRANCE", "SATURATION", defaultValue = 500, outMin=0f, outMax=2f))
+        }
+        override fun init() {
+            val fSrc = """
+            precision mediump float; varying vec2 v; uniform sampler2D uTex;
+            uniform float uBrit, uHue, uNeg, uGlow, uCon, uVib;
+            vec3 hueShift(vec3 c, float h) { const vec3 k = vec3(0.57735); float ca = cos(h); return c * ca + cross(k, c) * sin(h) + k * dot(k, c) * (1.0 - ca); }
+            void main() {
+                vec3 c = texture2D(uTex, v).rgb;
+                c = abs(c - uNeg);
+                if(uHue > 0.01) c = hueShift(c, uHue * 6.28);
+                c = (c - 0.5) * uCon + 0.5;
+                float l = dot(c, vec3(0.299, 0.587, 0.114));
+                c = mix(vec3(l), c, uVib);
+                if(uGlow > 0.01) c += smoothstep(0.4, 1.0, l) * c * uGlow * 2.0;
+                c *= uBrit;
+                gl_FragColor = vec4(c, 1.0);
+            }"""
+            prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+        }
+        override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uBrit"), mainActivity.controlsMap["BRIT"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uHue"), mainActivity.controlsMap["HUE"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uNeg"), mainActivity.controlsMap["NEG"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uGlow"), mainActivity.controlsMap["GLOW"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uCon"), mainActivity.controlsMap["CONTRAST"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uVib"), mainActivity.controlsMap["VIBRANCE"]?.computedValue ?: 1f)
+            ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+        override fun release() { GLES20.glDeleteProgram(prog) }
+    }
+
+
+
     fun updatePlayButtonState() {
         if (!::playBtn.isInitialized) return
         val enabled = autoPlayFilter.isNotEmpty()
@@ -2217,6 +2751,10 @@ class MainActivity : AppCompatActivity() {
 
     fun getSourceControlsList(): List<PropertyControl> {
         return sourceControls
+    }
+
+    fun getRendererSource(id: String): MainActivity.KaleidoscopeRenderer.SourceChannel? {
+        return renderer.getSource(id)
     }
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
@@ -2502,6 +3040,16 @@ class MainActivity : AppCompatActivity() {
         hideSystemUI()
 
         renderer = KaleidoscopeRenderer(this)
+
+        effectChain.effects.clear()
+        effectChain.effects.add(MixerEffect(this))
+        effectChain.effects.add(TransformEffect("C", "CAMERA TRANSFORM", this))
+        effectChain.effects.add(KaleidoscopeEffect(this))
+        effectChain.effects.add(TransformEffect("M", "MASTER TRANSFORM", this))
+        effectChain.effects.add(TunnelEffect(this))
+        effectChain.effects.add(SwirlEffect(this))
+        effectChain.effects.add(ColorEffect(this))
+
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
             setEGLConfigChooser(8, 8, 8, 8, 0, 0)
@@ -2602,9 +3150,25 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun handleInteraction(event: MotionEvent) {
+        // Find the LAST TransformEffect in the chain to modify
+        // We search backwards from the end
+        var targetEffect: TransformEffect? = null
+        for (i in effectChain.effects.indices.reversed()) {
+            val fx = effectChain.effects[i]
+            if (fx is TransformEffect && fx.active) {
+                targetEffect = fx
+                break
+            }
+        }
+        // If no transform effect found, fallback to map lookup (legacy safety)
+        val pAngleId = if (targetEffect != null) "${targetEffect.id}_ANGLE" else "M_ANGLE"
+        val pZoomId = if (targetEffect != null) "${targetEffect.id}_ZOOM" else "M_ZOOM"
+        val pTxId = if (targetEffect != null) "${targetEffect.id}_TX" else "M_TX"
+        val pTyId = if (targetEffect != null) "${targetEffect.id}_TY" else "M_TY"
+
         // 1. Handle Multi-touch Gestures (Pinch/Rotate)
         if (event.pointerCount >= 2) {
-            isDraggingOrGesturing = true // Mark as gesture
+            isDraggingOrGesturing = true
 
             val p1x = event.getX(0); val p1y = event.getY(0)
             val p2x = event.getX(1); val p2y = event.getY(1)
@@ -2613,7 +3177,6 @@ class MainActivity : AppCompatActivity() {
             val angle = Math.toDegrees(atan2((p1y - p2y).toDouble(), (p1x - p2x).toDouble())).toFloat()
 
             if (event.actionMasked == MotionEvent.ACTION_MOVE) {
-                // Initialize start values if this is the first move frame of the gesture
                 if (lastFingerDist == 0f) {
                     lastFingerDist = dist
                     lastFingerAngle = angle
@@ -2624,26 +3187,28 @@ class MainActivity : AppCompatActivity() {
                 val dx = (focusX - lastFingerFocusX) / glView.width.toFloat() * 2.0f
                 val dy = (focusY - lastFingerFocusY) / glView.height.toFloat() * 2.0f
 
-                controlsMap["M_TX"]?.let { it.setProgress((it.value - (dx * 500).toInt()).coerceIn(0, 1000)) }
-                controlsMap["M_TY"]?.let { it.setProgress((it.value + (dy * 500).toInt()).coerceIn(0, 1000)) }
+                // Invert dx/dy if needed based on user feedback
+                controlsMap[pTxId]?.let { it.setProgress((it.value + (dx * 500).toInt()).coerceIn(0, 1000)) }
+                controlsMap[pTyId]?.let { it.setProgress((it.value - (dy * 500).toInt()).coerceIn(0, 1000)) }
 
                 val scaleFactor = dist / lastFingerDist
-                if (scaleFactor > 0 && lastFingerDist > 0) { // Safety check
-                    controlsMap["M_ZOOM"]?.let { it.setProgress((it.value - (log2(scaleFactor) * 300).toInt()).coerceIn(0, 1000)) }
+                if (scaleFactor > 0 && lastFingerDist > 0) {
+                    controlsMap[pZoomId]?.let { it.setProgress((it.value - (log2(scaleFactor) * 300).toInt()).coerceIn(0, 1000)) }
                 }
 
+                // Fix Rotation Inversion: Swap sign of dAngle
                 val dAngle = angle - lastFingerAngle
-                controlsMap["M_ANGLE"]?.let { it.setProgress((it.value - (dAngle * (1000f / 360f)).toInt() + 1000) % 1000) }
+                controlsMap[pAngleId]?.let {
+                    // + instead of - to invert direction
+                    it.setProgress((it.value + (dAngle * (1000f / 360f)).toInt() + 1000) % 1000)
+                }
             }
 
             lastFingerDist = dist; lastFingerAngle = angle; lastFingerFocusX = focusX; lastFingerFocusY = focusY
         }
         // 2. Handle Single Pointer
         else {
-            // Reset multi-touch tracking when fingers lift
-            if (event.pointerCount < 2) {
-                lastFingerDist = 0f
-            }
+            if (event.pointerCount < 2) { lastFingerDist = 0f }
 
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -2654,14 +3219,11 @@ class MainActivity : AppCompatActivity() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = abs(event.x - touchDownX)
                     val dy = abs(event.y - touchDownY)
-
                     if (dx > CLICK_DRAG_TOLERANCE || dy > CLICK_DRAG_TOLERANCE) {
                         isDraggingOrGesturing = true
                     }
                 }
-                // MODIFY ACTION_UP to include ACTION_CANCEL
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    // Only toggle if it wasn't a drag or gesture (and it's a clean UP)
                     if (event.actionMasked == MotionEvent.ACTION_UP && !isDraggingOrGesturing) {
                         if (PropertyControl.activeControl != null) {
                             PropertyControl.closeActiveMenu()
@@ -2669,7 +3231,6 @@ class MainActivity : AppCompatActivity() {
                             toggleHud()
                         }
                     }
-                    // Always reset flags on UP or CANCEL
                     isDraggingOrGesturing = false
                 }
             }
@@ -3130,107 +3691,45 @@ class MainActivity : AppCompatActivity() {
             currentGroupContent = content
         }
 
-        fun addControl(c: PropertyControl) {
-            if (controlsMap.containsKey(c.id)) {
-                val existing = controlsMap[c.id]!!
-                currentGroupContent?.let { existing.attachTo(this, it) } ?: existing.attachTo(this, menuLayout)
+        // Iterate the Chain
+        effectChain.effects.forEachIndexed { index, effect ->
+            createGroup(effect.name, startOpen = (index == 0))
+
+            // Special case for Mixer to add Source Controls
+            if (effect is MixerEffect) {
+                // 1. Main Camera (Ensure it exists)
+                if (controlsMap.containsKey("CAM_MAIN")) {
+                    currentGroupContent?.let { controlsMap["CAM_MAIN"]!!.attachTo(this, it) }
+                } else {
+                    val camCtrl = CameraSourceControl(this)
+                    controls.add(camCtrl); controlsMap[camCtrl.id] = camCtrl
+                    renderer.addSource(SourceType.CAMERA, "CAM_MAIN")
+                    currentGroupContent?.let { camCtrl.attachTo(this, it) }
+                }
+
+                // 2. Dynamic Sources
+                sourceControls.forEach { currentGroupContent?.let { p -> it.attachTo(this, p) } }
+
+                // 3. Add Button
+                val addBtn = Button(this).apply {
+                    text = "+"; textSize = 24f; setTextColor(Color.WHITE)
+                    background = GradientDrawable().apply { setColor(Color.parseColor("#333333")); cornerRadius=15f; setStroke(1,Color.GRAY) }
+                    layoutParams = LinearLayout.LayoutParams(150, 80).apply { gravity=Gravity.CENTER_HORIZONTAL; setMargins(20,10,20,10) }
+                    setOnClickListener { showAddSourceDialog() }
+                }
+                currentGroupContent?.addView(addBtn)
+                mixerGroupContainer = currentGroupContent
             } else {
-                controls.add(c)
-                controlsMap[c.id] = c
-                currentGroupContent?.let { c.attachTo(this, it) } ?: c.attachTo(this, menuLayout)
+                // Standard Effects
+                effect.controls.forEach { ctrl ->
+                    currentGroupContent?.let { ctrl.attachTo(this, it) }
+                }
             }
         }
-
-        createGroup("MIXER", startOpen = true)
-        mixerGroupContainer = currentGroupContent
-
-        // 1. Always add Main Camera Control
-        if (!controlsMap.containsKey("CAM_MAIN")) {
-            val camCtrl = CameraSourceControl(this)
-            addControl(camCtrl)
-            renderer.addSource(SourceType.CAMERA, "CAM_MAIN")
-        } else {
-            addControl(controlsMap["CAM_MAIN"]!!)
-        }
-
-        // 2. Add Existing Dynamic Controls
-        sourceControls.forEach { addControl(it) }
-
-        // 3. Add "+" button
-        val addBtn = Button(this).apply {
-            text = "+"
-            textSize = 24f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            includeFontPadding = false
-            setPadding(0, 0, 0, 0)
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#333333"))
-                cornerRadius = 15f
-                setStroke(1, Color.GRAY)
-            }
-            layoutParams = LinearLayout.LayoutParams(150, 80).apply {
-                gravity = Gravity.CENTER_HORIZONTAL
-                setMargins(20, 10, 20, 10)
-            }
-            setOnClickListener {
-                showAddSourceDialog()
-            }
-        }
-        currentGroupContent?.addView(addBtn)
-
-        createGroup("GEOMETRY")
-        setupCameraOrientationControls(currentGroupContent!!)
-        setupGeometrySpecifics(currentGroupContent!!)
-
-        createGroup("3D TUNNEL")
-        addControl(PropertyControl("3D_MIX", "TUNNEL", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        // UTWIRL REMOVED FROM HERE
-        addControl(PropertyControl("S_SHAPE", "SHAPE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("S_FOV", "FISHEYE", defaultValue = 500, outMin=0.2f, outMax=1.5f, hasModulation = true))
-        addControl(PropertyControl("S_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
-        addControl(PropertyControl("T_HUE_STR", "RAINBOW STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("T_HUE_POS", "RAINBOW POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl("T_WAVE_STR", "WAVE STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("T_WAVE_POS", "WAVE POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
-
-        // NEW SWIRL GROUP
-        createGroup("SWIRL")
-        addControl(PropertyControl("UTWIRL", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("S_WIDE", "WIDENESS", defaultValue = 500, outMin=0.0f, outMax=2.0f, hasModulation = true))
-
-        createGroup("MORPH (Careful)")
-        addControl(PropertyControl("CURVE", "CURVE", defaultValue = 250, outMin=0.0f, outMax=4.0f, hasModulation = true))
-        addControl(PropertyControl("TWIST", "VORTEX", defaultValue = 500, outMin=-5.0f, outMax=5.0f, hasModulation = true))
-        addControl(PropertyControl("FLUX", "FLUX", defaultValue = 0, outMin=0f, outMax=0.5f, hasModulation = true))
-
-        createGroup("MASTER TRANSFORM")
-        addControl(PropertyControl("M_ANGLE", "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl("M_ZOOM", "ZOOM", defaultValue = 130, outMin=0.1f, outMax=4.0f, hasModulation = true))
-        addControl(PropertyControl("M_TX", "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("M_TY", "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("M_TILTX", "TILT X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("M_TILTY", "TILT Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("M_RGB", "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.1f, hasModulation = true))
-
-        createGroup("CAMERA TRANSFORM")
-        addControl(PropertyControl("C_ANGLE", "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl("WARP", "DISTORT", defaultValue = 0, outMin=0f, outMax=1f))
-        addControl(PropertyControl("C_ZOOM", "ZOOM", defaultValue = 320, outMin=0.3f, outMax=2.5f, hasModulation = true))
-        addControl(PropertyControl("C_TX", "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("C_TY", "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("C_TILTX", "TILT X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("C_TILTY", "TILT Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("RGB", "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.05f, hasModulation = true))
-
-        createGroup("COLOR")
-        addControl(PropertyControl("BRIT", "BRIGHTNESS", defaultValue = 500, outMin=0f, outMax=2f))
-        addControl(PropertyControl("HUE", "HUE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-        addControl(PropertyControl("NEG", "NEGATIVE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
-        addControl(PropertyControl("GLOW", "GLOW", defaultValue = 0, outMin=0f, outMax=2f, hasModulation = true))
-        addControl(PropertyControl("CONTRAST", "CONTRAST", defaultValue = 500, outMin=0f, outMax=2f))
-        addControl(PropertyControl("VIBRANCE", "SATURATION", defaultValue = 500, outMin=0f, outMax=2f))
     }
+
+    fun getRendererMRot(): Double = renderer.mRotAccum
+    fun getRendererCRot(): Double = renderer.cRotAccum
 
     private fun showAddSourceDialog() {
         if (renderer.sources.size >= 8) {
@@ -3286,29 +3785,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupCameraOrientationControls(parent: LinearLayout) {
-        val orientationRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, 10, 0, 20); layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120) }
-
-        fun createParamBtn(icon: BitmapDrawable, targetId: String, action: () -> Unit): ImageButton {
-            return ImageButton(this).apply {
-                setImageDrawable(icon)
-                background = GradientDrawable().apply { setColor(Color.parseColor("#22FFFFFF")); cornerRadius = 12f }
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { setMargins(6, 0, 6, 0) }
-                setOnClickListener { action(); updateSidebarVisuals() }
-                setOnLongClickListener {
-                    if (midiHelper.isConnected) {
-                        showMidiLearnOverlay(targetId, targetId.replace("CMD_", ""))
-                        true
-                    } else false
-                }
-            }
-        }
-
-        flipXBtn = createParamBtn(createCustomIcon(0), "CMD_FLIP_X") { renderer.flipX = if (renderer.flipX == 1f) -1f else 1f }
-        flipYBtn = createParamBtn(createCustomIcon(1), "CMD_FLIP_Y") { renderer.flipY = if (renderer.flipY == 1f) -1f else 1f }
-        rot180Btn = createParamBtn(createCustomIcon(2), "CMD_ROT_180") { renderer.rot180 = !renderer.rot180 }
-
-        orientationRow.addView(flipXBtn); orientationRow.addView(flipYBtn); orientationRow.addView(rot180Btn)
-        parent.addView(orientationRow)
+        // Function intentionally left empty or removed.
+        // Global Flip X/Y/Rot buttons are deprecated in favor of per-source controls.
     }
 
     private fun createCameraSettingsPanel(): LinearLayout {
@@ -4214,7 +4692,9 @@ class MainActivity : AppCompatActivity() {
         renderer.mRotAccum = 0.0
         renderer.cRotAccum = 0.0
         renderer.lRotAccum = 0.0
-        renderer.scrollAccum = 0.0f
+
+        effectChain.effects.forEach { it.reset() }
+
         renderer.resetPhases()
         renderer.flipX = 1f
         renderer.flipY = -1f
@@ -4238,7 +4718,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateSidebarVisuals() {
-        flipXBtn.alpha = if (renderer.flipX < 0f) 1.0f else 0.3f; flipYBtn.alpha = if (renderer.flipY > 0f) 1.0f else 0.3f; rot180Btn.alpha = if (renderer.rot180) 1.0f else 0.3f
+        // Global Flip/Rot buttons are removed.
+        // This function is kept empty to prevent calls in onConfigurationChanged from crashing.
     }
 
     fun hideSystemUI() {
@@ -4566,7 +5047,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
-        private var kaleidoProgram = 0
         private var simpleProgram = 0
         private var copyOesProgram = 0
         private var copy2dProgram = 0
@@ -4575,7 +5055,7 @@ class MainActivity : AppCompatActivity() {
         private val mvpMatrix = FloatArray(16)
         private val identityMatrix = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
 
-        var scrollAccum = 0.0f
+        // Rotation accumulation logic (shared context)
         var mRotAccum = 0.0
         var cRotAccum = 0.0
         var lRotAccum = 0.0
@@ -4584,6 +5064,7 @@ class MainActivity : AppCompatActivity() {
         var flipY = -1.0f
         var rot180 = false
 
+        // Standard 1080p Resolution
         private val FIXED_WIDTH = 1920
         private val FIXED_HEIGHT = 1080
         private var viewWidth = 1
@@ -4596,22 +5077,18 @@ class MainActivity : AppCompatActivity() {
         private val MAX_SOURCES = 8
 
         inner class SourceChannel(val type: SourceType, val id: String) : SurfaceTexture.OnFrameAvailableListener {
-
             @Volatile var isReady = false
-
-            // Callback for when GL is ready (Used by Video & Camera)
             var onSurfaceReady: ((Surface) -> Unit)? = null
-
             var inputTexId = 0
             var surfaceTexture: SurfaceTexture? = null
             var surface: Surface? = null
-            var fboId = 0
-            var fboTexId = 0
+            var fboId = 0; var fboTexId = 0
 
-            var width = 1280
-            var height = 720
+            // Default to Full HD
+            var width = 1920; var height = 1080
+
             var rotation = 0f
-
+            var userFlipX = 1.0f; var userFlipY = 1.0f; var userRot180 = false
             var bitmap: Bitmap? = null
             @Volatile var imageUploaded = false
             @Volatile var frameAvailable = false
@@ -4619,23 +5096,13 @@ class MainActivity : AppCompatActivity() {
 
             fun init() {
                 if (isReady) return
-
-                // 0. Clear errors
                 while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
 
-                // 1. Generate IDs
-                val fb = IntArray(1)
-                val tx = IntArray(1)
-                GLES20.glGenFramebuffers(1, fb, 0)
-                GLES20.glGenTextures(1, tx, 0)
-
-                fboId = fb[0]
-                fboTexId = tx[0]
-
-                // Retry next frame if GL context is not ready
+                val fb = IntArray(1); val tx = IntArray(1)
+                GLES20.glGenFramebuffers(1, fb, 0); GLES20.glGenTextures(1, tx, 0)
+                fboId = fb[0]; fboTexId = tx[0]
                 if (fboId == 0 || fboTexId == 0) return
 
-                // 2. FBO Setup
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
                 GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, FIXED_WIDTH, FIXED_HEIGHT, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
                 GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -4645,62 +5112,37 @@ class MainActivity : AppCompatActivity() {
 
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
                 GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, fboTexId, 0)
-
-                if (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) != GLES20.GL_FRAMEBUFFER_COMPLETE) {
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-                    return
-                }
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-                // 3. Input Setup
-                val inp = IntArray(1)
-                GLES20.glGenTextures(1, inp, 0)
+                val inp = IntArray(1); GLES20.glGenTextures(1, inp, 0)
                 inputTexId = inp[0]
-
                 if (inputTexId == 0) return
 
                 if (type == SourceType.MEDIA_IMAGE) {
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
                     GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
                     GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
                     imageUploaded = false
                 } else {
                     GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, inputTexId)
                     GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
                     GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-
                     surfaceTexture = SurfaceTexture(inputTexId)
                     surfaceTexture?.setDefaultBufferSize(width, height)
                     surfaceTexture?.setOnFrameAvailableListener(this)
-
-                    // Create Surface safely
                     surface = Surface(surfaceTexture)
-
-                    // NOTIFY LISTENERS (Video/Camera)
                     if (onSurfaceReady != null) {
                         val s = surface!!
-                        android.os.Handler(android.os.Looper.getMainLooper()).post {
-                            onSurfaceReady?.invoke(s)
-                        }
+                        android.os.Handler(android.os.Looper.getMainLooper()).post { onSurfaceReady?.invoke(s) }
                     }
                 }
-
                 isReady = true
-                Log.d("SpaceBeamDebug", "Init Success for $id")
             }
 
-            // --- THIS IS THE MISSING METHOD THAT CAUSED THE ERROR ---
             fun getSurfaceForInput(): Surface? {
-                // If we are on the GL thread and not ready, try to init immediately
-                // This handles cases where older code calls this directly inside queueEvent
-                if (!isReady && inputTexId == 0) {
-                    init()
-                }
+                if (!isReady && inputTexId == 0) init()
                 return surface
             }
-            // ------------------------------------------------------
 
             override fun onFrameAvailable(st: SurfaceTexture?) {
                 synchronized(frameSync) { frameAvailable = true }
@@ -4736,7 +5178,7 @@ class MainActivity : AppCompatActivity() {
                         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                         GLES20.glBindTexture(target, inputTexId)
                         try {
-                            GLUtils.texImage2D(target, 0, bitmap, 0)
+                            android.opengl.GLUtils.texImage2D(target, 0, bitmap, 0)
                             imageUploaded = true
                         } catch (e: Exception) { }
                     }
@@ -4744,10 +5186,7 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     synchronized(frameSync) {
                         if (frameAvailable) {
-                            try {
-                                surfaceTexture?.updateTexImage()
-                                frameAvailable = false
-                            } catch (e: Exception) { }
+                            try { surfaceTexture?.updateTexImage(); frameAvailable = false } catch (e: Exception) { }
                         }
                     }
                 }
@@ -4761,8 +5200,12 @@ class MainActivity : AppCompatActivity() {
                 GLES20.glBindTexture(target, inputTexId)
                 GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uTex"), 0)
 
-                val rad = Math.toRadians(-rotation.toDouble()).toFloat()
+                val extraRot = if (userRot180) 180f else 0f
+                val finalRot = rotation + extraRot
+                val rad = Math.toRadians(-finalRot.toDouble()).toFloat()
                 GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uRotation"), rad)
+
+                GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uFlip"), userFlipX, userFlipY)
 
                 val isSideways = (kotlin.math.abs(rotation) % 180f) > 45f
                 val effectiveW = if (isSideways) height.toFloat() else width.toFloat()
@@ -4776,7 +5219,7 @@ class MainActivity : AppCompatActivity() {
 
                 GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uScale"), sx, sy)
 
-                bindCommonAttribs(program)
+                ShaderHelper.bindQuad(program)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
             }
@@ -4787,8 +5230,7 @@ class MainActivity : AppCompatActivity() {
             val ch = SourceChannel(type, id)
             ch.bitmap = bitmap
             if (bitmap != null) {
-                ch.width = bitmap.width
-                ch.height = bitmap.height
+                ch.width = bitmap.width; ch.height = bitmap.height
             }
             sources.add(ch)
             return ch
@@ -4804,8 +5246,7 @@ class MainActivity : AppCompatActivity() {
 
         fun getSource(id: String): SourceChannel? = sources.find { it.id == id }
 
-        private var fboId = 0
-        private var fboTexId = 0
+        private var fboId = 0; private var fboTexId = 0
         private var captureRequested = false
         private var videoRecorder: VideoRecorder? = null
         private var recordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
@@ -4818,67 +5259,49 @@ class MainActivity : AppCompatActivity() {
         private var mEglConfig: EGL14EGLConfig? = null
         private var extSurfaceArgs: Triple<Surface, Int, Int>? = null
         private var extEglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
-        private var extWidth = 0
-        private var extHeight = 0
+        private var extWidth = 0; private var extHeight = 0
 
-        private lateinit var pBuf: FloatBuffer
-        private lateinit var tBuf: FloatBuffer
-        private var uLocs = mutableMapOf<String, Int>()
-        private var simpleULocs = mutableMapOf<String, Int>()
-
-        private var rotTargetM: Double? = null
-        private var rotStartM: Double = 0.0
-        private var rotTargetC: Double? = null
-        private var rotStartC: Double = 0.0
-        private var rotAnimDuration: Float = 0f
-        private var rotAnimTime: Float = 0f
-        private var isRotAnimating = false
+        private var rotTargetM: Double? = null; private var rotStartM: Double = 0.0
+        private var rotTargetC: Double? = null; private var rotStartC: Double = 0.0
+        private var rotAnimDuration: Float = 0f; private var rotAnimTime: Float = 0f; private var isRotAnimating = false
 
         fun animateRotationTo(targetM: Double, targetC: Double, duration: Float) {
-            rotTargetM = targetM; rotStartM = mRotAccum; rotTargetC = targetC; rotStartC = cRotAccum; rotAnimDuration = duration; rotAnimTime = 0f; isRotAnimating = true
+            rotTargetM = targetM; rotStartM = mRotAccum
+            rotTargetC = targetC; rotStartC = cRotAccum
+            rotAnimDuration = duration; rotAnimTime = 0f; isRotAnimating = true
         }
         fun stopRotationAnim() { isRotAnimating = false }
         fun resetPhases() { ctx.controls.forEach { it.lfoPhase = 0.0 }; mRotAccum = 0.0; cRotAccum = 0.0; lRotAccum = 0.0 }
         fun capturePhoto() { captureRequested = true }
         fun stopRecording(callback: (File?) -> Unit) { onStopCallback = callback; isStopRequested = true }
         fun startRecording(file: File) { pendingRecordFile = file; recordStartTimeNs = 0 }
-
         fun setExternalSurface(s: Surface, w: Int, h: Int) { extSurfaceArgs = Triple(s, w, h) }
         fun removeExternalSurface() { extSurfaceArgs = null }
-
         fun provideCameraSurface(req: SurfaceRequest) {
             val cam = getSource("CAM_MAIN") ?: return
-
-            // If the surface is already ready, provide it immediately
             if (cam.isReady && cam.surface != null) {
-                req.provideSurface(cam.surface!!, ContextCompat.getMainExecutor(ctx)) {
-                    // Surface released by CameraX
-                }
+                req.provideSurface(cam.surface!!, ContextCompat.getMainExecutor(ctx)) {}
             } else {
-                // Otherwise, wait for the Render Thread to create it
-                Log.d("SpaceBeamDebug", "Camera Surface not ready yet. Waiting...")
-                cam.onSurfaceReady = { surface ->
-                    Log.d("SpaceBeamDebug", "Camera Surface Ready. Binding.")
-                    req.provideSurface(surface, ContextCompat.getMainExecutor(ctx)) {
-                        // Surface released
-                    }
-                }
+                cam.onSurfaceReady = { surface -> req.provideSurface(surface, ContextCompat.getMainExecutor(ctx)) {} }
             }
         }
 
         override fun onSurfaceCreated(gl: GL10?, config: GL10EGLConfig?) {
-            setupEGL(); GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+            setupEGL()
+            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
 
-            // 1. OES COPY SHADER
             val fSrcCopyOes = """#extension GL_OES_EGL_image_external : require
             precision mediump float; varying vec2 v; 
             uniform samplerExternalOES uTex; 
             uniform vec2 uScale; 
             uniform float uRotation;
+            uniform vec2 uFlip;
             void main() {
                 vec2 uv = v - 0.5;
                 uv = uv * uScale;
+                uv = uv * uFlip; 
                 float c = cos(uRotation);
                 float s = sin(uRotation);
                 uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
@@ -4886,17 +5309,18 @@ class MainActivity : AppCompatActivity() {
                 uv = abs(mod(uv + 1.0, 2.0) - 1.0);
                 gl_FragColor = texture2D(uTex, uv);
             }""".trimIndent()
-            copyOesProgram = createProgram(vSrc, fSrcCopyOes)
+            copyOesProgram = ShaderHelper.createProgram(vSrc, fSrcCopyOes)
 
-            // 2. 2D COPY SHADER
             val fSrcCopy2d = """
             precision mediump float; varying vec2 v; 
             uniform sampler2D uTex; 
             uniform vec2 uScale; 
             uniform float uRotation;
+            uniform vec2 uFlip;
             void main() {
                 vec2 uv = v - 0.5;
                 uv = uv * uScale;
+                uv = uv * uFlip;
                 float c = cos(uRotation);
                 float s = sin(uRotation);
                 uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
@@ -4904,180 +5328,15 @@ class MainActivity : AppCompatActivity() {
                 uv = abs(mod(uv + 1.0, 2.0) - 1.0);
                 gl_FragColor = texture2D(uTex, uv);
             }""".trimIndent()
-            copy2dProgram = createProgram(vSrc, fSrcCopy2d)
+            copy2dProgram = ShaderHelper.createProgram(vSrc, fSrcCopy2d)
 
-            val fSrcKaleido = """
-            precision highp float; varying vec2 v; 
-            uniform sampler2D uTex[8];
-            uniform float uMix[8];
-            uniform int uActiveCount;
-            uniform float uMR, uCR, uCZ, uA, uMZ, uAx, uC, uS, uHue, uSol, uBloom, uRGB, uMRGB, uWarp;
-            uniform float uBrit, uTHueStr, uTHuePos, uTWaveStr, uTWavePos, uTwirl;
-            uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
-            uniform float uCurve, uTwist, uFlux, uSShape, uSFov, uScroll, uMode;
-            uniform float uSwirlWide;
-            
-            #define PI 3.14159265
-            
-            mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
-            mat3 lookAt(vec3 dir) {
-                vec3 up = vec3(0.0, 1.0, 0.0);
-                vec3 rt = normalize(cross(dir, up));
-                return mat3(rt, cross(rt, dir), dir);
-            }
-            float gyroid(vec3 p) { return dot(cos(p), sin(p.zxy)) + 1.0; }
-            float map(vec3 p) {
-                float d1 = gyroid(p);
-                float d2 = gyroid(p - vec3(0.0, 0.0, PI));
-                return min(d1, d2);
-            }
-            
-            vec3 hueShift(vec3 color, float hue) { const vec3 k = vec3(0.57735, 0.57735, 0.57735); float cosAngle = cos(hue); return vec3(color * cosAngle + cross(k, color) * sin(hue) + k * dot(k, color) * (1.0 - cosAngle)); }
-            
-            vec3 sampleSourceByIndex(int index, vec2 uv) {
-                if (index == 0) return texture2D(uTex[0], uv).rgb;
-                if (index == 1) return texture2D(uTex[1], uv).rgb;
-                if (index == 2) return texture2D(uTex[2], uv).rgb;
-                if (index == 3) return texture2D(uTex[3], uv).rgb;
-                if (index == 4) return texture2D(uTex[4], uv).rgb;
-                if (index == 5) return texture2D(uTex[5], uv).rgb;
-                if (index == 6) return texture2D(uTex[6], uv).rgb;
-                if (index == 7) return texture2D(uTex[7], uv).rgb;
-                return vec3(0.0);
-            }
-
-            void main() {
-                vec3 finalColor = vec3(0.0);
-                float a1 = -uMR * 0.01745329; float cosA1 = cos(a1); float sinA1 = sin(a1);
-                float modeBlend = smoothstep(0.0, 1.0, uMode);
-                vec2 effectiveTilt = mix(uMTilt, vec2(0.0), modeBlend);
-                vec2 effectiveTrans = uMT + mix(vec2(0.0), uMTilt * 2.0, modeBlend);
-                
-                for(int i=0; i<3; i++) {
-                    float mOff = (i==0) ? uMRGB : (i==2) ? -uMRGB : 0.0;
-                    vec2 uv = v - 0.5;
-                    
-                    float zM = 1.0 + (uv.x * effectiveTilt.x) + (uv.y * effectiveTilt.y); 
-                    uv /= max(zM, 0.1); 
-                    uv.x *= uA; 
-                    uv.x += mOff;
-                    
-                    uv = (uv + effectiveTrans) * uMZ * 4.0;
-                    uv = vec2(uv.x * cosA1 - uv.y * sinA1, uv.x * sinA1 + uv.y * cosA1);
-                    
-                    if(uAx > 1.1) {
-                        float r = length(uv); float slice = 6.2831853 / uAx; float angle = atan(uv.y, uv.x);
-                        float a = mod(angle, slice); if(mod(uAx, 2.0) < 0.1) a = abs(a - slice * 0.5);
-                        uv = vec2(cos(a), sin(a)) * r;
-                    }
-                    
-                    float rCircle = length(uv); float rBox = max(abs(uv.x), abs(uv.y)); float dist = mix(rCircle, rBox, uSShape);
-                    float angle = atan(uv.y, uv.x); dist += sin(angle * 4.0 + dist * 10.0) * uFlux * dist; float safeDist = max(dist, 0.01);
-                    float projection = (uSFov * 0.8 + 0.2) / safeDist;
-                    vec2 tunnelUV; tunnelUV.x = (angle + (1.0/safeDist) * uTwist) / 3.14159; tunnelUV.y = projection;
-                    if(abs(uCurve - 1.0) > 0.01) tunnelUV *= 1.0 + (uCurve - 1.0) * (1.0 - safeDist);
-                    
-                    vec2 flatUV = uv; flatUV.x /= uA;
-                    
-                    // Base UV is a blend between Plane and Tunnel (3D_MIX)
-                    vec2 mixedUV = mix(flatUV, tunnelUV * 0.8, modeBlend);
-                    
-                    // --- SWIRL LOGIC FIXED ---
-                    if (uTwirl > 0.0) {
-                        float tTime = uScroll * 4.0;
-                        
-                        vec2 screenUV = v - 0.5;
-                        // Use Static Camera Z=0.0 to prevent coordinate drift/flicker
-                        vec3 ro = vec3(PI/2.0, 0.0, 0.0);
-                        vec3 rd = normalize(vec3(screenUV.x * uA, screenUV.y, -0.6));
-                        
-                        // Apply Wideness/Swerve animation using tTime (independent of Camera Pos)
-                        rd.xy = rot(sin(tTime * 0.4) * uSwirlWide) * rd.xy;
-                        
-                        vec3 ta = vec3(cos(tTime * 0.8), sin(tTime * 0.8), 4.0);
-                        rd = lookAt(normalize(ta)) * rd;
-                        
-                        float t = 0.0;
-                        for(int j=0; j<35; j++) {
-                            float d = map(ro + rd * t);
-                            if(abs(d) < 0.005 || t > 20.0) break;
-                            t += d;
-                        }
-                        vec3 hit = ro + rd * t;
-                        
-                        float hitAngle = atan(hit.y, hit.x);
-                        // Map 3D Depth (z) to Texture Y to match Plane/Tunnel flow
-                        // Coordinates are local (small), ensuring smooth mixing from Plane mode
-                        vec2 worldUV = vec2(hitAngle / PI, hit.z * 0.2);
-                        
-                        mixedUV = mix(mixedUV, worldUV, uTwirl);
-                    }
-                    
-                    // Apply global scroll to the final result (Slides texture along geometry)
-                    mixedUV.y += uScroll;
-                    
-                    vec2 centered = abs(mod(mixedUV + 1.0, 2.0) - 1.0) - 0.5;
-                    float z = 1.0 + (centered.x * uCTilt.x) + (centered.y * uCTilt.y); centered /= max(z, 0.1);
-                    centered *= uCZ;
-                    float aspectFactor = mix(uA, 1.0, uWarp); centered.x *= aspectFactor;
-                    float cr = uCR * 0.01745329; float c = cos(cr); float s = sin(cr);
-                    centered = vec2(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
-                    centered.x /= aspectFactor; centered += uCT;
-                    float sOff = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
-                    vec2 rotatedUV = centered + 0.5; rotatedUV.x += sOff; rotatedUV = (rotatedUV - 0.5) * uF + 0.5;
-                    vec2 finalUV = abs(mod(rotatedUV + 1.0, 2.0) - 1.0);
-                    vec3 pixelAccum = vec3(0.0);
-                    for(int k=0; k<8; k++) {
-                        if (k >= uActiveCount) break;
-                        if (uMix[k] > 0.001) {
-                            pixelAccum += sampleSourceByIndex(k, finalUV) * uMix[k];
-                        }
-                    }
-                    
-                    vec3 smp = clamp(pixelAccum, 0.0, 1.0);
-                    
-                    if (uMode > 0.01) {
-                        if (uTHueStr > 0.01) { float hueArg = (mixedUV.y * 0.5) + uTHuePos; vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (hueArg + vec3(0.0, 0.33, 0.67))); smp = mix(smp, smp * rainbow * 2.0, uTHueStr * uMode); }
-                        if (uTWaveStr > 0.01) { float waveDomain = mixedUV.y - (uTWavePos * 10.0); float distFromWave = abs(fract(waveDomain) - 0.5); float width = 0.15 + (uTWaveStr * 0.2); float wavePulse = smoothstep(width, 0.0, distFromWave); wavePulse = wavePulse * wavePulse; float intensity = (uTWaveStr * uTWaveStr) * 0.8; vec3 waveColor = vec3(0.5, 0.8, 1.0) * wavePulse * intensity; smp += waveColor; }
-                    }
-                    if(i==0) finalColor.r = smp.r; else if(i==1) finalColor.g = smp.g; else finalColor.b = smp.b;
-                }
-                
-                finalColor = abs(finalColor - uSol);
-                if(uHue > 0.01) finalColor = hueShift(finalColor, uHue * 6.28318);
-                finalColor = (finalColor - 0.5) * uC + 0.5;
-                float l = dot(finalColor, vec3(0.299, 0.587, 0.114)); finalColor = mix(vec3(l), finalColor, uS);
-                if(uBloom > 0.01) finalColor += smoothstep(0.4, 1.0, l) * finalColor * uBloom * 2.0;
-                finalColor *= uBrit;
-                gl_FragColor = vec4(finalColor, 1.0);
-            }""".trimIndent()
-
-
-            kaleidoProgram = createProgram(vSrc, fSrcKaleido)
-            val activeUniforms = IntArray(1); GLES20.glGetProgramiv(kaleidoProgram, GLES20.GL_ACTIVE_UNIFORMS, activeUniforms, 0)
-            val lenBuf = IntArray(1); val sizeBuf = IntArray(1); val typeBuf = IntArray(1); val nameBuf = ByteArray(256)
-            for (i in 0 until activeUniforms[0]) {
-                GLES20.glGetActiveUniform(kaleidoProgram, i, 256, lenBuf, 0, sizeBuf, 0, typeBuf, 0, nameBuf, 0)
-                val name = String(nameBuf, 0, lenBuf[0])
-                val baseName = if(name.contains("[")) name.substring(0, name.indexOf("[")) else name
-                val loc = GLES20.glGetUniformLocation(kaleidoProgram, baseName)
-                if (loc != -1) uLocs[baseName] = loc
-            }
-
-            val vSrcSimple = "attribute vec4 p; attribute vec2 t; varying vec2 v; uniform mat4 uMVPMatrix; void main() { gl_Position = uMVPMatrix * p; v = t; }"
-            val fSrcSimple = "precision mediump float; varying vec2 v; uniform sampler2D uTex; void main() { gl_FragColor = texture2D(uTex, v); }"
-            simpleProgram = createProgram(vSrcSimple, fSrcSimple)
-            if (simpleProgram != 0) {
-                simpleULocs["uTex"] = GLES20.glGetUniformLocation(simpleProgram, "uTex")
-                simpleULocs["uMVPMatrix"] = GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix")
-            }
+            val fSimple = "precision mediump float; varying vec2 v; uniform sampler2D uTex; void main() { gl_FragColor = texture2D(uTex, v); }"
+            simpleProgram = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; uniform mat4 uMVPMatrix; void main() { gl_Position = uMVPMatrix * p; v = t; }", fSimple)
 
             initMainFBO(FIXED_WIDTH, FIXED_HEIGHT)
-            pBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)).position(0) }
-            tBuf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)).position(0) }
+            ctx.effectChain.init(FIXED_WIDTH, FIXED_HEIGHT)
 
             sources.forEach { it.init() }
-
             ctx.runOnUiThread { ctx.startCamera() }
         }
 
@@ -5094,17 +5353,21 @@ class MainActivity : AppCompatActivity() {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         }
 
-        override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) { if (w == 0 || h == 0) return; viewWidth = w; viewHeight = h; isSurfaceReady = true }
+        override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
+            if (w == 0 || h == 0) return
+            viewWidth = w; viewHeight = h
+            isSurfaceReady = true
+        }
 
         override fun onDrawFrame(gl: GL10?) {
             if (!isSurfaceReady) return
-            sources.forEach {
-                if (!it.isReady) it.init()
-            }
+            sources.forEach { if (!it.isReady) it.init() }
+
             val now = System.nanoTime()
             deltaTime = (now - lastTime) / 1e9f
             lastTime = now
 
+            // Global Rotation Logic
             if (isRotAnimating && rotTargetM != null) {
                 rotAnimTime += deltaTime
                 if (rotAnimTime >= rotAnimDuration) {
@@ -5117,224 +5380,216 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            // Update Controls & Physics
             ctx.controls.forEach { it.update(deltaTime) }
+            ctx.effectChain.effects.forEach { if(it.active) it.update(deltaTime) }
 
+            // Process Inputs
             sources.forEach { it.processToFbo() }
-
             manageSurfaces()
-            updateMovementPhysics(deltaTime)
-            renderToMainFBO()
+
+            // Run Effect Chain
+            val finalTex = ctx.effectChain.process(this)
+
+            // Final Output to Screen FBO
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+            GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+            GLES20.glUseProgram(simpleProgram)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, finalTex)
+
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(simpleProgram, "uTex"), 0)
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix"), 1, false, identityMatrix, 0)
+
+            ShaderHelper.bindQuad(simpleProgram)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
             renderToScreen()
             renderToExternal()
             renderToRecorder()
             handleCapture()
         }
 
-        private fun updateMovementPhysics(d: Float) {
-            val speedCtrl = ctx.controlsMap["S_SPEED"]
-            if (speedCtrl != null) {
-                val rawSpeed = speedCtrl.computedValue
-                val sign = sign(rawSpeed)
-                val curvedSpeed = sign * (abs(rawSpeed)).pow(2.2f)
-
-                // Add speed to accumulator
-                scrollAccum += curvedSpeed * d * 0.6f
-
-                // This prevents the image from stopping "halfway" through a cycle.
-                if (abs(rawSpeed) < 0.05f) {
-                    val nearestCenter = round(scrollAccum)
-                    val distToCenter = nearestCenter - scrollAccum
-                    // Smoothly interpolate towards the integer (origin)
-                    scrollAccum += distToCenter * d * 3.0f
-                }
-
-                // Keep numbers sane to prevent float precision issues over long run times
-                // Modulo 2.0 keeps the phase correct for the shader logic
-                if (abs(scrollAccum) > 1000.0f) {
-                    scrollAccum %= 2.0f
-                }
-            }
-        }
-
-        private fun renderToMainFBO() {
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-            GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            GLES20.glUseProgram(kaleidoProgram)
-
-            fun safeUni(name: String, v: Float) { uLocs[name]?.let { GLES20.glUniform1f(it, v) } }
-            fun safeUni2(name: String, v1: Float, v2: Float) { uLocs[name]?.let { GLES20.glUniform2f(it, v1, v2) } }
-
-            val activeCount = min(sources.size, 8)
-            uLocs["uActiveCount"]?.let { GLES20.glUniform1i(it, activeCount) }
-
-            for(i in 0 until activeCount) {
-                val source = sources[i]
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + i)
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source.fboTexId)
-
-                val control = ctx.controlsMap[source.id]
-                val mixLevel = control?.computedValue ?: 0f
-
-                val texLoc = GLES20.glGetUniformLocation(kaleidoProgram, "uTex[$i]")
-                if(texLoc != -1) GLES20.glUniform1i(texLoc, i)
-                val mixLoc = GLES20.glGetUniformLocation(kaleidoProgram, "uMix[$i]")
-                if(mixLoc != -1) GLES20.glUniform1f(mixLoc, mixLevel)
-            }
-
-            safeUni("uA", FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat())
-            val vMAngle = ctx.controlsMap["M_ANGLE"]?.computedValue ?: 0f
-            val vMZoom = ctx.controlsMap["M_ZOOM"]?.computedValue ?: 1f
-            val vMTx = ctx.controlsMap["M_TX"]?.computedValue ?: 0f
-            val vMTy = ctx.controlsMap["M_TY"]?.computedValue ?: 0f
-            val vMTiltX = ctx.controlsMap["M_TILTX"]?.computedValue ?: 0f
-            val vMTiltY = ctx.controlsMap["M_TILTY"]?.computedValue ?: 0f
-            val v3DMix = ctx.controlsMap["3D_MIX"]?.computedValue ?: 0f
-
-            val axisCtrl = ctx.controlsMap["AXIS"]
-            val currentAxis = axisCtrl?.value?.toFloat() ?: axisCount
-            safeUni("uAx", currentAxis)
-
-            safeUni("uAx", axisCount)
-            safeUni("uMR", (vMAngle * 360f + mRotAccum).toFloat() + 90f)
-            safeUni("uMZ", vMZoom)
-            safeUni2("uMT", vMTx * 2f, vMTy * 2f)
-            safeUni2("uMTilt", vMTiltX * 1.5f, vMTiltY * 1.5f)
-
-            safeUni("uMode", v3DMix.pow(2.0f))
-            safeUni("uScroll", scrollAccum)
-            safeUni("uSShape", ctx.controlsMap["S_SHAPE"]?.computedValue ?: 0f)
-            safeUni("uSFov", ctx.controlsMap["S_FOV"]?.computedValue ?: 0.5f)
-            safeUni("uTHueStr", ctx.controlsMap["T_HUE_STR"]?.computedValue ?: 0f)
-            safeUni("uTHuePos", ctx.controlsMap["T_HUE_POS"]?.computedValue ?: 0f)
-            safeUni("uTWaveStr", ctx.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f)
-            safeUni("uTWavePos", ctx.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
-
-            safeUni("uCurve", ctx.controlsMap["CURVE"]?.computedValue ?: 1.0f)
-            safeUni("uTwist", ctx.controlsMap["TWIST"]?.computedValue ?: 0f)
-            safeUni("uFlux", ctx.controlsMap["FLUX"]?.computedValue ?: 0f)
-            safeUni("uSwirlWide", ctx.controlsMap["S_WIDE"]?.computedValue ?: 1.0f)
-
-            safeUni("uTwirl", ctx.controlsMap["UTWIRL"]?.computedValue ?: 0f)
-
-            val vCZoom = ctx.controlsMap["C_ZOOM"]?.computedValue ?: 1f
-            val vCAngle = ctx.controlsMap["C_ANGLE"]?.computedValue ?: 0f
-            val vCTx = ctx.controlsMap["C_TX"]?.computedValue ?: 0f
-            val vCTy = ctx.controlsMap["C_TY"]?.computedValue ?: 0f
-            val vCTiltX = ctx.controlsMap["C_TILTX"]?.computedValue ?: 0f
-            val vCTiltY = ctx.controlsMap["C_TILTY"]?.computedValue ?: 0f
-
-            safeUni("uCZ", vCZoom)
-            safeUni("uCR", (vCAngle * 360f + cRotAccum).toFloat())
-            safeUni2("uCT", vCTx, vCTy)
-            safeUni2("uCTilt", vCTiltX * 1.2f, vCTiltY * 1.2f)
-
-            safeUni2("uF", if (rot180) -flipX else flipX, if (rot180) -flipY else flipY)
-            safeUni("uWarp", ctx.controlsMap["WARP"]?.computedValue ?: 0f)
-
-            safeUni("uC", ctx.controlsMap["CONTRAST"]?.computedValue ?: 1f)
-            safeUni("uS", ctx.controlsMap["VIBRANCE"]?.computedValue ?: 1f)
-            safeUni("uHue", ctx.controlsMap["HUE"]?.computedValue ?: 0f)
-            safeUni("uSol", ctx.controlsMap["NEG"]?.computedValue ?: 0f)
-            safeUni("uBloom", ctx.controlsMap["GLOW"]?.computedValue ?: 0f)
-            safeUni("uRGB", ctx.controlsMap["RGB"]?.computedValue ?: 0f)
-            safeUni("uMRGB", ctx.controlsMap["M_RGB"]?.computedValue ?: 0f)
-            safeUni("uBrit", ctx.controlsMap["BRIT"]?.computedValue ?: 1.0f)
-
-            bindCommonAttribs(kaleidoProgram)
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        }
-
-        // [Copy renderToScreen, renderToExternal, renderToRecorder, drawSimpleTexture, bindCommonAttribs, createProgram, compile, createOESTex, setupEGL, manageSurfaces, handleStopRecording, handleCapture from previous code - NO CHANGES]
         private fun renderToScreen() {
             if (simpleProgram == 0) return
-            GLES20.glViewport(0, 0, viewWidth, viewHeight); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glViewport(0, 0, viewWidth, viewHeight)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
             val isPortrait = viewWidth < viewHeight
             android.opengl.Matrix.setIdentityM(mvpMatrix, 0)
-            val fboRatio = FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat(); val screenRatio = viewWidth.toFloat() / viewHeight.toFloat()
+
+            val fboRatio = FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat()
+            val screenRatio = viewWidth.toFloat() / viewHeight.toFloat()
+
             if (isPortrait) {
                 android.opengl.Matrix.rotateM(mvpMatrix, 0, -90f, 0f, 0f, 1f)
                 val rotatedFboRatio = 1f / fboRatio
-                if (screenRatio < rotatedFboRatio) { val scale = rotatedFboRatio / screenRatio; android.opengl.Matrix.scaleM(mvpMatrix, 0, 1f, scale, 1f) }
-                else { val scale = screenRatio / rotatedFboRatio; android.opengl.Matrix.scaleM(mvpMatrix, 0, scale, 1f, 1f) }
+                if (screenRatio < rotatedFboRatio) {
+                    val scale = rotatedFboRatio / screenRatio
+                    android.opengl.Matrix.scaleM(mvpMatrix, 0, 1f, scale, 1f)
+                } else {
+                    val scale = screenRatio / rotatedFboRatio
+                    android.opengl.Matrix.scaleM(mvpMatrix, 0, scale, 1f, 1f)
+                }
             } else {
-                if (screenRatio > fboRatio) { val scale = screenRatio / fboRatio; android.opengl.Matrix.scaleM(mvpMatrix, 0, 1f, scale, 1f) }
-                else { val scale = fboRatio / screenRatio; android.opengl.Matrix.scaleM(mvpMatrix, 0, scale, 1f, 1f) }
+                if (screenRatio > fboRatio) {
+                    val scale = screenRatio / fboRatio
+                    android.opengl.Matrix.scaleM(mvpMatrix, 0, 1f, scale, 1f)
+                } else {
+                    val scale = fboRatio / screenRatio
+                    android.opengl.Matrix.scaleM(mvpMatrix, 0, scale, 1f, 1f)
+                }
             }
-            GLES20.glUseProgram(simpleProgram); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
-            GLES20.glUniform1i(simpleULocs["uTex"] ?: -1, 0); GLES20.glUniformMatrix4fv(simpleULocs["uMVPMatrix"] ?: -1, 1, false, mvpMatrix, 0)
-            bindCommonAttribs(simpleProgram); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+            GLES20.glUseProgram(simpleProgram)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
+
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(simpleProgram, "uTex") ?: -1, 0)
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix") ?: -1, 1, false, mvpMatrix, 0)
+
+            ShaderHelper.bindQuad(simpleProgram)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
+
         private fun renderToExternal() {
             if (extEglSurface != EGL14.EGL_NO_SURFACE) {
-                val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW); val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
+                val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
+                val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
                 if (EGL14.eglMakeCurrent(mSavedDisplay, extEglSurface, extEglSurface, mSavedContext)) {
-                    GLES20.glViewport(0, 0, extWidth, extHeight); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT); drawSimpleTexture(fboTexId)
-                    EGLExt.eglPresentationTimeANDROID(mSavedDisplay, extEglSurface!!, System.nanoTime()); EGL14.eglSwapBuffers(mSavedDisplay, extEglSurface)
+                    GLES20.glViewport(0, 0, extWidth, extHeight)
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    drawSimpleTexture(fboTexId)
+                    EGLExt.eglPresentationTimeANDROID(mSavedDisplay, extEglSurface!!, System.nanoTime())
+                    EGL14.eglSwapBuffers(mSavedDisplay, extEglSurface)
                 }
                 EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
             }
         }
+
         private fun renderToRecorder() {
             if (recordSurface != EGL14.EGL_NO_SURFACE && videoRecorder != null) {
-                val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW); val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
+                val oldDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
+                val oldRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
                 if (EGL14.eglMakeCurrent(mSavedDisplay, recordSurface, recordSurface, mSavedContext)) {
-                    GLES20.glViewport(0, 0, videoRecorder!!.width, videoRecorder!!.height); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    GLES20.glViewport(0, 0, videoRecorder!!.width, videoRecorder!!.height)
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                     drawSimpleTexture(fboTexId)
                     val timeNow = System.nanoTime()
                     if (recordStartTimeNs == 0L) recordStartTimeNs = timeNow
                     EGLExt.eglPresentationTimeANDROID(mSavedDisplay, recordSurface!!, timeNow - recordStartTimeNs)
-                    EGL14.eglSwapBuffers(mSavedDisplay, recordSurface); videoRecorder?.drain(false)
+                    EGL14.eglSwapBuffers(mSavedDisplay, recordSurface)
+                    videoRecorder?.drain(false)
                 }
-                EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext); handleStopRecording()
+                EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
+                handleStopRecording()
             }
         }
+
         private fun drawSimpleTexture(texId: Int) {
             if (simpleProgram == 0) return
-            GLES20.glUseProgram(simpleProgram); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
-            GLES20.glUniform1i(simpleULocs["uTex"] ?: -1, 0); GLES20.glUniformMatrix4fv(simpleULocs["uMVPMatrix"] ?: -1, 1, false, identityMatrix, 0)
-            bindCommonAttribs(simpleProgram); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glUseProgram(simpleProgram)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(simpleProgram, "uTex") ?: -1, 0)
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix") ?: -1, 1, false, identityMatrix, 0)
+
+            ShaderHelper.bindQuad(simpleProgram)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
-        private fun bindCommonAttribs(prog: Int) {
-            val pL = GLES20.glGetAttribLocation(prog, "p"); val tL = GLES20.glGetAttribLocation(prog, "t")
-            GLES20.glEnableVertexAttribArray(pL); GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf)
-            GLES20.glEnableVertexAttribArray(tL); GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
+
+        private fun setupEGL() {
+            mSavedDisplay = EGL14.eglGetCurrentDisplay()
+            mSavedContext = EGL14.eglGetCurrentContext()
+            val currentConfigId = IntArray(1)
+            EGL14.eglQueryContext(mSavedDisplay, mSavedContext, EGL14.EGL_CONFIG_ID, currentConfigId, 0)
+            val configs = arrayOfNulls<EGL14EGLConfig>(1)
+            val num = IntArray(1)
+            EGL14.eglChooseConfig(mSavedDisplay, intArrayOf(EGL14.EGL_CONFIG_ID, currentConfigId[0], EGL14.EGL_NONE), 0, configs, 0, 1, num, 0)
+            mEglConfig = configs[0]
         }
-        private fun createProgram(vSrc: String, fSrc: String): Int {
-            val vShader = compile(GLES20.GL_VERTEX_SHADER, vSrc); val fShader = compile(GLES20.GL_FRAGMENT_SHADER, fSrc)
-            if (vShader == 0 || fShader == 0) return 0
-            val prog = GLES20.glCreateProgram(); GLES20.glAttachShader(prog, vShader); GLES20.glAttachShader(prog, fShader); GLES20.glLinkProgram(prog)
-            val linkStatus = IntArray(1); GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, linkStatus, 0)
-            if (linkStatus[0] == 0) { Log.e("GL", "Link Failed: " + GLES20.glGetProgramInfoLog(prog)); GLES20.glDeleteProgram(prog); return 0 }
-            return prog
-        }
-        private fun compile(type: Int, src: String): Int {
-            val shader = GLES20.glCreateShader(type); GLES20.glShaderSource(shader, src); GLES20.glCompileShader(shader)
-            val compiled = IntArray(1); GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
-            if (compiled[0] == 0) { Log.e("GL", "Compile Failed: " + GLES20.glGetShaderInfoLog(shader)); GLES20.glDeleteShader(shader); return 0 }
-            return shader
-        }
-        private fun createOESTex(): Int { val t=IntArray(1); GLES20.glGenTextures(1,t,0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,t[0]); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MIN_FILTER,GLES20.GL_LINEAR); GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MAG_FILTER,GLES20.GL_LINEAR); return t[0] }
-        private fun setupEGL() { mSavedDisplay = EGL14.eglGetCurrentDisplay(); mSavedContext = EGL14.eglGetCurrentContext(); val currentConfigId = IntArray(1); EGL14.eglQueryContext(mSavedDisplay, mSavedContext, EGL14.EGL_CONFIG_ID, currentConfigId, 0); val configs = arrayOfNulls<EGL14EGLConfig>(1); val num = IntArray(1); EGL14.eglChooseConfig(mSavedDisplay, intArrayOf(EGL14.EGL_CONFIG_ID, currentConfigId[0], EGL14.EGL_NONE), 0, configs, 0, 1, num, 0); mEglConfig = configs[0] }
+
         private fun manageSurfaces() {
             val args = extSurfaceArgs
-            if (args != null && extEglSurface == EGL14.EGL_NO_SURFACE) { val rawSurf = args.first; extWidth = args.second; extHeight = args.third; extEglSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, rawSurf, intArrayOf(EGL14.EGL_NONE), 0) }
-            if (args == null && extEglSurface != EGL14.EGL_NO_SURFACE) { EGL14.eglDestroySurface(mSavedDisplay, extEglSurface); extEglSurface = EGL14.EGL_NO_SURFACE }
-            if (pendingRecordFile != null) { videoRecorder = VideoRecorder(ctx, viewWidth, viewHeight, pendingRecordFile!!); recordSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, videoRecorder!!.inputSurface, intArrayOf(EGL14.EGL_NONE), 0); pendingRecordFile = null }
+            if (args != null && extEglSurface == EGL14.EGL_NO_SURFACE) {
+                val rawSurf = args.first; extWidth = args.second; extHeight = args.third
+                extEglSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, rawSurf, intArrayOf(EGL14.EGL_NONE), 0)
+            }
+            if (args == null && extEglSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglDestroySurface(mSavedDisplay, extEglSurface)
+                extEglSurface = EGL14.EGL_NO_SURFACE
+            }
+            if (pendingRecordFile != null) {
+                videoRecorder = VideoRecorder(ctx, viewWidth, viewHeight, pendingRecordFile!!)
+                recordSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, videoRecorder!!.inputSurface, intArrayOf(EGL14.EGL_NONE), 0)
+                pendingRecordFile = null
+            }
         }
-        private fun handleStopRecording() { if (isStopRequested) { videoRecorder?.drain(true); val out = videoRecorder?.file; if (recordSurface != EGL14.EGL_NO_SURFACE) { EGL14.eglDestroySurface(mSavedDisplay, recordSurface); recordSurface = EGL14.EGL_NO_SURFACE }; videoRecorder?.release(); videoRecorder = null; isStopRequested = false; onStopCallback?.invoke(out) } }
+
+        private fun handleStopRecording() {
+            if (isStopRequested) {
+                videoRecorder?.drain(true)
+                val out = videoRecorder?.file
+                if (recordSurface != EGL14.EGL_NO_SURFACE) {
+                    EGL14.eglDestroySurface(mSavedDisplay, recordSurface)
+                    recordSurface = EGL14.EGL_NO_SURFACE
+                }
+                videoRecorder?.release()
+                videoRecorder = null
+                isStopRequested = false
+                onStopCallback?.invoke(out)
+            }
+        }
+
         private fun handleCapture() {
             if (captureRequested) {
-                captureRequested = false; val b = ByteBuffer.allocate(FIXED_WIDTH * FIXED_HEIGHT * 4); GLES20.glReadPixels(0, 0, FIXED_WIDTH, FIXED_HEIGHT, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
+                captureRequested = false
+                val b = ByteBuffer.allocate(FIXED_WIDTH * FIXED_HEIGHT * 4)
+                GLES20.glReadPixels(0, 0, FIXED_WIDTH, FIXED_HEIGHT, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
                 Thread {
                     val bmp = Bitmap.createBitmap(FIXED_WIDTH, FIXED_HEIGHT, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
-                    val values = ContentValues().apply { put(MediaStore.Images.Media.DISPLAY_NAME, "SB_${System.currentTimeMillis()}.jpg"); put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg"); put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SpaceBeam") }
-                    ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)?.let { uri -> ctx.contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) } }
+                    val values = ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, "SB_${System.currentTimeMillis()}.jpg")
+                        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SpaceBeam")
+                    }
+                    ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)?.let { uri ->
+                        ctx.contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+                    }
                 }.start()
             }
         }
     }
+
+    abstract class ShaderEffect(
+        val id: String,
+        val name: String,
+        val mainActivity: MainActivity
+    ) {
+        val controls = mutableListOf<PropertyControl>()
+        var active: Boolean = true
+
+        abstract fun init()
+        abstract fun release()
+        abstract fun render(inputTexId: Int, outputFbo: Int, width: Int, height: Int)
+
+        // Allow effects to update physics
+        open fun update(deltaTime: Float) {}
+
+        // NEW: Allow effects to reset internal state (like scroll position)
+        open fun reset() {}
+
+        protected fun addControl(control: PropertyControl) {
+            controls.add(control)
+            mainActivity.controlsMap[control.id] = control
+            mainActivity.controls.add(control)
+        }
+    }
+
 }
 class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeight: Int, val file: File) {
 
@@ -5536,6 +5791,8 @@ enum class SourceType {
     MEDIA_IMAGE,
     RTSP
 }
+// In MainActivity.kt
+
 abstract class SourcePropertyControl(
     id: String,
     label: String,
@@ -5549,17 +5806,17 @@ abstract class SourcePropertyControl(
     outMin = 0f,
     outMax = 1f,
     hasModulation = true,
-    includeInPreset = false,
+    includeInPreset = false, // Mix levels are usually manual for now, but can be changed
     layoutStyle = LayoutStyle.ROW,
     iconResId = android.R.drawable.presence_video_online,
     defaultLocked = true
 ) {
-    // Override openMenu to append content at the bottom instead of injecting at top via addExtraControls
     override fun openMenu(context: Context) {
         super.openMenu(context)
 
+        // Add Remove Button at bottom
         val removeBtn = Button(context).apply {
-            text = "REMOVE"
+            text = "REMOVE SOURCE"
             textSize = 12f
             setTextColor(Color.WHITE)
             background = GradientDrawable().apply {
@@ -5567,30 +5824,69 @@ abstract class SourcePropertyControl(
                 cornerRadius = 10f
                 setStroke(1, Color.RED)
             }
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 100).apply {
                 topMargin = 30
                 bottomMargin = 10
             }
-            setOnClickListener {
-                showDeleteConfirmation()
-            }
+            setOnClickListener { showDeleteConfirmation() }
         }
         floatingPanel?.addView(removeBtn)
+    }
+
+    // NEW: Inject the Geometry controls into the floating menu
+    override fun addExtraControls(panel: LinearLayout, context: Context) {
+        val channel = mainActivity.getRendererSource(sourceId) ?: return
+
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 20 }
+        }
+
+        fun mkBtn(txt: String, action: () -> Unit): Button {
+            return Button(context).apply {
+                text = txt
+                textSize = 12f
+                setTextColor(Color.WHITE)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#444444"))
+                    cornerRadius = 10f
+                    setStroke(1, Color.GRAY)
+                }
+                layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(4,0,4,0) }
+                setOnClickListener { action() }
+            }
+        }
+
+        row.addView(mkBtn("FLIP X") {
+            channel.userFlipX *= -1f
+            // Trigger visual refresh if needed, usually automatic via GL loop
+        })
+        row.addView(mkBtn("FLIP Y") {
+            channel.userFlipY *= -1f
+        })
+        row.addView(mkBtn("ROT 180") {
+            channel.userRot180 = !channel.userRot180
+        })
+
+        panel.addView(TextView(context).apply {
+            text = "SOURCE GEOMETRY"; textSize=10f; setTextColor(Color.LTGRAY)
+        })
+        panel.addView(row)
     }
 
     private fun showDeleteConfirmation() {
         androidx.appcompat.app.AlertDialog.Builder(mainActivity)
             .setTitle("Remove Source?")
             .setMessage("Remove $label from mixer?")
-            .setPositiveButton("Remove") { _, _ ->
-                mainActivity.removeSource(this)
-            }
+            .setPositiveButton("Remove") { _, _ -> mainActivity.removeSource(this) }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
     abstract fun onRemove()
 }
+
 
 class CameraSourceControl(mainActivity: MainActivity) : PropertyControl(
     id = "CAM_MAIN",
