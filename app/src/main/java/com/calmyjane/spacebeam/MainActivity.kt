@@ -4915,7 +4915,6 @@ class MainActivity : AppCompatActivity() {
             uniform float uBrit, uTHueStr, uTHuePos, uTWaveStr, uTWavePos, uTwirl;
             uniform vec2 uMT, uCT, uF, uMTilt, uCTilt;
             uniform float uCurve, uTwist, uFlux, uSShape, uSFov, uScroll, uMode;
-            // NEW UNIFORM
             uniform float uSwirlWide;
             
             #define PI 3.14159265
@@ -4983,17 +4982,16 @@ class MainActivity : AppCompatActivity() {
                     // Base UV is a blend between Plane and Tunnel (3D_MIX)
                     vec2 mixedUV = mix(flatUV, tunnelUV * 0.8, modeBlend);
                     
-                    // --- SWIRL LOGIC (Merged) ---
-                    // Only perform expensive raymarch if Swirl Strength > 0
-                    if (uTwirl > 0.01) {
+                    // --- SWIRL LOGIC FIXED ---
+                    if (uTwirl > 0.0) {
                         float tTime = uScroll * 4.0;
                         
                         vec2 screenUV = v - 0.5;
-                        vec3 ro = vec3(PI/2.0, 0.0, -tTime);
+                        // Use Static Camera Z=0.0 to prevent coordinate drift/flicker
+                        vec3 ro = vec3(PI/2.0, 0.0, 0.0);
                         vec3 rd = normalize(vec3(screenUV.x * uA, screenUV.y, -0.6));
                         
-                        // Apply Camera Path Swerve scaled by uSwirlWide
-                        // "Wideness" controls magnitude of rotation
+                        // Apply Wideness/Swerve animation using tTime (independent of Camera Pos)
                         rd.xy = rot(sin(tTime * 0.4) * uSwirlWide) * rd.xy;
                         
                         vec3 ta = vec3(cos(tTime * 0.8), sin(tTime * 0.8), 4.0);
@@ -5008,14 +5006,14 @@ class MainActivity : AppCompatActivity() {
                         vec3 hit = ro + rd * t;
                         
                         float hitAngle = atan(hit.y, hit.x);
-                        vec2 worldUV = (vec2(hit.z * 0.1, hitAngle / PI) * 2.0) - vec2(0.0, uScroll);
+                        // Map 3D Depth (z) to Texture Y to match Plane/Tunnel flow
+                        // Coordinates are local (small), ensuring smooth mixing from Plane mode
+                        vec2 worldUV = vec2(hitAngle / PI, hit.z * 0.2);
                         
-                        // Removed Freckles/Dots Logic here
-                        
-                        // Blend the Swirl result into the existing UVs based on UTWIRL strength
                         mixedUV = mix(mixedUV, worldUV, uTwirl);
                     }
                     
+                    // Apply global scroll to the final result (Slides texture along geometry)
                     mixedUV.y += uScroll;
                     
                     vec2 centered = abs(mod(mixedUV + 1.0, 2.0) - 1.0) - 0.5;
@@ -5037,7 +5035,6 @@ class MainActivity : AppCompatActivity() {
                     }
                     
                     vec3 smp = clamp(pixelAccum, 0.0, 1.0);
-                    // Removed Freckle application
                     
                     if (uMode > 0.01) {
                         if (uTHueStr > 0.01) { float hueArg = (mixedUV.y * 0.5) + uTHuePos; vec3 rainbow = 0.5 + 0.5 * cos(6.28318 * (hueArg + vec3(0.0, 0.33, 0.67))); smp = mix(smp, smp * rainbow * 2.0, uTHueStr * uMode); }
