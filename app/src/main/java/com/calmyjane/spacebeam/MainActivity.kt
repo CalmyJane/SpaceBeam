@@ -2532,9 +2532,19 @@ class MainActivity : AppCompatActivity() {
 
         init {
             addControl(PropertyControl("3D_MIX", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+
+            // Shape & Speed
             addControl(PropertyControl("S_SHAPE", "SHAPE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
             addControl(PropertyControl("S_FOV", "FISHEYE", defaultValue = 500, outMin=0.2f, outMax=1.5f, hasModulation = true))
             addControl(PropertyControl("S_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
+
+            // Fog (New)
+            addControl(PropertyControl("T_FOG", "FOG DIST", defaultValue = 0, outMin=0.0f, outMax=0.5f, hasModulation = true))
+            addControl(PropertyControl("T_FOG_H", "FOG HUE", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
+            addControl(PropertyControl("T_FOG_S", "FOG SAT", defaultValue = 0, outMin=0.0f, outMax=1.0f))
+            addControl(PropertyControl("T_FOG_V", "FOG BRIT", defaultValue = 1000, outMin=0.0f, outMax=1.0f))
+
+            // Color & Distortion
             addControl(PropertyControl("T_HUE_STR", "RAINBOW STR", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
             addControl(PropertyControl("T_HUE_POS", "RAINBOW POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
             addControl(PropertyControl("T_WAVE_STR", "WAVE STR", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
@@ -2544,7 +2554,6 @@ class MainActivity : AppCompatActivity() {
             addControl(PropertyControl("FLUX", "FLUX", defaultValue = 0, outMin=0f, outMax=0.5f, hasModulation = true))
         }
 
-        // Reset internal scroll state
         override fun reset() {
             scrollAccum = 0.0f
         }
@@ -2555,7 +2564,7 @@ class MainActivity : AppCompatActivity() {
             val sign = sign(rawSpeed)
             val curvedSpeed = sign * (abs(rawSpeed)).pow(2.2f)
             scrollAccum += curvedSpeed * deltaTime * 0.6f
-            if (abs(scrollAccum) > 2.0f) scrollAccum %= 2.0f
+            // No modulo here! We let it grow, but handle the wrap in shader before mixing.
         }
 
         override fun init() {
@@ -2563,23 +2572,74 @@ class MainActivity : AppCompatActivity() {
             precision highp float; varying vec2 v; uniform sampler2D uTex;
             uniform float uMix, uShape, uFov, uScroll, uHStr, uHPos, uWStr, uWPos, uRatio;
             uniform float uCurve, uTwist, uFlux;
+            uniform float uFogD, uFogH, uFogS, uFogV;
+
+            vec3 hsb2rgb(vec3 c) {
+                vec3 rgb = clamp(abs(mod(c.x*6.0+vec3(0.0,4.0,2.0), 6.0)-3.0)-1.0, 0.0, 1.0);
+                return c.z * mix(vec3(1.0), rgb, c.y);
+            }
+
             void main() {
-                vec2 uv = v - 0.5; 
-                vec2 flatUV = uv;
+                vec2 flatUV = v - 0.5; 
+                vec2 uv = flatUV;
                 uv.x *= uRatio;
-                float rC = length(uv); float rB = max(abs(uv.x), abs(uv.y)); float dist = mix(rC, rB, uShape);
+                
+                // --- Geometry Calculation ---
+                float rC = length(uv); 
+                float rB = max(abs(uv.x), abs(uv.y)); 
+                float dist = mix(rC, rB, uShape);
                 float ang = atan(uv.y, uv.x);
+                
+                // Flux
                 dist += sin(ang * 4.0 + dist * 10.0) * uFlux * dist; 
                 float safe = max(dist, 0.01);
+                
+                // Projection
                 float proj = (uFov * 0.8 + 0.2) / safe;
+                
+                // --- Calculate Tunnel UVs ---
                 vec2 tUV; 
                 tUV.x = (ang + (1.0/safe) * uTwist) / 3.14159; 
                 tUV.y = proj + uScroll;
+                
                 if(abs(uCurve - 1.0) > 0.01) tUV *= 1.0 + (uCurve - 1.0) * (1.0 - safe);
-                vec2 finalUV = mix(flatUV, tUV, uMix * uMix);
-                vec4 col = texture2D(uTex, abs(mod(finalUV + 0.5, 2.0) - 1.0));
-                if (uHStr > 0.01) { float ha = (finalUV.y * 0.5) + uHPos; vec3 rb = 0.5 + 0.5 * cos(6.28 * (ha + vec3(0.0, 0.33, 0.67))); col.rgb = mix(col.rgb, col.rgb * rb * 2.0, uHStr); }
-                if (uWStr > 0.01) { float wd = finalUV.y - (uWPos * 10.0); float dw = abs(fract(wd) - 0.5); float wp = smoothstep(0.15 + uWStr*0.2, 0.0, dw); col.rgb += vec3(0.5, 0.8, 1.0) * wp * uWStr; }
+
+                // --- KEY FIX: Wrap Coordinates BEFORE Mixing ---
+                // This ensures we interpolate between small numbers [0,1], 
+                // preventing the jump when uScroll is large.
+                vec2 wrappedTunnel = abs(mod(tUV + 0.5, 2.0) - 1.0);
+                vec2 wrappedFlat = abs(mod(flatUV + 0.5, 2.0) - 1.0); // usually just flatUV, but safe
+
+                // Mix the Wrapped Coordinates
+                vec2 finalUV = mix(wrappedFlat, wrappedTunnel, uMix * uMix);
+                
+                vec4 col = texture2D(uTex, finalUV);
+
+                // --- Color Effects ---
+                if (uHStr > 0.01) { 
+                    float ha = (finalUV.y * 0.5) + uHPos; 
+                    vec3 rb = 0.5 + 0.5 * cos(6.28 * (ha + vec3(0.0, 0.33, 0.67))); 
+                    col.rgb = mix(col.rgb, col.rgb * rb * 2.0, uHStr); 
+                }
+                if (uWStr > 0.01) { 
+                    float wd = finalUV.y - (uWPos * 10.0); 
+                    float dw = abs(fract(wd) - 0.5); 
+                    float wp = smoothstep(0.15 + uWStr*0.2, 0.0, dw); 
+                    col.rgb += vec3(0.5, 0.8, 1.0) * wp * uWStr; 
+                }
+                
+                // --- Fog (Only on tunnel part) ---
+                if (uFogD > 0.001) {
+                    // Simple distance fog based on 'proj' inverse
+                    float depth = 1.0 / safe;
+                    float fogAmt = 1.0 - exp(-depth * depth * uFogD * 0.1);
+                    fogAmt = clamp(fogAmt, 0.0, 1.0);
+                    
+                    vec3 fogColor = hsb2rgb(vec3(uFogH, uFogS, uFogV));
+                    float effectiveFog = fogAmt * smoothstep(0.0, 1.0, uMix);
+                    col.rgb = mix(col.rgb, fogColor, effectiveFog);
+                }
+
                 gl_FragColor = col;
             }"""
             prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
@@ -2594,13 +2654,24 @@ class MainActivity : AppCompatActivity() {
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uShape"), mainActivity.controlsMap["S_SHAPE"]?.computedValue ?: 0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFov"), mainActivity.controlsMap["S_FOV"]?.computedValue ?: 0.5f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uScroll"), scrollAccum)
+
+            // Color
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uHStr"), mainActivity.controlsMap["T_HUE_STR"]?.computedValue ?: 0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uHPos"), mainActivity.controlsMap["T_HUE_POS"]?.computedValue ?: 0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWStr"), mainActivity.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWPos"), mainActivity.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
+
+            // Distort
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uCurve"), mainActivity.controlsMap["CURVE"]?.computedValue ?: 1.0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTwist"), mainActivity.controlsMap["TWIST"]?.computedValue ?: 0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFlux"), mainActivity.controlsMap["FLUX"]?.computedValue ?: 0f)
+
+            // Fog
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogD"), mainActivity.controlsMap["T_FOG"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogH"), mainActivity.controlsMap["T_FOG_H"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogS"), mainActivity.controlsMap["T_FOG_S"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogV"), mainActivity.controlsMap["T_FOG_V"]?.computedValue ?: 1f)
+
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
         override fun release() { GLES20.glDeleteProgram(prog) }
@@ -2611,19 +2682,14 @@ class MainActivity : AppCompatActivity() {
         private var scrollAccum = 0.0f
         private var swayAccum = 0.0f
 
-        // Math for seamless looping:
-        // Geometry uses gyroid(p * 0.8). Period = 2*PI / 0.8 = 7.85398...
-        private val LOOP_PERIOD = (2.0 * Math.PI / 0.8).toFloat()
-
         init {
             addControl(PropertyControl("UTWIRL", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
 
-            // Movement & Look
             addControl(PropertyControl("S_WIDE", "WIDENESS", defaultValue = 500, outMin=0.0f, outMax=2.0f, hasModulation = true))
             addControl(PropertyControl("S_ACTIVITY", "ACTIVITY", defaultValue = 200, outMin=0.0f, outMax=2.0f, hasModulation = true))
             addControl(PropertyControl("SWIRL_SPEED", "SPEED", defaultValue = 500, outMin=-4.0f, outMax=4.0f, hasModulation = true))
 
-            // Fog Controls (Default Density 0 = Off)
+            // Fog Controls
             addControl(PropertyControl("S_FOG", "FOG DIST", defaultValue = 0, outMin=0.0f, outMax=0.2f, hasModulation = true))
             addControl(PropertyControl("S_FOG_H", "FOG HUE", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
             addControl(PropertyControl("S_FOG_S", "FOG SAT", defaultValue = 0, outMin=0.0f, outMax=1.0f))
@@ -2641,14 +2707,8 @@ class MainActivity : AppCompatActivity() {
                 val rawSpeed = speedCtrl.computedValue
                 val sign = sign(rawSpeed)
                 val curvedSpeed = sign * (abs(rawSpeed)).pow(2.0f)
-
-                // Accumulate scroll
+                // Let it grow naturally, handled in shader wrap
                 scrollAccum -= curvedSpeed * deltaTime * 2.0f
-
-                // Wrap scroll within the seamless loop period [0, 7.85]
-                // This keeps the value small so fading to 0 doesn't cause a "rewind"
-                scrollAccum %= LOOP_PERIOD
-                if (scrollAccum < 0) scrollAccum += LOOP_PERIOD
             }
 
             val actCtrl = mainActivity.controlsMap["S_ACTIVITY"]
@@ -2666,11 +2726,6 @@ class MainActivity : AppCompatActivity() {
             #define PI 3.14159
             #define FAR 40.0
             
-            // Texture Scale Factor to match Geometry Period of 7.85
-            // 2.0 (Mirror Wrap) / 7.85398 = 0.254648
-            #define TEX_Z_SCALE 0.254648
-            
-            // --- Utils ---
             mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
             mat3 lookAt(vec3 dir) {
                 vec3 up = vec3(0., 1., 0.);
@@ -2683,11 +2738,9 @@ class MainActivity : AppCompatActivity() {
                 return c.z * mix(vec3(1.0), rgb, c.y);
             }
 
-            // --- Geometry ---
             float gyroid(vec3 p) { return dot(cos(p), sin(p.zxy)) + 1.0; }
 
             float map(vec3 p) {
-                // Scale 0.8 determines the loop period of 7.85
                 vec3 q = p * 0.8;
                 float d1 = gyroid(q);
                 float d2 = gyroid(q - vec3(0.0, 0.0, PI));
@@ -2695,23 +2748,19 @@ class MainActivity : AppCompatActivity() {
             }
 
             void main() {
-                // 1. Calculate Coordinates
-                vec2 flatUV = v - 0.5; // Centered for morphing
+                vec2 flatUV = v - 0.5;
                 vec2 aspectUV = flatUV;
                 aspectUV.x *= uRatio; 
                 
-                // 2. Camera Setup
                 vec3 ro = vec3(PI/2.0, 0.0, uScroll); 
                 vec3 rd = normalize(vec3(aspectUV, -0.5)); 
 
-                // Look / Sway Logic
                 rd.xy = rot(sin(uSwayTime * 0.2) * uWide * 0.5) * rd.xy;
                 vec3 targetOffsets = vec3(cos(uSwayTime * 0.4), sin(uSwayTime * 0.4), 4.0);
                 targetOffsets.xy *= uWide; 
                 vec3 ta = normalize(targetOffsets);
                 rd = lookAt(ta) * rd;
 
-                // 3. Raymarching
                 float t = 0.0;
                 float d = 0.0;
                 vec3 p = ro;
@@ -2723,14 +2772,12 @@ class MainActivity : AppCompatActivity() {
                     t += d;
                 }
                 
-                // 4. Calculate Tunnel UVs
                 vec2 tunnelUV;
                 float fogAmt = 0.0;
                 
                 if(t < FAR) {
                     float ang = atan(p.y, p.x);
-                    // Use calculated scale so texture loops exactly when geometry loops
-                    tunnelUV = vec2(ang / PI, p.z * TEX_Z_SCALE);
+                    tunnelUV = vec2(ang / PI, p.z * 0.2);
                     
                     if (uFogD > 0.001) {
                         fogAmt = 1.0 - exp(-t * t * uFogD);
@@ -2741,16 +2788,20 @@ class MainActivity : AppCompatActivity() {
                     fogAmt = 1.0; 
                 }
 
-                // 5. Morph Coordinates (Smooth Transition)
-                // We mix the coordinates, NOT the colors
-                vec2 finalUV = mix(flatUV, tunnelUV, smoothstep(0.0, 1.0, uStr));
+                // --- KEY FIX: Wrap coordinates BEFORE mixing ---
+                // Because 'p.z' grows infinitely with scroll, tunnelUV contains huge numbers.
+                // flatUV contains small numbers (~0.5).
+                // Interpolating directly creates the jump.
+                // Wrapping first puts both in [0,1] range for smooth mixing.
+                vec2 wrappedTunnel = abs(mod(tunnelUV + 0.5, 2.0) - 1.0);
+                vec2 wrappedFlat = abs(mod(flatUV + 0.5, 2.0) - 1.0); 
+
+                // Mix the already-wrapped coordinates
+                vec2 finalUV = mix(wrappedFlat, wrappedTunnel, smoothstep(0.0, 1.0, uStr));
                 
-                // 6. Sample Texture
-                // Mirror Wrap handles the seamless tiling
-                vec2 sampleUV = abs(mod(finalUV + 0.5, 2.0) - 1.0);
-                vec4 col = texture2D(uTex, sampleUV);
+                // Sample texture (No further wrapping needed as we are in 0-1)
+                vec4 col = texture2D(uTex, finalUV);
                 
-                // 7. Apply Fog (Scaled by Morph Strength)
                 if (uFogD > 0.001) {
                     vec3 fogColor = hsb2rgb(vec3(uFogH, uFogS, uFogV));
                     float effectiveFog = fogAmt * smoothstep(0.0, 1.0, uStr);
