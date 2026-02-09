@@ -2609,76 +2609,147 @@ class MainActivity : AppCompatActivity() {
     class SwirlEffect(activity: MainActivity) : MainActivity.ShaderEffect("FX_SWIRL", "SWIRL", activity) {
         private var prog = 0
         private var scrollAccum = 0.0f
-        private var swayTime = 0.0f // Separate time for camera sway
+        private var swayAccum = 0.0f
 
         init {
             addControl(PropertyControl("UTWIRL", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
+
+            // Movement & Look
             addControl(PropertyControl("S_WIDE", "WIDENESS", defaultValue = 500, outMin=0.0f, outMax=2.0f, hasModulation = true))
-            addControl(PropertyControl("SWIRL_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
+            addControl(PropertyControl("S_ACTIVITY", "ACTIVITY", defaultValue = 200, outMin=0.0f, outMax=2.0f, hasModulation = true))
+            addControl(PropertyControl("SWIRL_SPEED", "SPEED", defaultValue = 500, outMin=-4.0f, outMax=4.0f, hasModulation = true))
+
+            // Fog Controls
+            addControl(PropertyControl("S_FOG", "FOG DIST", defaultValue = 0, outMin=0.0f, outMax=0.2f, hasModulation = true)) // Density
+            addControl(PropertyControl("S_FOG_H", "FOG HUE", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
+            addControl(PropertyControl("S_FOG_S", "FOG SAT", defaultValue = 0, outMin=0.0f, outMax=1.0f))
+            addControl(PropertyControl("S_FOG_V", "FOG BRIT", defaultValue = 1000, outMin=0.0f, outMax=1.0f))
         }
 
         override fun reset() {
             scrollAccum = 0.0f
+            swayAccum = 0.0f
         }
 
         override fun update(deltaTime: Float) {
-            val speedCtrl = mainActivity.controlsMap["SWIRL_SPEED"] ?: return
-            val rawSpeed = speedCtrl.computedValue
-            val sign = sign(rawSpeed)
-            val curvedSpeed = sign * (abs(rawSpeed)).pow(2.2f)
+            val speedCtrl = mainActivity.controlsMap["SWIRL_SPEED"]
+            if (speedCtrl != null) {
+                val rawSpeed = speedCtrl.computedValue
+                val sign = sign(rawSpeed)
+                val curvedSpeed = sign * (abs(rawSpeed)).pow(2.0f)
+                scrollAccum -= curvedSpeed * deltaTime * 2.0f
+            }
 
-            // 1. Scroll (Forward Movement) - Controlled by Speed Slider
-            scrollAccum += curvedSpeed * deltaTime * 0.8f
-            if (abs(scrollAccum) > 1000.0f) scrollAccum %= 1000.0f
-
-            // 2. Sway (Camera Look) - Constant slow movement
-            swayTime += deltaTime * 0.5f
+            val actCtrl = mainActivity.controlsMap["S_ACTIVITY"]
+            if (actCtrl != null) {
+                swayAccum += actCtrl.computedValue * deltaTime
+            }
         }
 
         override fun init() {
             val fSrc = """
             precision highp float; varying vec2 v; uniform sampler2D uTex;
-            uniform float uStr, uWide, uScroll, uSway, uRatio;
-            #define PI 3.14159
-            mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
-            float gyroid(vec3 p) { return dot(cos(p), sin(p.zxy)) + 1.0; }
-            float map(vec3 p) { return min(gyroid(p), gyroid(p - vec3(0.,0.,PI))); }
+            uniform float uStr, uWide, uScroll, uSwayTime, uRatio;
+            uniform float uFogD, uFogH, uFogS, uFogV;
             
+            #define PI 3.14159
+            #define FAR 40.0
+            
+            // --- Utils ---
+            mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+            mat3 lookAt(vec3 dir) {
+                vec3 up = vec3(0., 1., 0.);
+                vec3 rt = normalize(cross(dir, up));
+                return mat3(rt, cross(rt, dir), dir);
+            }
+            
+            vec3 hsb2rgb(vec3 c) {
+                vec3 rgb = clamp(abs(mod(c.x*6.0+vec3(0.0,4.0,2.0), 6.0)-3.0)-1.0, 0.0, 1.0);
+                return c.z * mix(vec3(1.0), rgb, c.y);
+            }
+
+            // --- Geometry ---
+            float gyroid(vec3 p) { return dot(cos(p), sin(p.zxy)) + 1.0; }
+
+            float map(vec3 p) {
+                // Scaling p by 0.8 makes the structures slightly larger (less dense)
+                vec3 q = p * 0.8;
+                float d1 = gyroid(q);
+                float d2 = gyroid(q - vec3(0.0, 0.0, PI));
+                return min(d1, d2) * 0.5; 
+            }
+
             void main() {
-                vec2 uv = v - 0.5; 
-                vec2 flatUV = uv;
-                uv.x *= uRatio;
+                // 1. Calculate Flat Coordinates (centered)
+                vec2 flatUV = v - 0.5;
+                vec2 aspectUV = flatUV;
+                aspectUV.x *= uRatio; 
                 
-                vec3 ro = vec3(PI/2.0, 0.0, 0.0);
-                vec3 rd = normalize(vec3(uv, -0.6));
+                // 2. Camera Setup
+                vec3 ro = vec3(PI/2.0, 0.0, uScroll); 
                 
-                // 1. Camera Lookaround (Driven by uSway + Wideness)
-                // This is now independent of forward speed
-                rd.xy = rot(sin(uSway) * uWide) * rd.xy;
-                
-                vec3 ta = vec3(cos(uSway * 0.6), sin(uSway * 0.6), 4.0);
-                vec3 f = normalize(ta); vec3 r = normalize(cross(f, vec3(0.,1.,0.))); vec3 u = cross(r, f);
-                rd = mat3(r, u, f) * rd;
-                
+                // Changed FOV factor from -1.0 to -0.5 to widen the view (see further/less dense)
+                vec3 rd = normalize(vec3(aspectUV, -0.5)); 
+
+                // Look / Sway Logic
+                rd.xy = rot(sin(uSwayTime * 0.2) * uWide * 0.5) * rd.xy;
+                vec3 targetOffsets = vec3(cos(uSwayTime * 0.4), sin(uSwayTime * 0.4), 4.0);
+                targetOffsets.xy *= uWide; 
+                vec3 ta = normalize(targetOffsets);
+                rd = lookAt(ta) * rd;
+
+                // 3. Raymarching
                 float t = 0.0;
-                for(int i=0; i<35; i++) {
-                    float d = map(ro + rd * t);
-                    if(abs(d) < 0.01 || t > 25.0) break;
+                float d = 0.0;
+                vec3 p = ro;
+                
+                // Fixed loop count
+                for(int i = 0; i < 60; i++) {
+                    p = ro + rd * t;
+                    d = map(p);
+                    if(abs(d) < 0.01 || t > FAR) break;
                     t += d;
                 }
                 
-                vec3 hit = ro + rd * t;
-                float ang = atan(hit.y, hit.x);
+                // 4. Calculate Tunnel UVs
+                vec2 tunnelUV;
+                float fogAmt = 0.0;
                 
-                // 2. Forward Movement
-                // Driven by uScroll (Speed Slider)
-                vec2 wUV = vec2(ang / PI, (hit.z * 0.15) + uScroll);
+                if(t < FAR) {
+                    float ang = atan(p.y, p.x);
+                    tunnelUV = vec2(ang / PI, p.z * 0.2);
+                    
+                    // Calculate Fog amount based on distance t
+                    if (uFogD > 0.001) {
+                        fogAmt = 1.0 - exp(-t * t * uFogD);
+                        fogAmt = clamp(fogAmt, 0.0, 1.0);
+                    }
+                } else {
+                    // Fallback if we hit infinity (holes in network)
+                    tunnelUV = flatUV; 
+                    fogAmt = 1.0; // Infinite depth = pure fog
+                }
+
+                // 5. Morph UVs
+                // Instead of mixing colors, we mix the coordinates.
+                // uStr 0 -> uses flatUV. uStr 1 -> uses tunnelUV.
+                vec2 finalUV = mix(flatUV, tunnelUV, smoothstep(0.0, 1.0, uStr));
                 
-                // Mix Flat vs Swirl
-                vec2 finalUV = mix(flatUV, wUV, smoothstep(0.0, 1.0, uStr));
+                // 6. Sample Texture
+                // Apply Mirror Wrap (abs/mod) to handle the seam and repeat
+                vec2 sampleUV = abs(mod(finalUV + 0.5, 2.0) - 1.0);
+                vec4 col = texture2D(uTex, sampleUV);
                 
-                // Wrap texture
-                gl_FragColor = texture2D(uTex, abs(mod(finalUV + 0.5, 2.0) - 1.0));
+                // 7. Apply Fog
+                // We only apply fog if we are morphed into 3D (uStr > 0)
+                if (uFogD > 0.001) {
+                    vec3 fogColor = hsb2rgb(vec3(uFogH, uFogS, uFogV));
+                    // Scale fog effect by the Morph Strength so flat image stays clear
+                    float effectiveFog = fogAmt * smoothstep(0.0, 1.0, uStr);
+                    col.rgb = mix(col.rgb, fogColor, effectiveFog);
+                }
+
+                gl_FragColor = col;
             }"""
             prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
         }
@@ -2690,11 +2761,16 @@ class MainActivity : AppCompatActivity() {
 
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uStr"), mainActivity.controlsMap["UTWIRL"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWide"), mainActivity.controlsMap["S_WIDE"]?.computedValue ?: 1f)
 
-            // Pass independent variables
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWide"), mainActivity.controlsMap["S_WIDE"]?.computedValue ?: 1f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uScroll"), scrollAccum)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uSway"), swayTime)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uSwayTime"), swayAccum)
+
+            // Pass Fog Uniforms
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogD"), mainActivity.controlsMap["S_FOG"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogH"), mainActivity.controlsMap["S_FOG_H"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogS"), mainActivity.controlsMap["S_FOG_S"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogV"), mainActivity.controlsMap["S_FOG_V"]?.computedValue ?: 1f)
 
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
