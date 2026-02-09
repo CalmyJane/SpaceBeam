@@ -2370,8 +2370,8 @@ class MainActivity : AppCompatActivity() {
         private val pRgb = "${idPrefix}_RGB"
 
         init {
-            // Keep original defaults (130/320) so your presets work
-            val defZoom = if(idPrefix=="C") 320 else 130
+            // Reverted to your original defaults (130 and 320)
+            val defZoom = 320
 
             addControl(PropertyControl(pAngle, "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
             addControl(PropertyControl(pZoom, "ZOOM", defaultValue = defZoom, outMin=0.1f, outMax=4.0f, hasModulation = true))
@@ -2397,9 +2397,8 @@ class MainActivity : AppCompatActivity() {
                     float z = 1.0 + (uv.x * uTiX) + (uv.y * uTiY); 
                     uv /= max(z, 0.1);
                     
-                    // 2. Zoom (Divide to behave like standard camera zoom)
-                    // Low uZ (0.6) -> Divides UV -> UV Range increases -> Zoom Out
-                    // High uZ (4.0) -> Divides UV -> UV Range decreases -> Zoom In
+                    // 2. Zoom 
+                    // We divide by uZ so that Higher Values = Zoom IN, Lower = Zoom OUT
                     uv /= uZ;
                     
                     // 3. Distort
@@ -2434,9 +2433,19 @@ class MainActivity : AppCompatActivity() {
             val rotAccum = if (id.startsWith("M")) mainActivity.getRendererMRot() else mainActivity.getRendererCRot()
             val angle = (mainActivity.controlsMap[pAngle]?.computedValue ?: 0f) * 360f + rotAccum
 
+            // --- SCALE CORRECTION ---
+            // User requested that slider 320 behaves like 231 (1.0).
+            // Value at 320 is ~1.348. Value at 231 is ~1.00.
+            // Correction factor = 1.0 / 1.348 = ~0.7418
+            val rawZoom = mainActivity.controlsMap[pZoom]?.computedValue ?: 1f
+            val correctedZoom = rawZoom * 0.7418f
+
             GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uZ"), mainActivity.controlsMap[pZoom]?.computedValue ?: 1f)
+
+            // Pass the corrected zoom value
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uZ"), correctedZoom)
+
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uR"), Math.toRadians(angle).toFloat())
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTx"), mainActivity.controlsMap[pTx]?.computedValue ?: 0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTy"), mainActivity.controlsMap[pTy]?.computedValue ?: 0f)
@@ -4936,8 +4945,6 @@ class MainActivity : AppCompatActivity() {
     private fun initDefaultPresets() {
         // Robust Helper Function
         fun p(ax: Int, vararg overrides: Any): Preset {
-            // FIXED: Use defaultValue instead of current snapshot to ensure resets are clean
-            // FIXED: Default LFO settings (Rate 200, Depth 0) so modulation is off by default unless overridden
             val baseSnapshots = controls.associate {
                 it.id to PropertyControl.Snapshot(
                     value = it.defaultValue,
@@ -4981,7 +4988,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // --- PRESET DEFINITIONS ---
-        presets[1] = p(2, "M_ZOOM", 101, "M_TX", 500, "M_TY", 500, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
+        presets[1] = p(2, "M_ZOOM", 320, "M_TX", 500, "M_TY", 500, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
         presets[2] = p(2, "M_ZOOM", 37, "M_TX", 725, "M_TY", 628, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
         presets[3] = p(2, "M_ANGLE", 0, 169, 1000, "RAMP", "M_ZOOM", 168, "M_TX", 500, 480, 378, "M_TY", 546, 340, 698, "M_TILTX", 500, 268, 788, "M_TILTY", 500, 241, 732, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
         presets[4] = p(2, "M_ANGLE", 172, 262, 287, "M_ZOOM", 160, 531, 316, "M_TX", 500, 235, 184, "M_TY", 500, 217, 218, "M_TILTX", 500, 242, 305, "M_TILTY", 500, 318, 343, "C_ZOOM", 500, 583, 365, "HUE", 184, 298, 505, "RAMP", "GLOW", 172, "CONTRAST", 718, "VIBRANCE", 899)
