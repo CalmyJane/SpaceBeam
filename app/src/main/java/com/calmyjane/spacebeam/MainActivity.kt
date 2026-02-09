@@ -2611,6 +2611,10 @@ class MainActivity : AppCompatActivity() {
         private var scrollAccum = 0.0f
         private var swayAccum = 0.0f
 
+        // Math for seamless looping:
+        // Geometry uses gyroid(p * 0.8). Period = 2*PI / 0.8 = 7.85398...
+        private val LOOP_PERIOD = (2.0 * Math.PI / 0.8).toFloat()
+
         init {
             addControl(PropertyControl("UTWIRL", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
 
@@ -2619,8 +2623,8 @@ class MainActivity : AppCompatActivity() {
             addControl(PropertyControl("S_ACTIVITY", "ACTIVITY", defaultValue = 200, outMin=0.0f, outMax=2.0f, hasModulation = true))
             addControl(PropertyControl("SWIRL_SPEED", "SPEED", defaultValue = 500, outMin=-4.0f, outMax=4.0f, hasModulation = true))
 
-            // Fog Controls
-            addControl(PropertyControl("S_FOG", "FOG DIST", defaultValue = 0, outMin=0.0f, outMax=0.2f, hasModulation = true)) // Density
+            // Fog Controls (Default Density 0 = Off)
+            addControl(PropertyControl("S_FOG", "FOG DIST", defaultValue = 0, outMin=0.0f, outMax=0.2f, hasModulation = true))
             addControl(PropertyControl("S_FOG_H", "FOG HUE", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
             addControl(PropertyControl("S_FOG_S", "FOG SAT", defaultValue = 0, outMin=0.0f, outMax=1.0f))
             addControl(PropertyControl("S_FOG_V", "FOG BRIT", defaultValue = 1000, outMin=0.0f, outMax=1.0f))
@@ -2637,7 +2641,14 @@ class MainActivity : AppCompatActivity() {
                 val rawSpeed = speedCtrl.computedValue
                 val sign = sign(rawSpeed)
                 val curvedSpeed = sign * (abs(rawSpeed)).pow(2.0f)
+
+                // Accumulate scroll
                 scrollAccum -= curvedSpeed * deltaTime * 2.0f
+
+                // Wrap scroll within the seamless loop period [0, 7.85]
+                // This keeps the value small so fading to 0 doesn't cause a "rewind"
+                scrollAccum %= LOOP_PERIOD
+                if (scrollAccum < 0) scrollAccum += LOOP_PERIOD
             }
 
             val actCtrl = mainActivity.controlsMap["S_ACTIVITY"]
@@ -2654,6 +2665,10 @@ class MainActivity : AppCompatActivity() {
             
             #define PI 3.14159
             #define FAR 40.0
+            
+            // Texture Scale Factor to match Geometry Period of 7.85
+            // 2.0 (Mirror Wrap) / 7.85398 = 0.254648
+            #define TEX_Z_SCALE 0.254648
             
             // --- Utils ---
             mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
@@ -2672,7 +2687,7 @@ class MainActivity : AppCompatActivity() {
             float gyroid(vec3 p) { return dot(cos(p), sin(p.zxy)) + 1.0; }
 
             float map(vec3 p) {
-                // Scaling p by 0.8 makes the structures slightly larger (less dense)
+                // Scale 0.8 determines the loop period of 7.85
                 vec3 q = p * 0.8;
                 float d1 = gyroid(q);
                 float d2 = gyroid(q - vec3(0.0, 0.0, PI));
@@ -2680,15 +2695,13 @@ class MainActivity : AppCompatActivity() {
             }
 
             void main() {
-                // 1. Calculate Flat Coordinates (centered)
-                vec2 flatUV = v - 0.5;
+                // 1. Calculate Coordinates
+                vec2 flatUV = v - 0.5; // Centered for morphing
                 vec2 aspectUV = flatUV;
                 aspectUV.x *= uRatio; 
                 
                 // 2. Camera Setup
                 vec3 ro = vec3(PI/2.0, 0.0, uScroll); 
-                
-                // Changed FOV factor from -1.0 to -0.5 to widen the view (see further/less dense)
                 vec3 rd = normalize(vec3(aspectUV, -0.5)); 
 
                 // Look / Sway Logic
@@ -2703,7 +2716,6 @@ class MainActivity : AppCompatActivity() {
                 float d = 0.0;
                 vec3 p = ro;
                 
-                // Fixed loop count
                 for(int i = 0; i < 60; i++) {
                     p = ro + rd * t;
                     d = map(p);
@@ -2717,34 +2729,30 @@ class MainActivity : AppCompatActivity() {
                 
                 if(t < FAR) {
                     float ang = atan(p.y, p.x);
-                    tunnelUV = vec2(ang / PI, p.z * 0.2);
+                    // Use calculated scale so texture loops exactly when geometry loops
+                    tunnelUV = vec2(ang / PI, p.z * TEX_Z_SCALE);
                     
-                    // Calculate Fog amount based on distance t
                     if (uFogD > 0.001) {
                         fogAmt = 1.0 - exp(-t * t * uFogD);
                         fogAmt = clamp(fogAmt, 0.0, 1.0);
                     }
                 } else {
-                    // Fallback if we hit infinity (holes in network)
                     tunnelUV = flatUV; 
-                    fogAmt = 1.0; // Infinite depth = pure fog
+                    fogAmt = 1.0; 
                 }
 
-                // 5. Morph UVs
-                // Instead of mixing colors, we mix the coordinates.
-                // uStr 0 -> uses flatUV. uStr 1 -> uses tunnelUV.
+                // 5. Morph Coordinates (Smooth Transition)
+                // We mix the coordinates, NOT the colors
                 vec2 finalUV = mix(flatUV, tunnelUV, smoothstep(0.0, 1.0, uStr));
                 
                 // 6. Sample Texture
-                // Apply Mirror Wrap (abs/mod) to handle the seam and repeat
+                // Mirror Wrap handles the seamless tiling
                 vec2 sampleUV = abs(mod(finalUV + 0.5, 2.0) - 1.0);
                 vec4 col = texture2D(uTex, sampleUV);
                 
-                // 7. Apply Fog
-                // We only apply fog if we are morphed into 3D (uStr > 0)
+                // 7. Apply Fog (Scaled by Morph Strength)
                 if (uFogD > 0.001) {
                     vec3 fogColor = hsb2rgb(vec3(uFogH, uFogS, uFogV));
-                    // Scale fog effect by the Morph Strength so flat image stays clear
                     float effectiveFog = fogAmt * smoothstep(0.0, 1.0, uStr);
                     col.rgb = mix(col.rgb, fogColor, effectiveFog);
                 }
@@ -2766,7 +2774,6 @@ class MainActivity : AppCompatActivity() {
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uScroll"), scrollAccum)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uSwayTime"), swayAccum)
 
-            // Pass Fog Uniforms
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogD"), mainActivity.controlsMap["S_FOG"]?.computedValue ?: 0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogH"), mainActivity.controlsMap["S_FOG_H"]?.computedValue ?: 0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogS"), mainActivity.controlsMap["S_FOG_S"]?.computedValue ?: 0f)
