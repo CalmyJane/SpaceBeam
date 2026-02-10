@@ -2538,7 +2538,7 @@ class MainActivity : AppCompatActivity() {
             addControl(PropertyControl("S_FOV", "FISHEYE", defaultValue = 500, outMin=0.2f, outMax=1.5f, hasModulation = true))
             addControl(PropertyControl("S_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
 
-            // Fog (New)
+            // Fog
             addControl(PropertyControl("T_FOG", "FOG DIST", defaultValue = 0, outMin=0.0f, outMax=0.5f, hasModulation = true))
             addControl(PropertyControl("T_FOG_H", "FOG HUE", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
             addControl(PropertyControl("T_FOG_S", "FOG SAT", defaultValue = 0, outMin=0.0f, outMax=1.0f))
@@ -2549,8 +2549,12 @@ class MainActivity : AppCompatActivity() {
             addControl(PropertyControl("T_HUE_POS", "RAINBOW POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
             addControl(PropertyControl("T_WAVE_STR", "WAVE STR", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
             addControl(PropertyControl("T_WAVE_POS", "WAVE POS", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
-            addControl(PropertyControl("CURVE", "CURVE", defaultValue = 250, outMin=0.0f, outMax=4.0f, hasModulation = true))
-            addControl(PropertyControl("TWIST", "VORTEX", defaultValue = 500, outMin=-5.0f, outMax=5.0f, hasModulation = true))
+
+            // Geometry
+            // Curve: 1.0 = Straight. 0.0 = Left, 2.0 = Right.
+            addControl(PropertyControl("CURVE", "CURVE", defaultValue = 500, outMin=0.0f, outMax=2.0f, hasModulation = true))
+            // Twist: Reduced range to 10% (was +/- 5.0, now +/- 0.5)
+            addControl(PropertyControl("TWIST", "VORTEX", defaultValue = 500, outMin=-0.5f, outMax=0.5f, hasModulation = true))
             addControl(PropertyControl("FLUX", "FLUX", defaultValue = 0, outMin=0f, outMax=0.5f, hasModulation = true))
         }
 
@@ -2564,7 +2568,6 @@ class MainActivity : AppCompatActivity() {
             val sign = sign(rawSpeed)
             val curvedSpeed = sign * (abs(rawSpeed)).pow(2.2f)
             scrollAccum += curvedSpeed * deltaTime * 0.6f
-            // No modulo here! We let it grow, but handle the wrap in shader before mixing.
         }
 
         override fun init() {
@@ -2584,53 +2587,62 @@ class MainActivity : AppCompatActivity() {
                 vec2 uv = flatUV;
                 uv.x *= uRatio;
                 
-                // --- Geometry Calculation ---
+                // --- 1. Curve (Parabolic view bend) ---
+                // We bend the view plane BEFORE calculating tunnel geometry.
+                // uCurve 1.0 = 0.0 offset.
+                // x += factor * y^2 creates a parabolic bend.
+                float curveFactor = (uCurve - 1.0) * 2.0; 
+                uv.x += curveFactor * (uv.y * uv.y);
+
+                // --- 2. Geometry Calculation ---
                 float rC = length(uv); 
                 float rB = max(abs(uv.x), abs(uv.y)); 
                 float dist = mix(rC, rB, uShape);
-                float ang = atan(uv.y, uv.x);
                 
-                // Flux
-                dist += sin(ang * 4.0 + dist * 10.0) * uFlux * dist; 
+                // Flux distortion
+                dist += sin(atan(uv.y, uv.x) * 4.0 + dist * 10.0) * uFlux * dist; 
                 float safe = max(dist, 0.01);
                 
-                // Projection
+                // Projection (Depth)
                 float proj = (uFov * 0.8 + 0.2) / safe;
                 
-                // --- Calculate Tunnel UVs ---
+                // --- 3. Calculate Tunnel UVs ---
                 vec2 tUV; 
+                float ang = atan(uv.y, uv.x);
                 tUV.x = (ang + (1.0/safe) * uTwist) / 3.14159; 
-                tUV.y = proj + uScroll;
+                tUV.y = proj + uScroll; // Global depth coordinate
                 
-                if(abs(uCurve - 1.0) > 0.01) tUV *= 1.0 + (uCurve - 1.0) * (1.0 - safe);
-
-                // --- KEY FIX: Wrap Coordinates BEFORE Mixing ---
-                // This ensures we interpolate between small numbers [0,1], 
-                // preventing the jump when uScroll is large.
+                // --- 4. Mix & Wrap ---
+                // Wrap Coordinates BEFORE Mixing (Fixes jump glitch)
                 vec2 wrappedTunnel = abs(mod(tUV + 0.5, 2.0) - 1.0);
-                vec2 wrappedFlat = abs(mod(flatUV + 0.5, 2.0) - 1.0); // usually just flatUV, but safe
+                vec2 wrappedFlat = abs(mod(flatUV + 0.5, 2.0) - 1.0); 
 
-                // Mix the Wrapped Coordinates
                 vec2 finalUV = mix(wrappedFlat, wrappedTunnel, uMix * uMix);
-                
                 vec4 col = texture2D(uTex, finalUV);
 
-                // --- Color Effects ---
+                // --- 5. Color Effects (Global Movement) ---
+                // Use 'tUV.y' (infinite depth) instead of 'finalUV.y' (wrapped tile)
+                // This ensures rainbow/wave move DOWN the tunnel, not ON the tile.
+                
+                // Rainbow
                 if (uHStr > 0.01) { 
-                    float ha = (finalUV.y * 0.5) + uHPos; 
+                    float effectiveStr = uHStr * uMix; // Fade out if flat
+                    float ha = (tUV.y * 0.2) + uHPos; // *0.2 controls rainbow frequency
                     vec3 rb = 0.5 + 0.5 * cos(6.28 * (ha + vec3(0.0, 0.33, 0.67))); 
-                    col.rgb = mix(col.rgb, col.rgb * rb * 2.0, uHStr); 
-                }
-                if (uWStr > 0.01) { 
-                    float wd = finalUV.y - (uWPos * 10.0); 
-                    float dw = abs(fract(wd) - 0.5); 
-                    float wp = smoothstep(0.15 + uWStr*0.2, 0.0, dw); 
-                    col.rgb += vec3(0.5, 0.8, 1.0) * wp * uWStr; 
+                    col.rgb = mix(col.rgb, col.rgb * rb * 2.0, effectiveStr); 
                 }
                 
-                // --- Fog (Only on tunnel part) ---
+                // Wave
+                if (uWStr > 0.01) { 
+                    float effectiveWStr = uWStr * uMix; // Fade out if flat
+                    float wd = tUV.y - (uWPos * 10.0); // Use global depth
+                    float dw = abs(fract(wd) - 0.5); 
+                    float wp = smoothstep(0.15 + effectiveWStr*0.2, 0.0, dw); 
+                    col.rgb += vec3(0.5, 0.8, 1.0) * wp * effectiveWStr; 
+                }
+                
+                // --- 6. Fog ---
                 if (uFogD > 0.001) {
-                    // Simple distance fog based on 'proj' inverse
                     float depth = 1.0 / safe;
                     float fogAmt = 1.0 - exp(-depth * depth * uFogD * 0.1);
                     fogAmt = clamp(fogAmt, 0.0, 1.0);
