@@ -2099,6 +2099,22 @@ class MainActivity : AppCompatActivity() {
 
     private var pendingMidiExportJson: String? = null
 
+    private fun createOptimizedExoPlayer(): ExoPlayer {
+        val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                10000, // Min buffer 10s
+                20000, // Max buffer 20s
+                1000,  // Buffer for playback 1s
+                1000   // Buffer for playback after rebuffer 1s
+            )
+            .setTargetBufferBytes(15 * 1024 * 1024) // Limit to 15 MB per player
+            .build()
+
+        return ExoPlayer.Builder(this)
+            .setLoadControl(loadControl)
+            .build()
+    }
+
     val saveMappingLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null && pendingMidiExportJson != null) {
             try {
@@ -3144,20 +3160,16 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Failed to load image", Toast.LENGTH_SHORT).show()
             }
         } else {
-            // --- VIDEO HANDLING (ASYNC FIX) ---
             val channel = renderer.addSource(SourceType.MEDIA_VIDEO, uniqueId)
 
             if (channel != null) {
-                // 1. Create the Player but don't prepare yet
-                val player = ExoPlayer.Builder(this).build()
+                val player = createOptimizedExoPlayer()
                 player.volume = 0f
                 player.repeatMode = Player.REPEAT_MODE_ONE
 
-                // 2. Add Controls to UI immediately (disabled visually or just generic)
                 val ctrl = MediaSourceControl(uniqueId, "VIDEO", uniqueId, this@MainActivity, player)
                 addDynamicSourceControl(ctrl)
 
-                // 3. Define what happens when GL is ready
                 channel.onSurfaceReady = { surface ->
                     Log.d("SpaceBeamDebug", "Surface Ready! Attaching to ExoPlayer.")
                     try {
@@ -4647,7 +4659,7 @@ class MainActivity : AppCompatActivity() {
     // A small helper to bridge the gap since the original function expected an AlertDialog
     private fun attemptConnectRtspFromFullscreen(url: String) {
         val uniqueId = "RTSP_${System.currentTimeMillis()}"
-        val player = ExoPlayer.Builder(this).build()
+        val player = createOptimizedExoPlayer()
         player.volume = 0f
 
         val channel = renderer.addSource(SourceType.RTSP, uniqueId)
@@ -4705,7 +4717,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun attemptConnectRtsp(url: String, dialog: androidx.appcompat.app.AlertDialog) {
         val uniqueId = "RTSP_${System.currentTimeMillis()}"
-        val player = ExoPlayer.Builder(this).build()
+        val player = createOptimizedExoPlayer()
         player.volume = 0f
 
         val channel = renderer.addSource(SourceType.RTSP, uniqueId)
@@ -5460,6 +5472,7 @@ class MainActivity : AppCompatActivity() {
                 uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
                 uv = uv + 0.5;
                 uv = abs(mod(uv + 1.0, 2.0) - 1.0);
+                uv = clamp(uv, 0.002, 0.998);
                 gl_FragColor = texture2D(uTex, uv);
             }""".trimIndent()
             copyOesProgram = ShaderHelper.createProgram(vSrc, fSrcCopyOes)
@@ -5479,6 +5492,7 @@ class MainActivity : AppCompatActivity() {
                 uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
                 uv = uv + 0.5;
                 uv = abs(mod(uv + 1.0, 2.0) - 1.0);
+                uv = clamp(uv, 0.002, 0.998);
                 gl_FragColor = texture2D(uTex, uv);
             }""".trimIndent()
             copy2dProgram = ShaderHelper.createProgram(vSrc, fSrcCopy2d)
