@@ -1285,7 +1285,8 @@ open class PropertyControl(
     val defaultLocked: Boolean = false,
     val valueFormatter: ((Int) -> String)? = null,
     private val onValueChanged: ((Int) -> Unit)? = null
-) {
+)
+{
     enum class ModMode { WRAP, CLAMP }
     enum class WaveShape { SINE, TRIANGLE, RAMP, WOBBLE_SINE, RANDOM_SMOOTH, RANDOM_STEP }
     enum class LayoutStyle { STACKED, ROW }
@@ -1308,6 +1309,7 @@ open class PropertyControl(
 
     // Locking State
     var isLocked: Boolean = defaultLocked
+    var subtitle: String? = null
     private var lockButton: Button? = null
 
     // Default Smoothing: 50%
@@ -1786,17 +1788,16 @@ open class PropertyControl(
             layoutParams = if (isPortrait) FrameLayout.LayoutParams(700, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
                 topMargin = (dm.heightPixels * 0.40).toInt() + 20
-                bottomMargin = 40 // Crucial for scrolling bounds
+                bottomMargin = 40
             }
             else FrameLayout.LayoutParams(600, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 gravity = Gravity.CENTER_VERTICAL or Gravity.START
                 leftMargin = 880
                 topMargin = 40
-                bottomMargin = 40 // Crucial for scrolling bounds
+                bottomMargin = 40
             }
         }
 
-        // --- NEW: Scrollable content wrapper ---
         val scroller = ScrollView(context).apply {
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             isVerticalScrollBarEnabled = false
@@ -1808,7 +1809,32 @@ open class PropertyControl(
         }
 
         val titleRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 } }
-        titleRow.addView(TextView(context).apply { text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+
+        val titleTextContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        }
+        titleTextContainer.addView(TextView(context).apply {
+            text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY)
+        })
+
+        if (subtitle != null) {
+            titleTextContainer.addView(TextView(context).apply {
+                text = subtitle
+                textSize = 10f
+                setTextColor(Color.GRAY)
+                // --- Marquee Setup ---
+                setSingleLine(true)
+                ellipsize = android.text.TextUtils.TruncateAt.MARQUEE
+                marqueeRepeatLimit = -1 // Infinite scroll
+                isFocusable = true
+                isFocusableInTouchMode = true
+                isSelected = true // Required to trigger the marquee animation
+                // ---------------------
+                setPadding(0, 2, 20, 0) // Extra right padding so it doesn't touch the lock button
+            })
+        }
+        titleRow.addView(titleTextContainer)
 
         lockButton = Button(context).apply {
             textSize = 10f
@@ -1905,7 +1931,6 @@ open class PropertyControl(
         }
         contentLayout.addView(resetBtn)
 
-        // --- Moved extra controls to the bottom ---
         addExtraControls(contentLayout, context)
 
         scroller.addView(contentLayout)
@@ -2188,6 +2213,43 @@ class MainActivity : AppCompatActivity() {
             .setLoadControl(loadControl)
             .build()
     }
+
+    @SuppressLint("Range")
+    private fun getFileNameFromUri(uri: android.net.Uri): String {
+        var result: String? = null
+        if (uri.scheme == "content") {
+            try {
+                contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        if (index != -1) {
+                            result = cursor.getString(index)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("FileName", "Error extracting file name from URI", e)
+            }
+        }
+
+        if (result == null) {
+            result = uri.path
+            val cut = result?.lastIndexOf('/') ?: -1
+            if (cut != -1) {
+                result = result?.substring(cut + 1)
+            }
+        }
+
+        // Clean up URL-encoded characters (like %20 spaces) if fallback was used
+        try {
+            if (result != null) {
+                result = java.net.URLDecoder.decode(result, "UTF-8")
+            }
+        } catch (e: Exception) {}
+
+        return if (result.isNullOrBlank()) "Unknown File" else result!!
+    }
+
 
     val saveMappingLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null && pendingMidiExportJson != null) {
@@ -3219,6 +3281,7 @@ class MainActivity : AppCompatActivity() {
         val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
         val isImage = mimeType.startsWith("image")
         val uniqueId = "SRC_${System.currentTimeMillis()}"
+        val fileName = getFileNameFromUri(uri)
 
         if (isImage) {
             val bitmap = loadScaledBitmap(uri)
@@ -3227,6 +3290,7 @@ class MainActivity : AppCompatActivity() {
                 if (channel != null) {
                     if (bitmap.height > bitmap.width) channel.rotation = -90f else channel.rotation = 0f
                     val ctrl = MediaSourceControl(uniqueId, "IMAGE", uniqueId, this, null)
+                    ctrl.subtitle = fileName
                     addDynamicSourceControl(ctrl)
                     Toast.makeText(this, "Image Added", Toast.LENGTH_SHORT).show()
                 }
@@ -3242,6 +3306,7 @@ class MainActivity : AppCompatActivity() {
                 player.repeatMode = Player.REPEAT_MODE_ONE
 
                 val ctrl = MediaSourceControl(uniqueId, "VIDEO", uniqueId, this@MainActivity, player)
+                ctrl.subtitle = fileName
                 addDynamicSourceControl(ctrl)
 
                 channel.onSurfaceReady = { surface ->
@@ -4778,6 +4843,7 @@ class MainActivity : AppCompatActivity() {
                             if (playbackState == Player.STATE_READY) {
                                 if (!controlsMap.containsKey(uniqueId)) {
                                     val ctrl = RtspSourceControl(uniqueId, "STREAM", uniqueId, this@MainActivity, player)
+                                    ctrl.subtitle = url
                                     addDynamicSourceControl(ctrl)
                                     Toast.makeText(this@MainActivity, "Connected", Toast.LENGTH_SHORT).show()
                                 }
@@ -4800,55 +4866,6 @@ class MainActivity : AppCompatActivity() {
                     renderer.removeSource(uniqueId)
                     player.release()
                 }
-            }
-        }
-    }
-
-    private fun attemptConnectRtsp(url: String, dialog: androidx.appcompat.app.AlertDialog) {
-        val uniqueId = "RTSP_${System.currentTimeMillis()}"
-        val player = createOptimizedExoPlayer()
-        player.volume = 0f
-
-        val channel = renderer.addSource(SourceType.RTSP, uniqueId)
-        if (channel == null) {
-            Toast.makeText(this, "Mixer Full", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        Toast.makeText(this, "Connecting...", Toast.LENGTH_SHORT).show()
-
-        glView.queueEvent {
-            val s = channel.getSurfaceForInput()
-            runOnUiThread {
-                player.setVideoSurface(s)
-                val rtspSource = RtspMediaSource.Factory().setForceUseRtpTcp(true).createMediaSource(MediaItem.fromUri(url))
-                player.setMediaSource(rtspSource)
-                player.prepare()
-                player.play()
-
-                player.addListener(object : Player.Listener {
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState == Player.STATE_READY) {
-                            if (!controlsMap.containsKey(uniqueId)) {
-                                val ctrl = RtspSourceControl(uniqueId, "STREAM", uniqueId, this@MainActivity, player)
-                                addDynamicSourceControl(ctrl)
-                                dialog.dismiss()
-                                Toast.makeText(this@MainActivity, "Connected", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    }
-                    override fun onVideoSizeChanged(videoSize: VideoSize) {
-                        if (videoSize.width > 0) {
-                            channel.updateSize(videoSize.width, videoSize.height)
-                            if (videoSize.height > videoSize.width) channel.rotation = -90f else channel.rotation = 0f
-                        }
-                    }
-                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                        Toast.makeText(this@MainActivity, "Connection Failed", Toast.LENGTH_LONG).show()
-                        renderer.removeSource(uniqueId)
-                        player.release()
-                    }
-                })
             }
         }
     }
