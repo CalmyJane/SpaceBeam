@@ -1783,11 +1783,29 @@ open class PropertyControl(
             setPadding(10, 30, 10, 30)
             background = GradientDrawable().apply { setColor(Color.argb(245, 15, 15, 15)); cornerRadius = 20f; setStroke(2, Color.GRAY) }
             elevation = popupElevation; isClickable = true
-            layoutParams = if (isPortrait) FrameLayout.LayoutParams(700, -2).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = (dm.heightPixels * 0.40).toInt() + 20 }
-            else FrameLayout.LayoutParams(600, -2).apply { gravity = Gravity.CENTER_VERTICAL or Gravity.START; leftMargin = 880 }
+            layoutParams = if (isPortrait) FrameLayout.LayoutParams(700, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                topMargin = (dm.heightPixels * 0.40).toInt() + 20
+                bottomMargin = 40 // Crucial for scrolling bounds
+            }
+            else FrameLayout.LayoutParams(600, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.CENTER_VERTICAL or Gravity.START
+                leftMargin = 880
+                topMargin = 40
+                bottomMargin = 40 // Crucial for scrolling bounds
+            }
         }
 
-        addExtraControls(floatingPanel!!, context)
+        // --- NEW: Scrollable content wrapper ---
+        val scroller = ScrollView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            isVerticalScrollBarEnabled = false
+        }
+
+        val contentLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
 
         val titleRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 } }
         titleRow.addView(TextView(context).apply { text = label; textSize = 12f; setTypeface(null, Typeface.BOLD); setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
@@ -1807,7 +1825,7 @@ open class PropertyControl(
         updateLockButtonVisuals()
         titleRow.addView(lockButton)
 
-        floatingPanel?.addView(titleRow)
+        contentLayout.addView(titleRow)
 
         val numRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, 140).apply { bottomMargin = 10 } }
         val btnDec = createNumButton(context, "-") { setProgress(value - 1) }
@@ -1834,7 +1852,7 @@ open class PropertyControl(
         }
         val btnInc = createNumButton(context, "+") { setProgress(value + 1) }
         numRow.addView(btnDec); numRow.addView(baseValueInput); numRow.addView(btnInc)
-        floatingPanel?.addView(numRow)
+        contentLayout.addView(numRow)
 
         if (hasModulation) {
             val liveRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 } }
@@ -1846,9 +1864,9 @@ open class PropertyControl(
                 setPadding(0, 10, 0, 5)
             }
             liveRow.addView(liveValueDisplay)
-            floatingPanel?.addView(liveRow)
+            contentLayout.addView(liveRow)
 
-            floatingPanel?.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 2).apply { bottomMargin = 20 }; setBackgroundColor(Color.DKGRAY) })
+            contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 2).apply { bottomMargin = 20 }; setBackgroundColor(Color.DKGRAY) })
 
             shapeBtn = Button(context).apply {
                 text = modShape.name; textSize = 14f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; includeFontPadding = false; setPadding(0, 0, 0, 0)
@@ -1856,38 +1874,94 @@ open class PropertyControl(
                 layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 25 }
                 setOnClickListener { modShape = WaveShape.values()[(modShape.ordinal + 1) % WaveShape.values().size]; text = modShape.name }
             }
-            floatingPanel?.addView(shapeBtn)
+            contentLayout.addView(shapeBtn)
 
-            modPanelSpeedSeekBar = addSliderToPanel(context, "SPEED", modRate) { updateModRate(it) }
+            modPanelSpeedSeekBar = addSliderToPanel(context, contentLayout, "SPEED", modRate) { updateModRate(it) }
             modPanelSpeedSeekBar?.setOnTouchListener { v, event ->
                 if(event.action == MotionEvent.ACTION_DOWN) isRateDragging = true
                 if(event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) isRateDragging = false
                 v.onTouchEvent(event); true
             }
 
-            modPanelDepthSeekBar = addSliderToPanel(context, "DEPTH", modDepth) { updateModDepth(it) }
+            modPanelDepthSeekBar = addSliderToPanel(context, contentLayout, "DEPTH", modDepth) { updateModDepth(it) }
             modPanelDepthSeekBar?.setOnTouchListener { v, event ->
                 if(event.action == MotionEvent.ACTION_DOWN) isDepthDragging = true
                 if(event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) isDepthDragging = false
                 v.onTouchEvent(event); true
             }
 
-            val smoothSb = addSliderToPanel(context, "SMOOTH", smoothing) { updateSmoothing(it) }
+            val smoothSb = addSliderToPanel(context, contentLayout, "SMOOTH", smoothing) { updateSmoothing(it) }
             smoothSb.tag = "SMOOTH_SEEK"
 
-            floatingPanel?.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 20) })
+            contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 20) })
         }
 
-        floatingPanel?.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
+        contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
         val resetBtn = Button(context).apply {
             text = "RESET"; textSize = 14f; setTextColor(Color.LTGRAY); includeFontPadding = false; setPadding(0, 0, 0, 0); gravity = Gravity.CENTER
             background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(2, Color.DKGRAY); cornerRadius = 12f }
             layoutParams = LinearLayout.LayoutParams(-1, 110).apply { bottomMargin = 10; topMargin = 5 }
             setOnClickListener { reset() }
         }
-        floatingPanel?.addView(resetBtn)
+        contentLayout.addView(resetBtn)
+
+        // --- Moved extra controls to the bottom ---
+        addExtraControls(contentLayout, context)
+
+        scroller.addView(contentLayout)
+        floatingPanel?.addView(scroller)
         rootLayout.addView(floatingPanel)
         activeControl = this
+    }
+
+    protected fun addSliderToPanel(ctx: Context, parent: ViewGroup, name: String, current: Int, onChange: (Int) -> Unit): SeekBar {
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 5, 0, 5)
+        }
+        val mapMode = when(name) {
+            "SPEED" -> "RATE"
+            "DEPTH" -> "DEPTH"
+            else -> null
+        }
+        val labelView = TextView(ctx).apply {
+            text = name
+            textSize = 10f
+            setTextColor(Color.LTGRAY)
+            maxLines = 1
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(130, ViewGroup.LayoutParams.MATCH_PARENT)
+            if (mapMode != null) {
+                isClickable = true
+                setOnLongClickListener {
+                    (ctx as? MainActivity)?.showMidiLearnOverlay(
+                        "${this@PropertyControl.id}|$mapMode",
+                        "${this@PropertyControl.label} $name"
+                    )
+                    true
+                }
+            }
+        }
+        row.addView(labelView)
+        val sb = SeekBar(ctx).apply {
+            max = 1000
+            progress = current
+            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
+            setPadding(0, 0, 0, 0)
+            thumbOffset = 0
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                setMargins(0, 0, 0, 0)
+            }
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) onChange(p) }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+        row.addView(sb)
+        parent.addView(row) // Adds directly to the specified parent container
+        return sb
     }
 
     private fun updateLockButtonVisuals() {
@@ -6001,41 +6075,19 @@ abstract class SourcePropertyControl(
     outMin = 0f,
     outMax = 1f,
     hasModulation = true,
-    includeInPreset = false, // Mix levels are usually manual for now, but can be changed
+    includeInPreset = false,
     layoutStyle = LayoutStyle.ROW,
     iconResId = android.R.drawable.presence_video_online,
     defaultLocked = true
 ) {
-    override fun openMenu(context: Context) {
-        super.openMenu(context)
 
-        // Add Remove Button at bottom
-        val removeBtn = Button(context).apply {
-            text = "REMOVE SOURCE"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#882222"))
-                cornerRadius = 10f
-                setStroke(1, Color.RED)
-            }
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 100).apply {
-                topMargin = 30
-                bottomMargin = 10
-            }
-            setOnClickListener { showDeleteConfirmation() }
-        }
-        floatingPanel?.addView(removeBtn)
-    }
-
-    // NEW: Inject the Geometry controls into the floating menu
     override fun addExtraControls(panel: LinearLayout, context: Context) {
         val channel = mainActivity.getRendererSource(sourceId) ?: return
 
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 20 }
+            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 20; topMargin = 20 }
         }
 
         fun mkBtn(txt: String, action: () -> Unit): Button {
@@ -6053,21 +6105,31 @@ abstract class SourcePropertyControl(
             }
         }
 
-        row.addView(mkBtn("FLIP X") {
-            channel.userFlipX *= -1f
-            // Trigger visual refresh if needed, usually automatic via GL loop
-        })
-        row.addView(mkBtn("FLIP Y") {
-            channel.userFlipY *= -1f
-        })
-        row.addView(mkBtn("ROT 180") {
-            channel.userRot180 = !channel.userRot180
-        })
+        row.addView(mkBtn("FLIP X") { channel.userFlipX *= -1f })
+        row.addView(mkBtn("FLIP Y") { channel.userFlipY *= -1f })
+        row.addView(mkBtn("ROT 180") { channel.userRot180 = !channel.userRot180 })
 
         panel.addView(TextView(context).apply {
             text = "SOURCE GEOMETRY"; textSize=10f; setTextColor(Color.LTGRAY)
         })
         panel.addView(row)
+
+        val removeBtn = Button(context).apply {
+            text = "REMOVE SOURCE"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#882222"))
+                cornerRadius = 10f
+                setStroke(1, Color.RED)
+            }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 100).apply {
+                topMargin = 10
+                bottomMargin = 10
+            }
+            setOnClickListener { showDeleteConfirmation() }
+        }
+        panel.addView(removeBtn)
     }
 
     private fun showDeleteConfirmation() {
@@ -6083,7 +6145,8 @@ abstract class SourcePropertyControl(
 }
 
 
-class CameraSourceControl(mainActivity: MainActivity) : PropertyControl(
+
+class CameraSourceControl(val mainActivity: MainActivity) : PropertyControl(
     id = "CAM_MAIN",
     label = "CAMERA",
     defaultValue = 1000,
@@ -6094,7 +6157,41 @@ class CameraSourceControl(mainActivity: MainActivity) : PropertyControl(
     layoutStyle = LayoutStyle.ROW,
     iconResId = android.R.drawable.ic_menu_camera,
     defaultLocked = true
-)
+) {
+    override fun addExtraControls(panel: LinearLayout, context: Context) {
+        val channel = mainActivity.getRendererSource("CAM_MAIN") ?: return
+
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 20; topMargin = 20 }
+        }
+
+        fun mkBtn(txt: String, action: () -> Unit): Button {
+            return Button(context).apply {
+                text = txt
+                textSize = 12f
+                setTextColor(Color.WHITE)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#444444"))
+                    cornerRadius = 10f
+                    setStroke(1, Color.GRAY)
+                }
+                layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(4,0,4,0) }
+                setOnClickListener { action() }
+            }
+        }
+
+        row.addView(mkBtn("FLIP X") { channel.userFlipX *= -1f })
+        row.addView(mkBtn("FLIP Y") { channel.userFlipY *= -1f })
+        row.addView(mkBtn("ROT 180") { channel.userRot180 = !channel.userRot180 })
+
+        panel.addView(TextView(context).apply {
+            text = "SOURCE GEOMETRY"; textSize=10f; setTextColor(Color.LTGRAY)
+        })
+        panel.addView(row)
+    }
+}
 
 class MediaSourceControl(
     id: String,
