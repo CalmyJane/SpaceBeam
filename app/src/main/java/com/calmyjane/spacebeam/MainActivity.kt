@@ -5215,6 +5215,7 @@ class MainActivity : AppCompatActivity() {
         private var simpleProgram = 0
         private var copyOesProgram = 0
         private var copy2dProgram = 0
+        val stMatrix = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
 
         @Volatile private var isSurfaceReady = false
         private val mvpMatrix = FloatArray(16)
@@ -5354,6 +5355,11 @@ class MainActivity : AppCompatActivity() {
                             try { surfaceTexture?.updateTexImage(); frameAvailable = false } catch (e: Exception) { }
                         }
                     }
+                    if (type == SourceType.CAMERA) {
+                        android.opengl.Matrix.setIdentityM(stMatrix, 0)
+                    } else {
+                        surfaceTexture?.getTransformMatrix(stMatrix)
+                    }
                 }
 
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
@@ -5383,6 +5389,11 @@ class MainActivity : AppCompatActivity() {
                 if (isSideways) { val temp = sx; sx = sy; sy = temp }
 
                 GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uScale"), sx, sy)
+
+                if (program == copyOesProgram) {
+                    val stLoc = GLES20.glGetUniformLocation(program, "uSTMatrix")
+                    GLES20.glUniformMatrix4fv(stLoc, 1, false, stMatrix, 0)
+                }
 
                 ShaderHelper.bindQuad(program)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -5463,6 +5474,7 @@ class MainActivity : AppCompatActivity() {
             uniform vec2 uScale; 
             uniform float uRotation;
             uniform vec2 uFlip;
+            uniform mat4 uSTMatrix;
             void main() {
                 vec2 uv = v - 0.5;
                 uv = uv * uScale;
@@ -5472,8 +5484,9 @@ class MainActivity : AppCompatActivity() {
                 uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
                 uv = uv + 0.5;
                 uv = abs(mod(uv + 1.0, 2.0) - 1.0);
-                uv = clamp(uv, 0.002, 0.998);
-                gl_FragColor = texture2D(uTex, uv);
+                
+                vec2 stUV = (uSTMatrix * vec4(uv, 0.0, 1.0)).xy;
+                gl_FragColor = texture2D(uTex, stUV);
             }""".trimIndent()
             copyOesProgram = ShaderHelper.createProgram(vSrc, fSrcCopyOes)
 
@@ -5492,7 +5505,7 @@ class MainActivity : AppCompatActivity() {
                 uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
                 uv = uv + 0.5;
                 uv = abs(mod(uv + 1.0, 2.0) - 1.0);
-                uv = clamp(uv, 0.002, 0.998);
+                
                 gl_FragColor = texture2D(uTex, uv);
             }""".trimIndent()
             copy2dProgram = ShaderHelper.createProgram(vSrc, fSrcCopy2d)
