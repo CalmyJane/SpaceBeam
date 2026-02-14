@@ -2616,22 +2616,26 @@ class MainActivity : AppCompatActivity() {
         init {
             addControl(PropertyControl("AXIS", "AXIS", min=1, max=25, sliderMax=25, defaultValue=2, includeInPreset=true, defaultLocked=true, allowSmoothing=false))
             addControl(PropertyControl("K_AMT", "AMOUNT", defaultValue=1000, outMin=0f, outMax=1f, hasModulation=true))
+            // Zoom starts at 0 (1.0x) and goes up to 1000 (5.0x zoom out)
+            addControl(PropertyControl("K_ZOOM", "K-ZOOM", defaultValue=0, outMin=1.0f, outMax=5.0f, hasModulation=true))
         }
 
         override fun init() {
             val fSrc = """
             precision highp float; varying vec2 v; uniform sampler2D uTex;
-            uniform float uAx, uAmt, uRatio;
+            uniform float uAx, uAmt, uZoom, uRatio;
             void main() {
                 vec2 uv = v - 0.5;
                 
-                // Transition:
-                // Amt 0 -> Scale 1.0 (Normal View)
-                // Amt 1 -> Scale 2.0 (2x2 Grid View)
-                float zoom = mix(1.0, 2.0, uAmt);
+                // Transition logic for Amount (Normal vs Kaleidoscope)
+                float zoomAmt = mix(1.0, 2.0, uAmt);
                 float shift = mix(0.5, 0.0, uAmt);
                 
-                uv *= zoom;
+                // Apply internal Zoom Out
+                // uZoom starts at 1.0 and increases, so dividing by it zooms OUT.
+                uv *= uZoom;
+                
+                uv *= zoomAmt;
                 
                 // Radial Logic (Axis > 2)
                 if (uAx > 2.1) {
@@ -2651,14 +2655,14 @@ class MainActivity : AppCompatActivity() {
                     uv = mix(uv, rUV, smoothstep(0.0, 1.0, uAmt));
                 }
                 
-                // Mirroring
+                // Mirroring Logic
                 uv += shift;
-                uv = abs(uv);
                 
-                // Clamp
-                uv = clamp(uv, 0.001, 0.999);
+                // INFINITE MIRROR REPEAT
+                // This replaces the clamp. It reflects the coordinates whenever they cross 0.0 or 1.0.
+                vec2 mirroredUV = abs(mod(uv - 1.0, 2.0) - 1.0);
                 
-                gl_FragColor = texture2D(uTex, uv);
+                gl_FragColor = texture2D(uTex, mirroredUV);
             }"""
             prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
         }
@@ -2671,6 +2675,7 @@ class MainActivity : AppCompatActivity() {
             val axis = mainActivity.controlsMap["AXIS"]?.value?.toFloat() ?: 2f
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uAx"), axis)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uAmt"), mainActivity.controlsMap["K_AMT"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uZoom"), mainActivity.controlsMap["K_ZOOM"]?.computedValue ?: 1f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
 
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
