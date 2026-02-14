@@ -3879,9 +3879,24 @@ class MainActivity : AppCompatActivity() {
 
                 // 3. Add Button
                 val addBtn = Button(this).apply {
-                    text = "+"; textSize = 24f; setTextColor(Color.WHITE)
-                    background = GradientDrawable().apply { setColor(Color.parseColor("#333333")); cornerRadius=15f; setStroke(1,Color.GRAY) }
-                    layoutParams = LinearLayout.LayoutParams(150, 80).apply { gravity=Gravity.CENTER_HORIZONTAL; setMargins(20,10,20,10) }
+                    text = "+"
+                    textSize = 28f
+                    setTextColor(Color.WHITE)
+
+                    // The centering fix:
+                    gravity = Gravity.CENTER
+                    includeFontPadding = false
+                    setPadding(0, 0, 0, 0)
+
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#333333"))
+                        cornerRadius = 15f
+                        setStroke(1, Color.GRAY)
+                    }
+                    layoutParams = LinearLayout.LayoutParams(160, 90).apply {
+                        gravity = Gravity.CENTER_HORIZONTAL
+                        setMargins(20, 10, 20, 10)
+                    }
                     setOnClickListener { showAddSourceDialog() }
                 }
                 currentGroupContent?.addView(addBtn)
