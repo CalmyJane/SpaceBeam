@@ -2853,11 +2853,11 @@ class MainActivity : AppCompatActivity() {
             addControl(PropertyControl("S_ACTIVITY", "ACTIVITY", defaultValue = 200, outMin=0.0f, outMax=2.0f, hasModulation = true))
             addControl(PropertyControl("SWIRL_SPEED", "SPEED", defaultValue = 500, outMin=-4.0f, outMax=4.0f, hasModulation = true))
 
-            // Fog Controls
-            addControl(PropertyControl("S_FOG", "FOG DIST", defaultValue = 0, outMin=0.0f, outMax=0.2f, hasModulation = true))
+            addControl(PropertyControl("S_FOG", "FOG DIST", defaultValue = 100, outMin=0.0f, outMax=1.0f, hasModulation = true))
+            addControl(PropertyControl("S_FOG_FALLOFF", "FOG SOFT", defaultValue = 150, outMin=0.0f, outMax=80.0f))
             addControl(PropertyControl("S_FOG_H", "FOG HUE", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
             addControl(PropertyControl("S_FOG_S", "FOG SAT", defaultValue = 0, outMin=0.0f, outMax=1.0f))
-            addControl(PropertyControl("S_FOG_V", "FOG BRIT", defaultValue = 1000, outMin=0.0f, outMax=1.0f))
+            addControl(PropertyControl("S_FOG_V", "FOG BRIT", defaultValue = 0, outMin=0.0f, outMax=1.0f))
         }
 
         override fun reset() {
@@ -2871,7 +2871,6 @@ class MainActivity : AppCompatActivity() {
                 val rawSpeed = speedCtrl.computedValue
                 val sign = sign(rawSpeed)
                 val curvedSpeed = sign * (abs(rawSpeed)).pow(2.0f)
-                // Let it grow naturally, handled in shader wrap
                 scrollAccum -= curvedSpeed * deltaTime * 2.0f
             }
 
@@ -2885,10 +2884,10 @@ class MainActivity : AppCompatActivity() {
             val fSrc = """
             precision highp float; varying vec2 v; uniform sampler2D uTex;
             uniform float uStr, uWide, uScroll, uSwayTime, uRatio;
-            uniform float uFogD, uFogH, uFogS, uFogV;
+            uniform float uFogD, uFogF, uFogH, uFogS, uFogV;
             
             #define PI 3.14159
-            #define FAR 40.0
+            #define FAR 80.0
             
             mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
             mat3 lookAt(vec3 dir) {
@@ -2944,26 +2943,19 @@ class MainActivity : AppCompatActivity() {
                     tunnelUV = vec2(ang / PI, p.z * 0.2);
                     
                     if (uFogD > 0.001) {
-                        fogAmt = 1.0 - exp(-t * t * uFogD);
-                        fogAmt = clamp(fogAmt, 0.0, 1.0);
+                        float fogWall = mix(FAR, 0.0, uFogD);
+                        float fogStart = fogWall - max(uFogF, 0.001);
+                        fogAmt = smoothstep(fogStart, fogWall, t);
                     }
                 } else {
                     tunnelUV = flatUV; 
                     fogAmt = 1.0; 
                 }
 
-                // --- KEY FIX: Wrap coordinates BEFORE mixing ---
-                // Because 'p.z' grows infinitely with scroll, tunnelUV contains huge numbers.
-                // flatUV contains small numbers (~0.5).
-                // Interpolating directly creates the jump.
-                // Wrapping first puts both in [0,1] range for smooth mixing.
                 vec2 wrappedTunnel = abs(mod(tunnelUV + 0.5, 2.0) - 1.0);
                 vec2 wrappedFlat = abs(mod(flatUV + 0.5, 2.0) - 1.0); 
 
-                // Mix the already-wrapped coordinates
                 vec2 finalUV = mix(wrappedFlat, wrappedTunnel, smoothstep(0.0, 1.0, uStr));
-                
-                // Sample texture (No further wrapping needed as we are in 0-1)
                 vec4 col = texture2D(uTex, finalUV);
                 
                 if (uFogD > 0.001) {
@@ -2990,9 +2982,10 @@ class MainActivity : AppCompatActivity() {
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uSwayTime"), swayAccum)
 
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogD"), mainActivity.controlsMap["S_FOG"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogF"), mainActivity.controlsMap["S_FOG_FALLOFF"]?.computedValue ?: 0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogH"), mainActivity.controlsMap["S_FOG_H"]?.computedValue ?: 0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogS"), mainActivity.controlsMap["S_FOG_S"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogV"), mainActivity.controlsMap["S_FOG_V"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogV"), mainActivity.controlsMap["S_FOG_V"]?.computedValue ?: 0f)
 
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -3094,36 +3087,29 @@ class MainActivity : AppCompatActivity() {
         // This will now refill the EXISTING overlayHUD
         setupOverlayHUD()
 
-        // 3. Restore State
-        if (::overlayHUD.isInitialized) {
-            overlayHUD.visibility = if (isHudVisible) View.VISIBLE else View.GONE
-        }
-        applyReadabilityStyle()
-        updateSidebarVisuals()
+        // 1. Initialize Presets (This now loads from storage or defaults)
+        initDefaultPresets()
 
-        if (::transSeekBar.isInitialized) transSeekBar.progress = savedTransProgress
-
-        if (activePreset != -1) {
-            val drawable = presetDrawables[activePreset]
-            drawable?.isActive = true
-            drawable?.invalidateSelf()
+        val prefs = getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+        autoPlayRandom = prefs.getBoolean("AP_RANDOM", false)
+        val filterStr = prefs.getString("AP_FILTER", null)
+        if (filterStr != null) {
+            autoPlayFilter.clear()
+            if (filterStr.isNotEmpty()) {
+                filterStr.split(",").mapNotNull { it.toIntOrNull() }.forEach { autoPlayFilter.add(it) }
+            }
         }
 
-        isAutoPlaying = savedIsAutoPlaying
-        if (::playBtn.isInitialized) playBtn.setImageDrawable(createPlayIcon(isAutoPlaying))
-
-        // Restore Menus - Using the Thread-Safe map
-        if (activeControlId != null && controlsMap.containsKey(activeControlId)) {
-            handler.postDelayed({ controlsMap[activeControlId]?.toggleMenu() }, 50)
+        glView.post {
+            // 2. Global Reset to ensure clean state
+            globalReset()
+            // 3. Apply the actual saved data for preset 1
+            applyPreset(1)
+            applyReadabilityStyle()
         }
-
-        if (wasSettingsOpen) {
-            settingsMenu = SettingsMenu(this, overlayHUD)
-            settingsMenu?.show()
-            settingsMenu?.restoreScrollY(savedScrollY)
-        }
-
-        isRebuildingHUD = false
+        displayHelper = ExternalDisplayHelper(this, renderer)
+        displayHelper.start()
+        checkAndRequestPermissions()
     }
 
     fun resetPresetsToDefault() {
@@ -5080,20 +5066,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun savePreset(idx: Int) {
+        // associate snapshots using the control's current live state
         val snapshots = controls.filter { it.includeInPreset }.associate { it.id to it.getSnapshot() }
+        val axisVal = controlsMap["AXIS"]?.value ?: 2
 
-        val axisVal = controlsMap["AXIS"]?.value ?: 0
-
-        val newPreset = Preset(snapshots, renderer.flipX, renderer.flipY, renderer.rot180, axisVal + 1)
+        val newPreset = Preset(snapshots, renderer.flipX, renderer.flipY, renderer.rot180, axisVal)
         presets[idx] = newPreset
         activePreset = idx
-        updatePresetHighlights()
+
         try {
             val rootObj = JSONObject()
             rootObj.put("axis", newPreset.axis)
             rootObj.put("flipX", newPreset.flipX.toDouble())
             rootObj.put("flipY", newPreset.flipY.toDouble())
             rootObj.put("rot180", newPreset.rot180)
+
             val controlsObj = JSONObject()
             newPreset.controlSnapshots.forEach { (key, snap) ->
                 val snapObj = JSONObject()
@@ -5105,9 +5092,17 @@ class MainActivity : AppCompatActivity() {
                 controlsObj.put(key, snapObj)
             }
             rootObj.put("controls", controlsObj)
-            getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE).edit().putString("PRESET_$idx", rootObj.toString()).apply()
+
+            getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
+                .edit()
+                .putString("PRESET_$idx", rootObj.toString())
+                .apply()
+
+            updatePresetHighlights()
             Toast.makeText(this, "Preset $idx Saved", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) { Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show() }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show()
+        }
     }
 
     // Add this helper function inside MainActivity
@@ -5207,7 +5202,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initDefaultPresets() {
-        // Robust Helper Function
+        val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
+
         fun p(ax: Int, vararg overrides: Any): Preset {
             val baseSnapshots = controls.associate {
                 it.id to PropertyControl.Snapshot(
@@ -5224,26 +5220,19 @@ class MainActivity : AppCompatActivity() {
             while (i < overrides.size) {
                 val key = overrides[i] as String
                 val value = overrides[i + 1] as Int
-
-                // Check for Modulation (Rate/Depth)
                 if (i + 3 < overrides.size && overrides[i + 2] is Int && overrides[i + 3] is Int) {
                     val rate = overrides[i + 2] as Int
                     val depth = overrides[i + 3] as Int
-
                     var shape = "SINE"
                     var step = 4
-
-                    // Check for Shape String safely
                     if (i + 4 < overrides.size && overrides[i + 4] is String) {
                         val potentialShape = overrides[i + 4] as String
                         val isValid = try { PropertyControl.WaveShape.valueOf(potentialShape); true } catch (e: Exception) { false }
                         if (isValid) { shape = potentialShape; step = 5 }
                     }
-                    // Default smoothing to 500
                     baseSnapshots[key] = PropertyControl.Snapshot(value, true, rate, depth, shape, 500)
                     i += step
                 } else {
-                    // Static value, default smoothing to 500
                     baseSnapshots[key] = PropertyControl.Snapshot(value, false, 0, 0, "SINE", 500)
                     i += 2
                 }
@@ -5251,49 +5240,57 @@ class MainActivity : AppCompatActivity() {
             return Preset(baseSnapshots, 1f, -1f, false, ax)
         }
 
-        // --- PRESET DEFINITIONS ---
-        presets[1] = p(2, "M_ZOOM", 320, "M_TX", 500, "M_TY", 500, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
-        presets[2] = p(2, "M_ZOOM", 37, "M_TX", 725, "M_TY", 628, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
-        presets[3] = p(2, "M_ANGLE", 0, 169, 1000, "RAMP", "M_ZOOM", 168, "M_TX", 500, 480, 378, "M_TY", 546, 340, 698, "M_TILTX", 500, 268, 788, "M_TILTY", 500, 241, 732, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500)
-        presets[4] = p(2, "M_ANGLE", 172, 262, 287, "M_ZOOM", 160, 531, 316, "M_TX", 500, 235, 184, "M_TY", 500, 217, 218, "M_TILTX", 500, 242, 305, "M_TILTY", 500, 318, 343, "C_ZOOM", 500, 583, 365, "HUE", 184, 298, 505, "RAMP", "GLOW", 172, "CONTRAST", 718, "VIBRANCE", 899)
-        presets[5] = p(2, "M_ANGLE", 172, 262, 287, "M_ZOOM", 518, 531, 576, "M_TX", 500, 431, 525, "M_TY", 500, 217, 644, "RANDOM_SMOOTH", "M_TILTX", 500, 498, 1000, "M_TILTY", 500, 318, 1000, "C_ZOOM", 500, 583, 365, "GLOW", 485, "CONTRAST", 788, "VIBRANCE", 899)
-        presets[6] = p(2, "3D_MIX", 1000, "S_FOV", 884, "M_ANGLE", 172, 262, 287, "M_ZOOM", 130, 200, 0, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 345, "RANDOM_SMOOTH", "C_ZOOM", 500, 583, 365, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853)
-        presets[7] = p(2, "3D_MIX", 1000, "S_SHAPE", 0, 343, 0, "S_SPEED", 206, "S_FOV", 481, "T_WAVE_STR", 454, "T_WAVE_POS", 20, 375, 1000, "RAMP", "M_ANGLE", 870, "M_ZOOM", 77, "M_TX", 500, 320, 328, "M_TY", 500, 323, 343, "M_TILTY", 500, 318, 0, "C_ZOOM", 500, 583, 0, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853)
-        presets[8] = p(2, "3D_MIX", 1000, "S_SHAPE", 1000, 343, 785, "S_FOV", 481, 496, 704, "S_SPEED", 1000, "M_ANGLE", 172, 262, 287, "M_ZOOM", 160, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 469, "C_ZOOM", 500, 583, 365, "RGB", 490, 534, 634, "GLOW", 285, "CONTRAST", 786, "VIBRANCE", 828)
-        presets[9] = p(6, "3D_MIX", 1000, "S_FOV", 600, "S_SPEED", 150, "S_SHAPE", 0, 150, 600, "SINE", "M_ZOOM", 120, 150, 200, "SINE", "M_ANGLE", 0, 60, 1000, "RAMP", "HUE", 0, 80, 1000, "RAMP", "VIBRANCE", 600, "GLOW", 600, "RGB", 150, "M_TX", 500, "M_TY", 500, "M_TILTX", 500, "M_TILTY", 500)
-
-        // Load saved overrides
-        val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
-        for (i in 1..9) {
-            val jsonStr = prefs.getString("PRESET_$i", null)
-            if (jsonStr != null) {
+        // Load presets 1-9
+        for (idx in 1..9) {
+            val savedJson = prefs.getString("PRESET_$idx", null)
+            if (savedJson != null) {
                 try {
-                    val rootObj = JSONObject(jsonStr)
-                    val loadedAxis = rootObj.getInt("axis")
-                    val loadedFlipX = rootObj.getDouble("flipX").toFloat()
-                    val loadedFlipY = rootObj.getDouble("flipY").toFloat()
-                    val loadedRot180 = rootObj.getBoolean("rot180")
-                    val controlsObj = rootObj.getJSONObject("controls")
+                    val obj = JSONObject(savedJson)
+                    val ax = obj.optInt("axis", 2)
+                    val fx = obj.optDouble("flipX", 1.0).toFloat()
+                    val fy = obj.optDouble("flipY", -1.0).toFloat()
+                    val r180 = obj.optBoolean("rot180", false)
 
-                    val loadedSnapshots = mutableMapOf<String, PropertyControl.Snapshot>()
-                    loadedSnapshots.putAll(presets[i]?.controlSnapshots ?: emptyMap())
-
-                    val keysIterator = controlsObj.keys()
-                    while (keysIterator.hasNext()) {
-                        val key = keysIterator.next()
-                        val snapObj = controlsObj.getJSONObject(key)
-                        loadedSnapshots[key] = PropertyControl.Snapshot(
-                            snapObj.getInt("v"),
-                            snapObj.optBoolean("active", false),
-                            snapObj.optInt("r", 0),
-                            snapObj.optInt("d", 0),
-                            snapObj.optString("shape", "SINE"),
-                            snapObj.optInt("s", 500)
+                    val snapshots = mutableMapOf<String, PropertyControl.Snapshot>()
+                    val controlsObj = obj.getJSONObject("controls")
+                    val keys = controlsObj.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        val s = controlsObj.getJSONObject(k)
+                        snapshots[k] = PropertyControl.Snapshot(
+                            s.getInt("v"),
+                            s.optInt("d", 0) > 0,
+                            s.optInt("r", 200),
+                            s.optInt("d", 0),
+                            s.optString("shape", "SINE"),
+                            s.optInt("s", 500)
                         )
                     }
-                    presets[i] = Preset(loadedSnapshots, loadedFlipX, loadedFlipY, loadedRot180, loadedAxis)
-                } catch (e: Exception) { Log.e("PRESET", "Error loading preset $i", e) }
+                    presets[idx] = Preset(snapshots, fx, fy, r180, ax)
+                } catch (e: Exception) {
+                    Log.e("SpaceBeam", "Failed to load preset $idx, using factory default", e)
+                    // Fallback inside the loop if JSON is corrupted
+                    loadFactoryDefault(idx, ::p)
+                }
+            } else {
+                loadFactoryDefault(idx, ::p)
             }
+        }
+    }
+
+    // Helper to keep the main function clean
+    private fun loadFactoryDefault(idx: Int, pFunc: (Int, Array<out Any>) -> Preset) {
+        presets[idx] = when(idx) {
+            1 -> pFunc(2, arrayOf("M_ZOOM", 320, "M_TX", 500, "M_TY", 500, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500))
+            2 -> pFunc(2, arrayOf("M_ZOOM", 37, "M_TX", 725, "M_TY", 628, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500))
+            3 -> pFunc(2, arrayOf("M_ANGLE", 0, 169, 1000, "RAMP", "M_ZOOM", 168, "M_TX", 500, 480, 378, "M_TY", 546, 340, 698, "M_TILTX", 500, 268, 788, "M_TILTY", 500, 241, 732, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500))
+            4 -> pFunc(2, arrayOf("M_ANGLE", 172, 262, 287, "M_ZOOM", 160, 531, 316, "M_TX", 500, 235, 184, "M_TY", 500, 217, 218, "M_TILTX", 500, 242, 305, "M_TILTY", 500, 318, 343, "C_ZOOM", 500, 583, 365, "HUE", 184, 298, 505, "RAMP", "GLOW", 172, "CONTRAST", 718, "VIBRANCE", 899))
+            5 -> pFunc(2, arrayOf("M_ANGLE", 172, 262, 287, "M_ZOOM", 518, 531, 576, "M_TX", 500, 431, 525, "M_TY", 500, 217, 644, "RANDOM_SMOOTH", "M_TILTX", 500, 498, 1000, "M_TILTY", 500, 318, 1000, "C_ZOOM", 500, 583, 365, "GLOW", 485, "CONTRAST", 788, "VIBRANCE", 899))
+            6 -> pFunc(2, arrayOf("3D_MIX", 1000, "S_FOV", 884, "M_ANGLE", 172, 262, 287, "M_ZOOM", 130, 200, 0, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 345, "RANDOM_SMOOTH", "C_ZOOM", 500, 583, 365, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
+            7 -> pFunc(2, arrayOf("3D_MIX", 1000, "S_SHAPE", 0, 343, 0, "S_SPEED", 206, "S_FOV", 481, "T_WAVE_STR", 454, "T_WAVE_POS", 20, 375, 1000, "RAMP", "M_ANGLE", 870, "M_ZOOM", 77, "M_TX", 500, 320, 328, "M_TY", 500, 323, 343, "M_TILTY", 500, 318, 0, "C_ZOOM", 500, 583, 0, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
+            8 -> pFunc(2, arrayOf("3D_MIX", 1000, "S_SHAPE", 1000, 343, 785, "S_FOV", 481, 496, 704, "S_SPEED", 1000, "M_ANGLE", 172, 262, 287, "M_ZOOM", 160, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 469, "C_ZOOM", 500, 583, 365, "RGB", 490, 534, 634, "GLOW", 285, "CONTRAST", 786, "VIBRANCE", 828) )
+            9 -> pFunc(6, arrayOf("3D_MIX", 1000, "S_FOV", 600, "S_SPEED", 150, "S_SHAPE", 0, 150, 600, "SINE", "M_ZOOM", 120, 150, 200, "SINE", "M_ANGLE", 0, 60, 1000, "RAMP", "HUE", 0, 80, 1000, "RAMP", "VIBRANCE", 600, "GLOW", 600, "RGB", 150, "M_TX", 500, "M_TY", 500, "M_TILTX", 500, "M_TILTY", 500))
+            else -> pFunc(2, emptyArray())
         }
     }
 
