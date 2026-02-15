@@ -206,22 +206,6 @@ class MidiHelper(private val activity: MainActivity) {
         }
     }
 
-    private fun loadMappings() {
-        try {
-            val arr = JSONArray(DEFAULT_MAPPING_JSON)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val cc = obj.getInt("cc")
-                val t = obj.getString("t")
-                val m = obj.getString("m")
-                val s = obj.optDouble("s", 1.0).toFloat()
-
-                addBinding(cc, t, m, s, updateReverse = true)
-            }
-        } catch (e: Exception) {
-            Log.e("MIDI", "Error parsing mapping JSON", e)
-        }
-    }
 
     private fun addBinding(cc: Int, target: String, mode: String, scale: Float, updateReverse: Boolean) {
         if (!bindingMap.containsKey(cc)) {
@@ -1349,7 +1333,6 @@ open class PropertyControl(
     private var noiseValA: Float = Math.random().toFloat()
     private var noiseValB: Float = Math.random().toFloat()
 
-    private var modSnapshotValue: Float = 0f
     private var modRateStart = 0f
     private var modRateTarget: Float? = null
     private var modDepthStart = 0f
@@ -1368,7 +1351,6 @@ open class PropertyControl(
     protected var currentContext: Context? = null
 
     // Interaction Flags
-    private var isMainDragging = false
     private var isRateDragging = false
     private var isDepthDragging = false
 
@@ -1410,7 +1392,6 @@ open class PropertyControl(
     }
 
     fun animateTo(target: Float, durationSec: Float, newShape: String? = null) {
-        modSnapshotValue = smoothedNormalized
         animTarget = target
         animStart = preciseValue
         animDuration = durationSec
@@ -2007,55 +1988,6 @@ open class PropertyControl(
             layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(5, 5, 5, 5) }
             setOnClickListener { action() } }
     }
-    protected fun addSliderToPanel(ctx: Context, name: String, current: Int, onChange: (Int) -> Unit): SeekBar {
-        val row = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 5, 0, 5)
-        }
-        val mapMode = when(name) {
-            "SPEED" -> "RATE"
-            "DEPTH" -> "DEPTH"
-            else -> null
-        }
-        val labelView = TextView(ctx).apply {
-            text = name
-            textSize = 10f
-            setTextColor(Color.LTGRAY)
-            maxLines = 1
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(130, ViewGroup.LayoutParams.MATCH_PARENT)
-            if (mapMode != null) {
-                isClickable = true
-                setOnLongClickListener {
-                    (ctx as? MainActivity)?.showMidiLearnOverlay(
-                        "${this@PropertyControl.id}|$mapMode",
-                        "${this@PropertyControl.label} $name"
-                    )
-                    true
-                }
-            }
-        }
-        row.addView(labelView)
-        val sb = SeekBar(ctx).apply {
-            max = 1000
-            progress = current
-            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
-            setPadding(0, 0, 0, 0)
-            thumbOffset = 0
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
-                setMargins(0, 0, 0, 0)
-            }
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) onChange(p) }
-                override fun onStartTrackingTouch(s: SeekBar?) {}
-                override fun onStopTrackingTouch(s: SeekBar?) {}
-            })
-        }
-        row.addView(sb)
-        floatingPanel?.addView(row)
-        return sb
-    }
 
     // --- INNER CLASS: Custom SliderBox View ---
     private inner class SliderBox(context: Context) : View(context) {
@@ -2094,7 +2026,6 @@ open class PropertyControl(
             parent.requestDisallowInterceptTouchEvent(true)
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    isMainDragging = true
                     stopAnimation()
                     if (activeControl != null && activeControl != this@PropertyControl) closeActiveMenu()
                     updateFromTouch(event.x)
@@ -2103,7 +2034,6 @@ open class PropertyControl(
                     updateFromTouch(event.x)
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    isMainDragging = false
                     parent.requestDisallowInterceptTouchEvent(false)
                 }
             }
@@ -3872,14 +3802,6 @@ class MainActivity : AppCompatActivity() {
         return BitmapDrawable(resources, b)
     }
 
-    private fun createClockDrawable(): BitmapDrawable {
-        val b = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
-        val c = Canvas(b)
-        val p = Paint().apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 6f; isAntiAlias = true }
-        c.drawCircle(50f, 55f, 35f, p); c.drawLine(50f, 55f, 50f, 35f, p); c.drawLine(50f, 55f, 65f, 55f, p)
-        c.drawLine(40f, 15f, 60f, 15f, p); c.drawLine(50f, 15f, 50f, 20f, p); return BitmapDrawable(resources, b)
-    }
-
     private fun createLogoDrawable(): ShapeDrawable {
         val p = Path().apply { moveTo(46f, 131f); lineTo(46f, 162f); lineTo(159f, 162f); lineTo(159f, 144f); lineTo(64f, 144f); lineTo(64f, 131f); close() }
         return ShapeDrawable(PathShape(p, 200f, 200f)).apply { paint.color = Color.WHITE; paint.isAntiAlias = true }
@@ -4549,11 +4471,6 @@ class MainActivity : AppCompatActivity() {
         axisCtrl.attachTo(this, parent)
     }
 
-    private fun setupCameraOrientationControls(parent: LinearLayout) {
-        // Function intentionally left empty or removed.
-        // Global Flip X/Y/Rot buttons are deprecated in favor of per-source controls.
-    }
-
     private fun createCameraSettingsPanel(): LinearLayout {
         cameraSettingsPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -4799,41 +4716,6 @@ class MainActivity : AppCompatActivity() {
         return presetPanel
     }
 
-    private fun createCameraIconDrawable(): BitmapDrawable {
-        val size = 140
-        val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val c = Canvas(b)
-
-        // Paint setup
-        val p = Paint().apply {
-            color = Color.WHITE
-            style = Paint.Style.STROKE
-            strokeWidth = 8f
-            isAntiAlias = true
-        }
-
-        // 1. Draw Camera Body (Rounded Rectangle)
-        val bodyRect = RectF(20f, 45f, 120f, 110f)
-        c.drawRoundRect(bodyRect, 12f, 12f, p)
-
-        // 2. Draw Lens (Circle in center)
-        c.drawCircle(70f, 77.5f, 24f, p)
-
-        // 3. Draw Lens Glint/Inner Detail (Optional)
-        val pFill = Paint(p).apply { style = Paint.Style.FILL; alpha = 150 }
-        c.drawCircle(70f, 77.5f, 8f, pFill)
-
-        // 4. Draw Top Bump (Viewfinder/Shutter housing) - Filled
-        p.style = Paint.Style.FILL
-        val topRect = RectF(50f, 25f, 90f, 45f)
-        c.drawRoundRect(topRect, 6f, 6f, p)
-
-        // 5. Draw a small flash dot
-        c.drawCircle(105f, 60f, 5f, p)
-
-        return BitmapDrawable(resources, b)
-    }
-
     private fun toggleAutoPlay() {
         if (isAutoPlaying) {
             stopAutoPlay()
@@ -5036,17 +4918,6 @@ class MainActivity : AppCompatActivity() {
         }
         groupContainer.addView(header); groupContainer.addView(content)
         return Pair(groupContainer, content)
-    }
-    private fun createCustomIcon(type: Int): BitmapDrawable {
-        val size = 100; val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888); val c = Canvas(b)
-        val paint = Paint().apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; isAntiAlias = true }
-        val center = size / 2f
-        when (type) {
-            0 -> { paint.strokeWidth = 9f; val range = 20f; c.drawLine(center - range, center, center + range, center, paint); val p = Path().apply { moveTo(center - 8, center - 12); lineTo(center - range - 4, center); lineTo(center - 8, center + 12); moveTo(center + 8, center - 12); lineTo(center + range + 4, center); lineTo(center + 8, center + 12) }; c.drawPath(p, paint) }
-            1 -> { paint.strokeWidth = 9f; val range = 20f; c.drawLine(center, center - range, center, center + range, paint); val p = Path().apply { moveTo(center - 12, center - 8); lineTo(center, center - range - 4); lineTo(center + 12, center - 8); moveTo(center - 12, center + 8); lineTo(center, center + range + 4); lineTo(center + 12, center + 8) }; c.drawPath(p, paint) }
-            2 -> { paint.strokeWidth = 9f; val r = 24f; val box = RectF(center - r, center - r, center + r, center + r); c.drawArc(box, 180f + 20f, 140f, false, paint); c.drawArc(box, 0f + 20f, 140f, false, paint); val p = Path(); val endX1 = center + (r * cos(Math.toRadians(340.0))).toFloat(); val endY1 = center + (r * sin(Math.toRadians(340.0))).toFloat(); p.moveTo(endX1 - 5f, endY1 - 15f); p.lineTo(endX1, endY1); p.lineTo(endX1 - 18f, endY1 - 2f); val endX2 = center + (r * cos(Math.toRadians(160.0))).toFloat(); val endY2 = center + (r * sin(Math.toRadians(160.0))).toFloat(); p.moveTo(endX2 + 5f, endY2 + 15f); p.lineTo(endX2, endY2); p.lineTo(endX2 + 18f, endY2 + 2f); paint.style = Paint.Style.STROKE; c.drawPath(p, paint) }
-        }
-        return BitmapDrawable(resources, b)
     }
 
     private fun showRtspDialog() {
@@ -5560,37 +5431,6 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Preset $idx Saved", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    // Add this helper function inside MainActivity
-    private fun dumpPresetToLog(source: String) {
-        val debugObj = JSONObject()
-        try {
-            debugObj.put("source", source)
-            debugObj.put("axis", renderer.axisCount.toInt())
-            debugObj.put("flipX", renderer.flipX.toDouble())
-            debugObj.put("flipY", renderer.flipY.toDouble())
-            debugObj.put("rot180", renderer.rot180)
-
-            val controlsObj = JSONObject()
-            controls.forEach { c ->
-                val snap = JSONObject()
-                snap.put("v", c.value)
-                if (c.hasModulation) {
-                    snap.put("r", c.modRate)
-                    snap.put("d", c.modDepth)
-                    snap.put("shape", c.modShape.name)
-                }
-                controlsObj.put(c.id, snap)
-            }
-            debugObj.put("controls", controlsObj)
-
-            // Single line, no formatting, red text for visibility
-            Log.e("PRESET_DUMP", debugObj.toString())
-
-        } catch (e: Exception) {
-            Log.e("PRESET_DUMP", "Failed to log preset", e)
         }
     }
 
