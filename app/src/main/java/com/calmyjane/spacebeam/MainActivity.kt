@@ -767,7 +767,6 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         }
     }
 
-    // --- UPDATED: Fullscreen System Dialog implementation ---
     private fun showPasteDialog() {
         val dialog = android.app.Dialog(activity, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
 
@@ -1261,10 +1260,8 @@ open class PropertyControl(
     val hasModulation: Boolean = false,
     val modMode: ModMode = ModMode.CLAMP,
     val iconResId: Int? = null,
-    val layoutStyle: LayoutStyle = LayoutStyle.STACKED,
     val includeInPreset: Boolean = true,
     val logPower: Int = 1,
-    val showValue: Boolean = false,
     val valueSuffix: String = "",
     val allowSmoothing: Boolean = true,
     val defaultLocked: Boolean = false,
@@ -2017,7 +2014,6 @@ open class PropertyControl(
         fun setVisualState(p: Float, text: String) {
             visualProgress = p.coerceIn(0f, 1f)
             displayText = text
-            // FIX: Use postInvalidate to be thread-safe from GL Thread
             postInvalidate()
         }
 
@@ -2257,7 +2253,6 @@ class MainActivity : AppCompatActivity() {
                     vec3 p = ro + rd * t;
                     float d = 1.0 - max(abs(p.x), abs(p.y));
                     
-                    // Fixed: Calculate X and Y grid components properly
                     vec2 grid = abs(fract(vec2(p.z * GRID_DENSITY + p.x, p.z * GRID_DENSITY + p.y)) - 0.5);
                     float lines = min(grid.x, grid.y);
                     
@@ -2442,8 +2437,6 @@ class MainActivity : AppCompatActivity() {
     lateinit var overlayHUD: FrameLayout
     private lateinit var displayHelper: ExternalDisplayHelper
     lateinit var midiHelper: MidiHelper
-    private lateinit var axisSb: SeekBar
-    private lateinit var transSeekBar: SeekBar
     var autoPlayFilter = mutableSetOf(1, 2, 3, 4, 5, 6, 7, 8, 9)
     val controls = java.util.concurrent.CopyOnWriteArrayList<PropertyControl>()
     val controlsMap = java.util.concurrent.ConcurrentHashMap<String, PropertyControl>()
@@ -2559,16 +2552,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recordBtn: ImageButton
     private lateinit var flashOverlay: View
     private lateinit var leftHUDContainer: LinearLayout
-    private var axisLocked = true
-    private lateinit var lockBtn: Button
-    private lateinit var saveConfirmBtn: Button
     private var lastFingerDist = 0f
     private var lastFingerAngle = 0f
     private var lastFingerFocusX = 0f
     private var lastFingerFocusY = 0f
     private var exoPlayer: ExoPlayer? = null
-    private var isRtspMode = false
-    private var lastRtspUrl: String = "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4"
 
     private data class Preset(
         val controlSnapshots: Map<String, PropertyControl.Snapshot>,
@@ -3820,13 +3808,10 @@ class MainActivity : AppCompatActivity() {
     private fun setupOverlayHUD() {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
 
-        // FIX: Only create the container ONCE.
-        // If it already exists, we just clean it (which is done in onConfigChanged) and re-add children.
         if (!::overlayHUD.isInitialized) {
             overlayHUD = FrameLayout(this).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
             addContentView(overlayHUD, ViewGroup.LayoutParams(-1, -1))
         } else {
-            // Safety measure: ensure it's clean if called from somewhere else
             overlayHUD.removeAllViews()
         }
 
@@ -4010,7 +3995,6 @@ class MainActivity : AppCompatActivity() {
                         setTextColor(Color.WHITE)
                         gravity = Gravity.CENTER
 
-                        // FIX: Remove all padding to prevent clipping and force centering
                         includeFontPadding = false
                         setPadding(0, 0, 0, 0)
 
@@ -4021,7 +4005,7 @@ class MainActivity : AppCompatActivity() {
                         layoutParams = LinearLayout.LayoutParams(80, 80).apply { leftMargin = 15 }
                         setOnClickListener {
                             midiHelper.removeBinding(cc, targetId)
-                            refreshMappings() // Refresh the list immediately
+                            refreshMappings()
                         }
                     }
 
@@ -4152,7 +4136,6 @@ class MainActivity : AppCompatActivity() {
         leftHUDContainer = LinearLayout(this).apply {
             if (isPortrait) {
                 orientation = LinearLayout.VERTICAL
-                // FIXED: Explicitly cap the container height so the background matches the ScrollView
                 layoutParams = FrameLayout.LayoutParams(-1, -2).apply {
                     gravity = Gravity.TOP
                 }
@@ -4255,7 +4238,6 @@ class MainActivity : AppCompatActivity() {
                     textSize = 28f
                     setTextColor(Color.WHITE)
 
-                    // The centering fix:
                     gravity = Gravity.CENTER
                     includeFontPadding = false
                     setPadding(0, 0, 0, 0)
@@ -4556,7 +4538,6 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
             setPadding(10, 0, 10, 5)
-            // UPDATED: Set fixed width (850px) to match the preset buttons row below
             layoutParams = LinearLayout.LayoutParams(850, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
@@ -5086,15 +5067,6 @@ class MainActivity : AppCompatActivity() {
 
                 dialog.dismiss()
                 hideSystemUI()
-
-                // Pass a dummy dialog interface or remove that parameter from attemptConnectRtsp if possible.
-                // Since attemptConnectRtsp expects an AlertDialog in your current code,
-                // we will pass 'null' if you modify attemptConnectRtsp, OR we create a quick dummy wrapper.
-                // However, based on previous context, attemptConnectRtsp takes `androidx.appcompat.app.AlertDialog`.
-                // **CRITICAL FIX:** We will modify this call logic slightly.
-                // Since `attemptConnectRtsp` closes the dialog, we just call the logic directly.
-
-                // Trigger connection logic directly
                 attemptConnectRtspFromFullscreen(url)
             }
         }
@@ -5366,7 +5338,6 @@ class MainActivity : AppCompatActivity() {
         renderer.animateRotationTo(targetMRot, targetCRot, durationSec)
 
         controls.forEach { control ->
-            // FIX: Removed 'control.id == "AXIS"' so it is NOT skipped
             if (!control.includeInPreset) return@forEach
 
             var snap = p.controlSnapshots[control.id]
@@ -6270,7 +6241,6 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
             setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // Keyframe every 1 second
 
-            // FIX: Enforce Baseline Profile.
             // This ensures maximum compatibility for playback on the same device.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
