@@ -1178,59 +1178,62 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 class ExternalDisplayHelper(
     private val context: Context,
     private val renderer: MainActivity.KaleidoscopeRenderer
-)
-{
+) {
     private var presentation: CleanFeedPresentation? = null
     private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = updatePresentation()
         override fun onDisplayChanged(displayId: Int) = updatePresentation()
         override fun onDisplayRemoved(displayId: Int) = updatePresentation()
     }
+
     fun start() {
         displayManager.registerDisplayListener(displayListener, null)
         updatePresentation()
     }
+
     fun stop() {
         displayManager.unregisterDisplayListener(displayListener)
-        presentation?.dismiss()
+        dismissPresentation()
+    }
+
+    private fun dismissPresentation() {
+        try {
+            presentation?.dismiss()
+        } catch (e: Exception) {
+            Log.e("ExternalDisplay", "Error dismissing", e)
+        }
         presentation = null
     }
 
-    private fun updatePresentation() {
-        // Look for secondary displays (HDMI, Wireless Display)
+    fun updatePresentation() {
         val displays = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
 
         if (displays.isNotEmpty()) {
             val externalDisplay = displays[0]
-            // If we are already showing on this display, do nothing
-            if (presentation != null && presentation!!.display.displayId == externalDisplay.displayId) {
-                // Optional: update the renderer's surface size if the *external* display changed resolution
-                return
+
+            // If we have a presentation but it's for a different display, kill it
+            if (presentation != null && presentation!!.display.displayId != externalDisplay.displayId) {
+                dismissPresentation()
             }
-            // Dismiss old one if display changed
-            try { presentation?.dismiss() } catch(e: Exception) {}
-            presentation = null
-            // Create new Presentation
-            presentation = CleanFeedPresentation(context, externalDisplay, renderer).apply {
+
+            // Create new if null
+            if (presentation == null) {
+                presentation = CleanFeedPresentation(context, externalDisplay, renderer)
                 try {
-                    show()
-                } catch (e: WindowManager.InvalidDisplayException) {
-                    dismiss()
+                    presentation?.show()
+                } catch (e: Exception) {
+                    Log.e("ExternalDisplay", "Failed to show presentation", e)
+                    presentation = null
                 }
             }
         } else {
-            // No external display, clean up
-            try { presentation?.dismiss() } catch(e: Exception) {}
-            presentation = null
+            dismissPresentation()
             renderer.removeExternalSurface()
         }
     }
 
-    /**
-     * Inner class representing the Window on the secondary screen.
-     * It contains ONLY the SurfaceView (no UI buttons).
-     */
     private class CleanFeedPresentation(
         ctx: Context,
         display: Display,
@@ -1244,25 +1247,23 @@ class ExternalDisplayHelper(
 
             surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
                 override fun surfaceCreated(holder: SurfaceHolder) {
+                    // Force the renderer to use the new surface
                     renderer.setExternalSurface(holder.surface, display.width, display.height)
                 }
 
-                override fun surfaceChanged(
-                    holder: SurfaceHolder,
-                    format: Int,
-                    width: Int,
-                    height: Int
-                ) {
+                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                     renderer.setExternalSurface(holder.surface, width, height)
                 }
 
                 override fun surfaceDestroyed(holder: SurfaceHolder) {
+                    // Important: only remove if this is still the active surface
                     renderer.removeExternalSurface()
                 }
             })
         }
     }
 }
+
 
 open class PropertyControl(
     val id: String,
@@ -3066,10 +3067,10 @@ class MainActivity : AppCompatActivity() {
         super.onConfigurationChanged(newConfig)
         isRebuildingHUD = true
 
-        // 1. Save State
-        val activeControlId = PropertyControl.activeControl?.id
+        // 1. Close active UI menus
         PropertyControl.closeActiveMenu()
 
+        // 2. Handle Settings state
         var wasSettingsOpen = false
         var savedScrollY = 0
         if (settingsMenu != null && settingsMenu!!.isOpen()) {
@@ -3078,43 +3079,33 @@ class MainActivity : AppCompatActivity() {
             settingsMenu!!.cleanup()
         }
 
-        val savedTransProgress = if (::transSeekBar.isInitialized) transSeekBar.progress else 333
-        val savedIsAutoPlaying = isAutoPlaying
-
-        // 2. Rebuild
-        // IMPORTANT: Just remove children, do not nullify overlayHUD
+        // 3. Clear and rebuild HUD
         if (::overlayHUD.isInitialized) {
             overlayHUD.removeAllViews()
         }
-
         presetButtons.clear()
-
-        // This will now refill the EXISTING overlayHUD
         setupOverlayHUD()
 
-        // 1. Initialize Presets (This now loads from storage or defaults)
-        initDefaultPresets()
+        // 4. Refresh external display
+        // Instead of re-instantiating, just tell the existing helper to refresh the presentation
+        if (::displayHelper.isInitialized) {
+            displayHelper.updatePresentation()
+        } else {
+            displayHelper = ExternalDisplayHelper(this, renderer)
+            displayHelper.start()
+        }
 
-        val prefs = getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
-        autoPlayRandom = prefs.getBoolean("AP_RANDOM", false)
-        val filterStr = prefs.getString("AP_FILTER", null)
-        if (filterStr != null) {
-            autoPlayFilter.clear()
-            if (filterStr.isNotEmpty()) {
-                filterStr.split(",").mapNotNull { it.toIntOrNull() }.forEach { autoPlayFilter.add(it) }
+        // 5. Restore UI states
+        glView.post {
+            applyReadabilityStyle()
+            if (wasSettingsOpen) {
+                settingsMenu = SettingsMenu(this, overlayHUD)
+                settingsMenu?.show()
+                settingsMenu?.restoreScrollY(savedScrollY)
             }
         }
 
-        glView.post {
-            // 2. Global Reset to ensure clean state
-            globalReset()
-            // 3. Apply the actual saved data for preset 1
-            applyPreset(1)
-            applyReadabilityStyle()
-        }
-        displayHelper = ExternalDisplayHelper(this, renderer)
-        displayHelper.start()
-        checkAndRequestPermissions()
+        isRebuildingHUD = false
     }
 
     fun resetPresetsToDefault() {
