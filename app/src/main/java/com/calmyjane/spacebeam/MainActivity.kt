@@ -2174,6 +2174,335 @@ open class PropertyControl(
 
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
+    private var activeShaderInput: EditText? = null
+    private var currentShaderName = "Custom GLSL"
+
+    val shaderFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                val code = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                if (code != null) {
+                    activeShaderInput?.setText(code)
+                    // UPDATE NAME FROM FILE
+                    currentShaderName = getFileNameFromUri(uri)
+                }
+            } catch(e: Exception) {
+                Toast.makeText(this, "Failed to load shader file", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private val BUILTIN_SHADERS = mapOf(
+        "Matrix Rain" to """
+            #define SPEED 4.0
+            #define DENSITY 25.0
+            #define COLOR vec3(0.2, 1.0, 0.3)
+
+            void mainImage(out vec4 O, in vec2 U) {
+                vec2 uv = U / iResolution.y;
+                uv.x *= DENSITY;
+                
+                float id = floor(uv.x);
+                float offset = fract(sin(id * 34.23) * 543.21);
+                uv.y = uv.y * 5.0 + iTime * SPEED * (0.5 + offset);
+                
+                vec2 cell = fract(uv) - 0.5;
+                float drop = smoothstep(0.3, 0.0, abs(cell.x));
+                float tail = smoothstep(1.0, 0.0, fract(uv.y));
+                
+                float hash = fract(sin(floor(uv.y) * 23.4 + id) * 43.1);
+                float active = smoothstep(0.85, 1.0, hash);
+                
+                O = vec4(COLOR * drop * tail * active, 1.0);
+            }
+        """.trimIndent(),
+
+        "Magnetic Fluid" to """
+            #define SPEED 0.3
+            #define SCALE 3.0
+            #define COLOR vec3(0.9, 0.4, 0.1)
+
+            void mainImage(out vec4 O, in vec2 U) {
+                vec2 p = U / iResolution.y * SCALE;
+                for(int i = 1; i < 4; i++) {
+                    vec2 newp = p;
+                    newp.x += 0.6 / float(i) * sin(float(i) * p.y + iTime * SPEED + 0.3);
+                    newp.y += 0.6 / float(i) * cos(float(i) * p.x + iTime * SPEED + 0.3);
+                    p = newp;
+                }
+                float val = cos(p.x + p.y);
+                float glow = smoothstep(0.85, 1.0, val) + smoothstep(0.95, 1.0, val) * 2.0;
+                O = vec4(COLOR * glow, 1.0);
+            }
+        """.trimIndent(),
+
+        "Cosmic Pulse" to """
+            #define SPEED 1.0
+            #define COLOR_A vec3(0.1, 0.5, 0.9)
+            #define COLOR_B vec3(0.9, 0.2, 0.5)
+            #define INTENSITY 0.015
+
+            void mainImage(out vec4 O, in vec2 U) {
+                vec2 uv = (U * 2.0 - iResolution.xy) / min(iResolution.x, iResolution.y);
+                vec3 col = vec3(0.0);
+                float d = length(uv);
+                for(float i = 0.0; i < 3.0; i++) {
+                    vec2 p = fract(uv * (1.5 + i * 0.2)) - 0.5;
+                    float r = length(p);
+                    float glow = INTENSITY / (abs(sin(r * 8.0 - iTime * SPEED)) + 0.01);
+                    col += mix(COLOR_A, COLOR_B, d) * glow * exp(-d * 2.0);
+                }
+                O = vec4(col, 1.0);
+            }
+        """.trimIndent(),
+
+        "Wireframe Grid" to """
+            #define SPEED 0.5
+            #define GRID_SIZE 8.0
+            #define LINE_WIDTH 0.05
+            #define WARP_STRENGTH 0.3
+            #define COLOR vec3(0.7, 0.1, 0.9)
+
+            void mainImage(out vec4 O, in vec2 U) {
+                vec2 uv = (U - iResolution.xy * 0.5) / iResolution.y;
+                uv *= 1.0 + sin(iTime * SPEED + length(uv) * 3.0) * WARP_STRENGTH; 
+                vec2 g = fract(uv * GRID_SIZE) - 0.5;
+                float line = min(abs(g.x), abs(g.y));
+                float glow = LINE_WIDTH / (line + 0.01);
+                O = vec4(COLOR * glow * exp(-length(uv) * 3.0), 1.0);
+            }
+        """.trimIndent(),
+
+        "Fractal Abyss" to """
+            #define SPEED 0.4
+            #define COLOR vec3(0.1, 0.8, 0.9)
+            #define MAX_STEPS 35
+            
+            mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+
+            void mainImage(out vec4 O, in vec2 U) {
+                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+                vec3 ro = vec3(0.0, 0.0, iTime * SPEED); 
+                vec3 rd = normalize(vec3(uv, 1.0)); 
+                rd.xy *= rot(iTime * 0.2); 
+                
+                float t = 0.0, ac = 0.0;
+                
+                for(int i = 0; i < MAX_STEPS; i++) {
+                    vec3 p = ro + rd * t;
+                    p = mod(p, 2.0) - 1.0; 
+                    
+                    float s = 1.0;
+                    for(int j = 0; j < 4; j++) {
+                        p = abs(p) - 0.5;
+                        p.xy *= rot(0.785);
+                        p.xz *= rot(0.785);
+                        p *= 2.0; s *= 2.0;
+                    }
+                    
+                    float d = (length(p) - 0.2) / s; 
+                    ac += exp(-d * 40.0); 
+                    t += d * 0.8;
+                    if(d < 0.001 || t > 8.0) break;
+                }
+                O = vec4(COLOR * ac * 0.08 * exp(-t * 0.3), 1.0);
+            }
+        """.trimIndent(),
+
+        "Cyber Trench" to """
+            #define SPEED 3.0
+            #define GRID_DENSITY 2.0
+            #define COLOR vec3(1.0, 0.1, 0.6)
+            
+            mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+
+            void mainImage(out vec4 O, in vec2 U) {
+                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+                vec3 ro = vec3(0.0, 0.0, -iTime * SPEED);
+                vec3 rd = normalize(vec3(uv, -1.0));
+                rd.xy *= rot(sin(iTime * 0.5) * 0.5);
+                
+                float t = 0.0, glow = 0.0;
+                for(int i = 0; i < 40; i++) {
+                    vec3 p = ro + rd * t;
+                    float d = 1.0 - max(abs(p.x), abs(p.y));
+                    
+                    // Fixed: Calculate X and Y grid components properly
+                    vec2 grid = abs(fract(vec2(p.z * GRID_DENSITY + p.x, p.z * GRID_DENSITY + p.y)) - 0.5);
+                    float lines = min(grid.x, grid.y);
+                    
+                    glow += 0.01 / (abs(d) + 0.02) * smoothstep(0.1, 0.0, lines);
+                    t += d * 0.7;
+                    if(d < 0.01 || t > 15.0) break;
+                }
+                O = vec4(COLOR * glow * exp(-t * 0.15), 1.0);
+            }
+        """.trimIndent(),
+
+        "Quantum Helix" to """
+            #define SPEED 2.5
+            #define COLOR1 vec3(0.0, 1.0, 0.8)
+            #define COLOR2 vec3(0.9, 0.1, 1.0)
+            #define STRANDS 120.0
+            
+            mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+
+            void mainImage(out vec4 O, in vec2 U) {
+                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+                vec3 col = vec3(0.0);
+                
+                float tRot = iTime * 0.2; // Slow random 3D rotation angle
+                
+                for(float i = 0.0; i < STRANDS; i++) {
+                    float t = i / STRANDS * 3.14159 * 6.0 + iTime * SPEED;
+                    
+                    // Base 3D Position
+                    vec3 pos1 = vec3(cos(t) * 0.3, (i / STRANDS - 0.5) * 2.0, (sin(t) * 0.5 + 0.5) - 0.5);
+                    vec3 pos2 = vec3(-pos1.x, pos1.y, (1.0 - (sin(t) * 0.5 + 0.5)) - 0.5);
+                    
+                    // Apply Global 3D Rotation
+                    pos1.xy *= rot(tRot); pos1.xz *= rot(tRot * 1.3); pos1.yz *= rot(tRot * 0.7);
+                    pos2.xy *= rot(tRot); pos2.xz *= rot(tRot * 1.3); pos2.yz *= rot(tRot * 0.7);
+                    
+                    // Move forward for projection
+                    pos1.z += 1.5; pos2.z += 1.5;
+                    
+                    // Perspective projection
+                    float p1 = 1.0 / pos1.z;
+                    float p2 = 1.0 / pos2.z;
+                    
+                    float d1 = length(uv - pos1.xy * p1);
+                    float d2 = length(uv - pos2.xy * p2);
+                    
+                    col += COLOR1 * (0.0015 / d1) * (1.0 / pos1.z);
+                    col += COLOR2 * (0.0015 / d2) * (1.0 / pos2.z);
+                }
+                O = vec4(col, 1.0);
+            }
+        """.trimIndent(),
+
+        "Event Horizon" to """
+            #define SPEED 0.8
+            #define COLOR vec3(1.0, 0.5, 0.1)
+
+            void mainImage(out vec4 O, in vec2 U) {
+                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+                
+                float r = length(uv);
+                float a = atan(uv.y, uv.x);
+                float z = 1.0 / r; 
+                
+                float t = iTime * SPEED;
+                
+                // Structured organic webbing
+                float w1 = sin(a * 6.0 + z * 3.0 - t * 2.0) * 0.5 + 0.5;
+                float w2 = sin(a * 4.0 - z * 2.0 + t * 1.5) * 0.5 + 0.5;
+                float web = smoothstep(0.7, 1.0, w1 * w2); 
+                
+                // Pulsing depth rings
+                float rings = sin(z * 15.0 - t * 4.0) * 0.5 + 0.5;
+                float ringGlow = 0.05 / (abs(rings - 0.5) + 0.05);
+                
+                vec3 col = COLOR * (web * 2.0 + ringGlow) * exp(-z * 0.2);
+                col *= smoothstep(0.0, 0.4, r); // Center singularity
+                
+                O = vec4(col, 1.0);
+            }
+        """.trimIndent(),
+
+        "Alien Artifact" to """
+            #define SPEED 0.5
+            #define COLOR vec3(0.2, 1.0, 0.4)
+            
+            mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+
+            void mainImage(out vec4 O, in vec2 U) {
+                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+                vec3 ro = vec3(0.0, 0.0, -3.0);
+                vec3 rd = normalize(vec3(uv, 1.0));
+                
+                float t = 0.0, ac = 0.0;
+                
+                for(int i = 0; i < 40; i++) {
+                    vec3 p = ro + rd * t;
+                    p.xy *= rot(iTime * SPEED * 0.5);
+                    p.yz *= rot(iTime * SPEED * 0.3);
+                    
+                    float a = atan(p.z, p.x);
+                    p.xy *= rot(a * 2.0);
+                    
+                    vec2 q = vec2(length(p.xz) - 1.0, p.y);
+                    float d = length(q) - 0.15;
+                    d -= sin(a * 15.0) * 0.05;
+                    
+                    ac += 0.01 / (abs(d) + 0.02);
+                    t += d * 0.6;
+                    if(t > 6.0) break;
+                }
+                O = vec4(COLOR * ac * exp(-t * 0.5), 1.0);
+            }
+        """.trimIndent(),
+
+        "Volumetric Nebula" to """
+            #define SPEED 0.2
+            #define DENSITY 0.7
+            #define COLOR vec3(0.5, 0.1, 1.0)
+            
+            mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+
+            // High-quality 3D Hash for robust FBM
+            float hash(vec3 p) {
+                p = fract(p * 0.3183099 + 0.1);
+                p *= 17.0;
+                return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+            }
+            
+            float noise(vec3 x) {
+                vec3 i = floor(x);
+                vec3 f = fract(x);
+                f = f * f * (3.0 - 2.0 * f);
+                return mix(mix(mix(hash(i), hash(i + vec3(1,0,0)), f.x),
+                               mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
+                           mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x),
+                               mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y), f.z);
+            }
+
+            float fbm(vec3 p) {
+                float f = 0.0;
+                f += 0.5000 * noise(p); p = p * 2.02;
+                f += 0.2500 * noise(p); p = p * 2.03;
+                f += 0.1250 * noise(p);
+                return f;
+            }
+
+            void mainImage(out vec4 O, in vec2 U) {
+                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+                vec3 ro = vec3(0.0, 0.0, iTime * SPEED);
+                vec3 rd = normalize(vec3(uv, 1.0));
+                rd.xy *= rot(iTime * 0.1); // Slow roll
+                
+                float t = 0.0, acc = 0.0;
+                
+                // Raymarch volume
+                for(int i = 0; i < 30; i++) {
+                    vec3 p = ro + rd * t;
+                    float n = fbm(p * 1.5);
+                    
+                    // Create distinct clouds by cutting off lower values
+                    float density = smoothstep(0.4, 1.0, n);
+                    
+                    // Accumulate light (front-to-back alpha blending)
+                    acc += density * DENSITY * (1.0 - acc); 
+                    
+                    t += max(0.1, 0.05 * t); // Step size increases with depth
+                    if (acc > 0.99) break; // Early exit
+                }
+                
+                O = vec4(COLOR * acc * 1.5, 1.0);
+            }
+        """.trimIndent()
+    )
+
     val effectChain = EffectChain()
     private lateinit var glView: GLSurfaceView
     private val sourceControls = mutableListOf<PropertyControl>()
@@ -4040,13 +4369,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val items = arrayOf("Media (Image/Video)", "RTSP Stream")
+        val items = arrayOf("Media (Image/Video)", "RTSP Stream", "Generative Shader")
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Add Source")
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> {
-                        // Triggers media picker
                         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                             addCategory(Intent.CATEGORY_OPENABLE)
                             type = "*/*"
@@ -4055,10 +4383,144 @@ class MainActivity : AppCompatActivity() {
                         mediaPickerLauncher.launch(intent)
                     }
                     1 -> showRtspDialog()
+                    2 -> showShaderSourceDialog()
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    fun wrapShaderCode(rawCode: String): String {
+        val isShadertoy = rawCode.contains("mainImage")
+        val prefix = """
+            precision highp float;
+            varying vec2 v;
+            uniform float iTime;
+            uniform float uTime;
+            uniform vec2 iResolution;
+        """.trimIndent()
+
+        return if (isShadertoy) {
+            prefix + "\n" + rawCode + "\n" + """
+                void main() {
+                    mainImage(gl_FragColor, v * iResolution);
+                }
+            """.trimIndent()
+        } else {
+            val needsPrecision = !rawCode.contains("precision")
+            (if (needsPrecision) prefix + "\n" else "") + rawCode
+        }
+    }
+
+    private fun attemptAddShaderSource(code: String, shaderName: String) {
+        val uniqueId = "SHD_${System.currentTimeMillis()}"
+        val channel = renderer.addSource(SourceType.SHADER, uniqueId)
+        if (channel != null) {
+            channel.customShaderCode = code
+            val ctrl = ShaderSourceControl(uniqueId, "SHADER", uniqueId, this)
+            // Use the tracked shader name as the subtitle here!
+            ctrl.subtitle = shaderName
+            addDynamicSourceControl(ctrl)
+            Toast.makeText(this, "Shader Added", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Mixer Full", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showShaderSourceDialog() {
+        val dialog = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val rootLayout = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#121212"))
+            layoutParams = ViewGroup.LayoutParams(-1, -1)
+            isClickable = true
+        }
+
+        val closeBtn = Button(this).apply {
+            text = "✕"; textSize = 24f; setTextColor(Color.GRAY); background = null
+            layoutParams = FrameLayout.LayoutParams(150, 150).apply {
+                gravity = Gravity.TOP or Gravity.END; topMargin = 30; rightMargin = 30
+            }
+            setOnClickListener { dialog.dismiss(); hideSystemUI() }
+        }
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = FrameLayout.LayoutParams(-1, -2).apply {
+                gravity = Gravity.CENTER; leftMargin = 50; rightMargin = 50
+            }
+        }
+
+        content.addView(TextView(this).apply {
+            text = "ADD GENERATIVE SHADER"; textSize = 18f; setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY); setPadding(0, 0, 0, 30)
+        })
+
+        val topControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(-1, 120).apply { bottomMargin=20 }
+        }
+
+        val spinnerKeys = BUILTIN_SHADERS.keys.toList()
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, spinnerKeys)
+        val spinner = Spinner(this).apply {
+            this.adapter = adapter
+            background = GradientDrawable().apply { setColor(Color.parseColor("#222222")); cornerRadius=15f }
+            layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { rightMargin=10 }
+        }
+
+        val fileBtn = Button(this).apply {
+            text = "LOAD FILE"
+            setTextColor(Color.WHITE); textSize=12f
+            background = GradientDrawable().apply { setColor(Color.parseColor("#333333")); cornerRadius=15f }
+            layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { leftMargin=10 }
+            setOnClickListener {
+                shaderFileLauncher.launch(arrayOf("*/*"))
+            }
+        }
+
+        topControls.addView(spinner); topControls.addView(fileBtn)
+        content.addView(topControls)
+
+        activeShaderInput = EditText(this).apply {
+            setTextColor(Color.WHITE); textSize = 12f; typeface = Typeface.MONOSPACE
+            gravity = Gravity.TOP or Gravity.START
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            background = GradientDrawable().apply { setColor(Color.parseColor("#1A1A1A")); setStroke(2, Color.DKGRAY); cornerRadius = 15f }
+            setPadding(30, 30, 30, 30)
+            layoutParams = LinearLayout.LayoutParams(-1, 600)
+            setHorizontallyScrolling(true)
+        }
+
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                activeShaderInput?.setText(BUILTIN_SHADERS[spinnerKeys[pos]])
+                currentShaderName = spinnerKeys[pos]
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        content.addView(activeShaderInput)
+
+        content.addView(Button(this).apply {
+            text = "ADD SHADER"
+            setTextColor(Color.WHITE); textSize = 16f; setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply { setColor(Color.parseColor("#0066CC")); cornerRadius = 15f }
+            layoutParams = LinearLayout.LayoutParams(-1, 120).apply { topMargin = 40 }
+            setOnClickListener {
+                val code = activeShaderInput?.text.toString().trim()
+                if (code.isNotEmpty()) {
+                    // Pass the tracked name into the creation function
+                    attemptAddShaderSource(code, currentShaderName)
+                    dialog.dismiss()
+                    hideSystemUI()
+                }
+            }
+        })
+
+        rootLayout.addView(content); rootLayout.addView(closeBtn)
+        dialog.setContentView(rootLayout)
+        dialog.setOnDismissListener { hideSystemUI(); activeShaderInput = null }
+        dialog.show()
     }
 
     private fun setupGeometrySpecifics(parent: LinearLayout) {
@@ -5311,6 +5773,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
+        var globalTime = 0f
         private var simpleProgram = 0
         private var copyOesProgram = 0
         private var copy2dProgram = 0
@@ -5349,7 +5812,6 @@ class MainActivity : AppCompatActivity() {
             var surface: Surface? = null
             var fboId = 0; var fboTexId = 0
 
-            // Default to Full HD
             var width = 1920; var height = 1080
 
             var rotation = 0f
@@ -5358,6 +5820,9 @@ class MainActivity : AppCompatActivity() {
             @Volatile var imageUploaded = false
             @Volatile var frameAvailable = false
             private val frameSync = Object()
+
+            var customShaderCode: String? = null
+            var customProgram: Int = 0
 
             fun init() {
                 if (isReady) return
@@ -5378,6 +5843,33 @@ class MainActivity : AppCompatActivity() {
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
                 GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, fboTexId, 0)
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+                // Skip Surface generation for Shaders
+                if (type == SourceType.SHADER) {
+                    val vSrc = """
+                        attribute vec4 p; attribute vec2 t; varying vec2 v;
+                        uniform vec2 uFlip; uniform float uRotation;
+                        void main() {
+                            gl_Position = p;
+                            vec2 uv = t - 0.5;
+                            uv = uv * uFlip;
+                            float c = cos(uRotation); float s = sin(uRotation);
+                            uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+                            v = uv + 0.5;
+                        }
+                    """.trimIndent()
+
+                    val fSrc = ctx.wrapShaderCode(customShaderCode ?: "void main(){ gl_FragColor=vec4(0.0); }")
+                    customProgram = ShaderHelper.createProgram(vSrc, fSrc)
+
+                    if (customProgram == 0) {
+                        val errSrc = ctx.wrapShaderCode("void main(){ gl_FragColor=vec4(1.0, 0.0, 0.0, 1.0); }")
+                        customProgram = ShaderHelper.createProgram(vSrc, errSrc)
+                        ctx.runOnUiThread { Toast.makeText(ctx, "Shader Compile Error", Toast.LENGTH_LONG).show() }
+                    }
+                    isReady = true
+                    return
+                }
 
                 val inp = IntArray(1); GLES20.glGenTextures(1, inp, 0)
                 inputTexId = inp[0]
@@ -5416,6 +5908,7 @@ class MainActivity : AppCompatActivity() {
 
             fun release() {
                 isReady = false
+                if (customProgram != 0) { GLES20.glDeleteProgram(customProgram); customProgram = 0 }
                 if (surface != null) { surface?.release(); surface = null }
                 if (surfaceTexture != null) { surfaceTexture?.release(); surfaceTexture = null }
                 if (inputTexId != 0) { val t = IntArray(1){inputTexId}; GLES20.glDeleteTextures(1, t, 0); inputTexId = 0 }
@@ -5425,13 +5918,40 @@ class MainActivity : AppCompatActivity() {
 
             fun updateSize(w: Int, h: Int) {
                 width = w; height = h
-                if (type != SourceType.MEDIA_IMAGE) {
+                if (type != SourceType.MEDIA_IMAGE && type != SourceType.SHADER) {
                     glView.queueEvent { surfaceTexture?.setDefaultBufferSize(w, h) }
                 }
             }
 
             fun processToFbo() {
                 if (!isReady) return
+
+                if (type == SourceType.SHADER) {
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+                    GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    GLES20.glUseProgram(customProgram)
+
+                    val time1 = GLES20.glGetUniformLocation(customProgram, "iTime")
+                    if (time1 >= 0) GLES20.glUniform1f(time1, globalTime)
+
+                    val time2 = GLES20.glGetUniformLocation(customProgram, "uTime")
+                    if (time2 >= 0) GLES20.glUniform1f(time2, globalTime)
+
+                    val resLoc = GLES20.glGetUniformLocation(customProgram, "iResolution")
+                    if (resLoc >= 0) GLES20.glUniform2f(resLoc, FIXED_WIDTH.toFloat(), FIXED_HEIGHT.toFloat())
+
+                    val flipLoc = GLES20.glGetUniformLocation(customProgram, "uFlip")
+                    if (flipLoc >= 0) GLES20.glUniform2f(flipLoc, userFlipX, userFlipY)
+
+                    val rotLoc = GLES20.glGetUniformLocation(customProgram, "uRotation")
+                    if (rotLoc >= 0) GLES20.glUniform1f(rotLoc, Math.toRadians((rotation + if(userRot180) 180f else 0f).toDouble()).toFloat())
+
+                    ShaderHelper.bindQuad(customProgram)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+                    return
+                }
 
                 val program = if (type == SourceType.MEDIA_IMAGE) copy2dProgram else copyOesProgram
                 val target = if (type == SourceType.MEDIA_IMAGE) GLES20.GL_TEXTURE_2D else GLES11Ext.GL_TEXTURE_EXTERNAL_OES
@@ -5644,6 +6164,7 @@ class MainActivity : AppCompatActivity() {
 
             val now = System.nanoTime()
             deltaTime = (now - lastTime) / 1e9f
+            globalTime += deltaTime
             lastTime = now
 
             // Global Rotation Logic
@@ -6068,7 +6589,8 @@ enum class SourceType {
     CAMERA,
     MEDIA_VIDEO,
     MEDIA_IMAGE,
-    RTSP
+    RTSP,
+    SHADER
 }
 // In MainActivity.kt
 
@@ -6154,7 +6676,16 @@ abstract class SourcePropertyControl(
     abstract fun onRemove()
 }
 
-
+class ShaderSourceControl(
+    id: String,
+    label: String,
+    sourceId: String,
+    mainActivity: MainActivity
+) : SourcePropertyControl(id, label, 0, sourceId, mainActivity) {
+    override fun onRemove() {
+        // GL resources are automatically handled by SourceChannel.release()
+    }
+}
 
 class CameraSourceControl(val mainActivity: MainActivity) : PropertyControl(
     id = "CAM_MAIN",
