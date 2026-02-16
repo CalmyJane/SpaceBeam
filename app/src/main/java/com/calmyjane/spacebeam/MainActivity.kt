@@ -1259,9 +1259,11 @@ open class PropertyControl(
     val outMax: Float = 1.0f,
     val hasModulation: Boolean = false,
     val modMode: ModMode = ModMode.CLAMP,
+    val layoutStyle: LayoutStyle = LayoutStyle.STACKED,
     val iconResId: Int? = null,
     val includeInPreset: Boolean = true,
     val logPower: Int = 1,
+    val showValue: Boolean = false,
     val valueSuffix: String = "",
     val allowSmoothing: Boolean = true,
     val defaultLocked: Boolean = false,
@@ -2432,6 +2434,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var glView: GLSurfaceView
     private val sourceControls = mutableListOf<PropertyControl>()
     private var mixerGroupContainer: LinearLayout? = null
+    private lateinit var saveConfirmBtn: View
     private lateinit var renderer: KaleidoscopeRenderer
     private var currentSelector = CameraSelector.DEFAULT_FRONT_CAMERA
     lateinit var overlayHUD: FrameLayout
