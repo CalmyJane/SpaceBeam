@@ -2122,312 +2122,323 @@ class MainActivity : AppCompatActivity() {
 
     private val BUILTIN_SHADERS = mapOf(
         "Matrix Rain" to """
-            #define SPEED 4.0
-            #define DENSITY 25.0
-            #define COLOR vec3(0.2, 1.0, 0.3)
+        #define SPEED 4.0
+        #define DENSITY 25.0
+        #define COLOR vec3(0.2, 1.0, 0.3)
+        #define ROT_FREQ 0.2
+        #define ROT_AMOUNT 0.15
+        
+        mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
 
-            void mainImage(out vec4 O, in vec2 U) {
-                vec2 uv = U / iResolution.y;
-                uv.x *= DENSITY;
-                
-                float id = floor(uv.x);
-                float offset = fract(sin(id * 34.23) * 543.21);
-                uv.y = uv.y * 5.0 + iTime * SPEED * (0.5 + offset);
-                
-                vec2 cell = fract(uv) - 0.5;
-                float drop = smoothstep(0.3, 0.0, abs(cell.x));
-                float tail = smoothstep(1.0, 0.0, fract(uv.y));
-                
-                float hash = fract(sin(floor(uv.y) * 23.4 + id) * 43.1);
-                float active = smoothstep(0.85, 1.0, hash);
-                
-                O = vec4(COLOR * drop * tail * active, 1.0);
-            }
-        """.trimIndent(),
+        void mainImage(out vec4 O, in vec2 U) {
+            vec2 uv = U / iResolution.y;
+            
+            float angle = sin(iTime * ROT_FREQ) * ROT_AMOUNT;
+            vec2 center = vec2(iResolution.x / iResolution.y * 0.5, 0.5);
+            uv -= center;
+            uv *= rot(angle);
+            uv += center;
+
+            uv.x *= DENSITY;
+            
+            float id = floor(uv.x);
+            float offset = fract(sin(id * 34.23) * 543.21);
+            uv.y = uv.y * 5.0 + iTime * SPEED * (0.5 + offset);
+            
+            vec2 cell = fract(uv) - 0.5;
+            float drop = smoothstep(0.3, 0.0, abs(cell.x));
+            float tail = smoothstep(1.0, 0.0, fract(uv.y));
+            
+            float hash = fract(sin(floor(uv.y) * 23.4 + id) * 43.1);
+            float active = smoothstep(0.85, 1.0, hash);
+            
+            O = vec4(COLOR * drop * tail * active, 1.0);
+        }
+    """.trimIndent(),
 
         "Magnetic Fluid" to """
-            #define SPEED 0.3
-            #define SCALE 3.0
-            #define COLOR vec3(0.9, 0.4, 0.1)
+        #define SPEED 0.3
+        #define SCALE 3.0
+        #define COLOR vec3(0.9, 0.4, 0.1)
 
-            void mainImage(out vec4 O, in vec2 U) {
-                vec2 p = U / iResolution.y * SCALE;
-                for(int i = 1; i < 4; i++) {
-                    vec2 newp = p;
-                    newp.x += 0.6 / float(i) * sin(float(i) * p.y + iTime * SPEED + 0.3);
-                    newp.y += 0.6 / float(i) * cos(float(i) * p.x + iTime * SPEED + 0.3);
-                    p = newp;
-                }
-                float val = cos(p.x + p.y);
-                float glow = smoothstep(0.85, 1.0, val) + smoothstep(0.95, 1.0, val) * 2.0;
-                O = vec4(COLOR * glow, 1.0);
+        void mainImage(out vec4 O, in vec2 U) {
+            vec2 p = U / iResolution.y * SCALE;
+            for(int i = 1; i < 4; i++) {
+                vec2 newp = p;
+                newp.x += 0.6 / float(i) * sin(float(i) * p.y + iTime * SPEED + 0.3);
+                newp.y += 0.6 / float(i) * cos(float(i) * p.x + iTime * SPEED + 0.3);
+                p = newp;
             }
-        """.trimIndent(),
+            float val = cos(p.x + p.y);
+            float glow = smoothstep(0.85, 1.0, val) + smoothstep(0.95, 1.0, val) * 2.0;
+            O = vec4(COLOR * glow, 1.0);
+        }
+    """.trimIndent(),
 
         "Cosmic Pulse" to """
-            #define SPEED 1.0
-            #define COLOR_A vec3(0.1, 0.5, 0.9)
-            #define COLOR_B vec3(0.9, 0.2, 0.5)
-            #define INTENSITY 0.015
+        #define SPEED 1.0
+        #define COLOR_A vec3(0.1, 0.5, 0.9)
+        #define COLOR_B vec3(0.9, 0.2, 0.5)
+        #define INTENSITY 0.015
 
-            void mainImage(out vec4 O, in vec2 U) {
-                vec2 uv = (U * 2.0 - iResolution.xy) / min(iResolution.x, iResolution.y);
-                vec3 col = vec3(0.0);
-                float d = length(uv);
-                for(float i = 0.0; i < 3.0; i++) {
-                    vec2 p = fract(uv * (1.5 + i * 0.2)) - 0.5;
-                    float r = length(p);
-                    float glow = INTENSITY / (abs(sin(r * 8.0 - iTime * SPEED)) + 0.01);
-                    col += mix(COLOR_A, COLOR_B, d) * glow * exp(-d * 2.0);
-                }
-                O = vec4(col, 1.0);
+        void mainImage(out vec4 O, in vec2 U) {
+            vec2 uv = (U * 2.0 - iResolution.xy) / min(iResolution.x, iResolution.y);
+            vec3 col = vec3(0.0);
+            float d = length(uv);
+            
+            for(float i = 0.0; i < 3.0; i++) {
+                vec2 p = fract(uv * (1.5 + i * 0.2)) - 0.5;
+                float a = atan(p.y, p.x);
+                float r = length(p) + sin(a * 4.0 + iTime * 0.5) * 0.1; 
+                float glow = INTENSITY / (abs(sin(r * 8.0 - iTime * SPEED)) + 0.01);
+                col += mix(COLOR_A, COLOR_B, d) * glow;
             }
-        """.trimIndent(),
+            O = vec4(col, 1.0);
+        }
+    """.trimIndent(),
 
         "Wireframe Grid" to """
-            #define SPEED 0.5
-            #define GRID_SIZE 8.0
-            #define LINE_WIDTH 0.05
-            #define WARP_STRENGTH 0.3
-            #define COLOR vec3(0.7, 0.1, 0.9)
+        #define SPEED 0.5
+        #define GRID_SIZE 8.0
+        #define LINE_WIDTH 0.05
+        #define WARP_STRENGTH 0.3
+        #define COLOR vec3(0.7, 0.1, 0.9)
+        #define ROT_FREQ 0.15
+        #define ROT_AMOUNT 0.4
+        
+        mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
 
-            void mainImage(out vec4 O, in vec2 U) {
-                vec2 uv = (U - iResolution.xy * 0.5) / iResolution.y;
-                uv *= 1.0 + sin(iTime * SPEED + length(uv) * 3.0) * WARP_STRENGTH; 
-                vec2 g = fract(uv * GRID_SIZE) - 0.5;
-                float line = min(abs(g.x), abs(g.y));
-                float glow = LINE_WIDTH / (line + 0.01);
-                O = vec4(COLOR * glow * exp(-length(uv) * 3.0), 1.0);
-            }
-        """.trimIndent(),
+        void mainImage(out vec4 O, in vec2 U) {
+            vec2 uv = (U - iResolution.xy * 0.5) / iResolution.y;
+            uv *= rot(sin(iTime * ROT_FREQ) * ROT_AMOUNT);
+            uv *= 1.0 + sin(iTime * SPEED + length(uv) * 3.0) * WARP_STRENGTH; 
+            vec2 g = fract(uv * GRID_SIZE) - 0.5;
+            float line = min(abs(g.x), abs(g.y));
+            float glow = LINE_WIDTH / (line + 0.01);
+            O = vec4(COLOR * glow, 1.0);
+        }
+    """.trimIndent(),
 
         "Fractal Abyss" to """
-            #define SPEED 0.4
-            #define COLOR vec3(0.1, 0.8, 0.9)
-            #define MAX_STEPS 35
+        #define SPEED 0.4
+        #define COLOR_BASE vec3(0.1, 0.8, 0.9)
+        #define COLOR_VAR vec3(0.6, 0.2, 0.8)
+        #define MAX_STEPS 35
+        
+        mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+
+        void mainImage(out vec4 O, in vec2 U) {
+            vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+            vec3 ro = vec3(0.0, 0.0, iTime * SPEED); 
+            vec3 rd = normalize(vec3(uv, 1.0)); 
+            rd.xy *= rot(iTime * 0.2); 
             
-            mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
-
-            void mainImage(out vec4 O, in vec2 U) {
-                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
-                vec3 ro = vec3(0.0, 0.0, iTime * SPEED); 
-                vec3 rd = normalize(vec3(uv, 1.0)); 
-                rd.xy *= rot(iTime * 0.2); 
-                
-                float t = 0.0, ac = 0.0;
-                
-                for(int i = 0; i < MAX_STEPS; i++) {
-                    vec3 p = ro + rd * t;
-                    p = mod(p, 2.0) - 1.0; 
-                    
-                    float s = 1.0;
-                    for(int j = 0; j < 4; j++) {
-                        p = abs(p) - 0.5;
-                        p.xy *= rot(0.785);
-                        p.xz *= rot(0.785);
-                        p *= 2.0; s *= 2.0;
-                    }
-                    
-                    float d = (length(p) - 0.2) / s; 
-                    ac += exp(-d * 40.0); 
-                    t += d * 0.8;
-                    if(d < 0.001 || t > 8.0) break;
-                }
-                O = vec4(COLOR * ac * 0.08 * exp(-t * 0.3), 1.0);
-            }
-        """.trimIndent(),
-
-        "Cyber Trench" to """
-            #define SPEED 3.0
-            #define GRID_DENSITY 2.0
-            #define COLOR vec3(1.0, 0.1, 0.6)
+            float t = 0.0, ac = 0.0;
             
-            mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
-
-            void mainImage(out vec4 O, in vec2 U) {
-                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
-                vec3 ro = vec3(0.0, 0.0, -iTime * SPEED);
-                vec3 rd = normalize(vec3(uv, -1.0));
-                rd.xy *= rot(sin(iTime * 0.5) * 0.5);
+            for(int i = 0; i < MAX_STEPS; i++) {
+                vec3 p = ro + rd * t;
+                p = mod(p, 2.0) - 1.0; 
                 
-                float t = 0.0, glow = 0.0;
-                for(int i = 0; i < 40; i++) {
-                    vec3 p = ro + rd * t;
-                    float d = 1.0 - max(abs(p.x), abs(p.y));
-                    
-                    vec2 grid = abs(fract(vec2(p.z * GRID_DENSITY + p.x, p.z * GRID_DENSITY + p.y)) - 0.5);
-                    float lines = min(grid.x, grid.y);
-                    
-                    glow += 0.01 / (abs(d) + 0.02) * smoothstep(0.1, 0.0, lines);
-                    t += d * 0.7;
-                    if(d < 0.01 || t > 15.0) break;
+                float s = 1.0;
+                for(int j = 0; j < 4; j++) {
+                    p = abs(p) - 0.5;
+                    p.xy *= rot(0.785);
+                    p.xz *= rot(0.785);
+                    p *= 2.0; s *= 2.0;
                 }
-                O = vec4(COLOR * glow * exp(-t * 0.15), 1.0);
+                
+                float d = (length(p) - 0.2) / s; 
+                ac += exp(-d * 40.0); 
+                t += d * 0.8;
+                if(d < 0.001 || t > 8.0) break;
             }
-        """.trimIndent(),
+            
+            vec3 finalColor = mix(COLOR_BASE, COLOR_VAR, sin(t * 2.0 + iTime) * 0.5 + 0.5);
+            O = vec4(finalColor * ac * 0.08 * exp(-t * 0.3), 1.0);
+        }
+    """.trimIndent(),
+
+        "Kaleidoscope Core" to """
+        #define SPEED 1.2
+        #define LAYERS 6.0
+        #define COLOR vec3(0.0, 0.8, 1.0)
+        
+        mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+
+        void mainImage(out vec4 O, in vec2 U) {
+            vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+            vec3 col = vec3(0.0);
+            
+            for(float i = 0.0; i < LAYERS; i++) {
+                vec2 p = uv;
+                p *= rot(iTime * 0.2 + i * 0.5);
+                float scale = mod(iTime * SPEED - i * (3.0 / LAYERS), 3.0);
+                p *= scale * 1.5;
+                
+                float a = atan(p.y, p.x);
+                float r = length(p);
+                
+                float shape = abs(cos(a * 3.0) * sin(a * 2.0)) * 0.5 + 0.5;
+                float dist = abs(r - shape);
+                
+                float glow = 0.02 / (dist + 0.01);
+                col += COLOR * glow * smoothstep(3.0, 0.0, scale);
+            }
+            O = vec4(col, 1.0);
+        }
+    """.trimIndent(),
 
         "Quantum Helix" to """
-            #define SPEED 2.5
-            #define COLOR1 vec3(0.0, 1.0, 0.8)
-            #define COLOR2 vec3(0.9, 0.1, 1.0)
-            #define STRANDS 120.0
+        #define SPEED 2.5
+        #define COLOR1 vec3(0.0, 1.0, 0.8)
+        #define COLOR2 vec3(0.9, 0.1, 1.0)
+        #define STRANDS 40.0
+        
+        mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+
+        void mainImage(out vec4 O, in vec2 U) {
+            vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+            vec3 col = vec3(0.0);
             
-            mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
-
-            void mainImage(out vec4 O, in vec2 U) {
-                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
-                vec3 col = vec3(0.0);
+            float tRot = iTime * 0.2; 
+            
+            for(float i = 0.0; i < STRANDS; i++) {
+                float t = i / STRANDS * 3.14159 * 6.0 + iTime * SPEED;
                 
-                float tRot = iTime * 0.2; // Slow random 3D rotation angle
+                vec3 pos1 = vec3(cos(t) * 0.3, (i / STRANDS - 0.5) * 2.0, (sin(t) * 0.5 + 0.5) - 0.5);
+                vec3 pos2 = vec3(-pos1.x, pos1.y, (1.0 - (sin(t) * 0.5 + 0.5)) - 0.5);
                 
-                for(float i = 0.0; i < STRANDS; i++) {
-                    float t = i / STRANDS * 3.14159 * 6.0 + iTime * SPEED;
-                    
-                    // Base 3D Position
-                    vec3 pos1 = vec3(cos(t) * 0.3, (i / STRANDS - 0.5) * 2.0, (sin(t) * 0.5 + 0.5) - 0.5);
-                    vec3 pos2 = vec3(-pos1.x, pos1.y, (1.0 - (sin(t) * 0.5 + 0.5)) - 0.5);
-                    
-                    // Apply Global 3D Rotation
-                    pos1.xy *= rot(tRot); pos1.xz *= rot(tRot * 1.3); pos1.yz *= rot(tRot * 0.7);
-                    pos2.xy *= rot(tRot); pos2.xz *= rot(tRot * 1.3); pos2.yz *= rot(tRot * 0.7);
-                    
-                    // Move forward for projection
-                    pos1.z += 1.5; pos2.z += 1.5;
-                    
-                    // Perspective projection
-                    float p1 = 1.0 / pos1.z;
-                    float p2 = 1.0 / pos2.z;
-                    
-                    float d1 = length(uv - pos1.xy * p1);
-                    float d2 = length(uv - pos2.xy * p2);
-                    
-                    col += COLOR1 * (0.0015 / d1) * (1.0 / pos1.z);
-                    col += COLOR2 * (0.0015 / d2) * (1.0 / pos2.z);
-                }
-                O = vec4(col, 1.0);
+                pos1.xy *= rot(tRot); pos1.xz *= rot(tRot * 1.3); pos1.yz *= rot(tRot * 0.7);
+                pos2.xy *= rot(tRot); pos2.xz *= rot(tRot * 1.3); pos2.yz *= rot(tRot * 0.7);
+                
+                pos1.z += 1.5; pos2.z += 1.5;
+                
+                float p1 = 1.0 / pos1.z;
+                float p2 = 1.0 / pos2.z;
+                
+                float d1 = length(uv - pos1.xy * p1);
+                float d2 = length(uv - pos2.xy * p2);
+                
+                col += COLOR1 * (0.003 / d1) * (1.0 / pos1.z);
+                col += COLOR2 * (0.003 / d2) * (1.0 / pos2.z);
             }
-        """.trimIndent(),
+            O = vec4(col, 1.0);
+        }
+    """.trimIndent(),
 
-        "Event Horizon" to """
-            #define SPEED 0.8
-            #define COLOR vec3(1.0, 0.5, 0.1)
+        "Neon Symmetry" to """
+        #define SPEED 1.5
+        #define SHAPE_SIDES 4.0
+        #define PULSE_SPEED 3.0
+        #define BASE_COLOR vec3(1.0, 0.2, 0.5)
+        #define ALT_COLOR vec3(0.2, 0.8, 1.0)
 
-            void mainImage(out vec4 O, in vec2 U) {
-                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+        mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+
+        void mainImage(out vec4 O, in vec2 U) {
+            vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+            vec3 col = vec3(0.0);
+            
+            uv *= rot(sin(iTime * 0.3) * 0.5);
+            
+            for(float i = 0.0; i < 4.0; i++) {
+                vec2 p = uv * (1.0 + i * 0.5);
+                p *= rot(iTime * 0.2 * (mod(i, 2.0) == 0.0 ? 1.0 : -1.0));
                 
-                float r = length(uv);
-                float a = atan(uv.y, uv.x);
-                float z = 1.0 / r; 
+                float a = atan(p.y, p.x) + iTime * 0.5;
+                float r = length(p);
                 
-                float t = iTime * SPEED;
+                float poly = cos(floor(0.5 + a / 6.283 * SHAPE_SIDES) * 6.283 / SHAPE_SIDES - a) * r;
                 
-                // Structured organic webbing
-                float w1 = sin(a * 6.0 + z * 3.0 - t * 2.0) * 0.5 + 0.5;
-                float w2 = sin(a * 4.0 - z * 2.0 + t * 1.5) * 0.5 + 0.5;
-                float web = smoothstep(0.7, 1.0, w1 * w2); 
+                float wave = fract(poly * 5.0 - iTime * SPEED);
+                float line = smoothstep(0.1, 0.0, abs(wave - 0.5));
                 
-                // Pulsing depth rings
-                float rings = sin(z * 15.0 - t * 4.0) * 0.5 + 0.5;
-                float ringGlow = 0.05 / (abs(rings - 0.5) + 0.05);
-                
-                vec3 col = COLOR * (web * 2.0 + ringGlow) * exp(-z * 0.2);
-                col *= smoothstep(0.0, 0.4, r); // Center singularity
-                
-                O = vec4(col, 1.0);
+                vec3 c = mix(BASE_COLOR, ALT_COLOR, sin(iTime + i) * 0.5 + 0.5);
+                col += c * line * (0.1 / (r + 0.1)) * (sin(iTime * PULSE_SPEED + i) * 0.5 + 0.5 + 0.5);
             }
-        """.trimIndent(),
+            
+            O = vec4(col, 1.0);
+        }
+    """.trimIndent(),
 
         "Alien Artifact" to """
-            #define SPEED 0.5
-            #define COLOR vec3(0.2, 1.0, 0.4)
+        #define SPEED 0.5
+        #define COLOR vec3(0.2, 1.0, 0.4)
+        
+        mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+
+        void mainImage(out vec4 O, in vec2 U) {
+            vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
             
-            mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
-
-            void mainImage(out vec4 O, in vec2 U) {
-                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
-                vec3 ro = vec3(0.0, 0.0, -3.0);
-                vec3 rd = normalize(vec3(uv, 1.0));
-                
-                float t = 0.0, ac = 0.0;
-                
-                for(int i = 0; i < 40; i++) {
-                    vec3 p = ro + rd * t;
-                    p.xy *= rot(iTime * SPEED * 0.5);
-                    p.yz *= rot(iTime * SPEED * 0.3);
-                    
-                    float a = atan(p.z, p.x);
-                    p.xy *= rot(a * 2.0);
-                    
-                    vec2 q = vec2(length(p.xz) - 1.0, p.y);
-                    float d = length(q) - 0.15;
-                    d -= sin(a * 15.0) * 0.05;
-                    
-                    ac += 0.01 / (abs(d) + 0.02);
-                    t += d * 0.6;
-                    if(t > 6.0) break;
-                }
-                O = vec4(COLOR * ac * exp(-t * 0.5), 1.0);
-            }
-        """.trimIndent(),
-
-        "Volumetric Nebula" to """
-            #define SPEED 0.2
-            #define DENSITY 0.7
-            #define COLOR vec3(0.5, 0.1, 1.0)
+            vec3 ro = vec3(iTime * 0.3, iTime * 0.2, -3.0);
+            vec3 rd = normalize(vec3(uv, 1.0));
             
-            mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
-
-            // High-quality 3D Hash for robust FBM
-            float hash(vec3 p) {
-                p = fract(p * 0.3183099 + 0.1);
-                p *= 17.0;
-                return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
-            }
+            float t = 0.0, ac = 0.0;
             
-            float noise(vec3 x) {
-                vec3 i = floor(x);
-                vec3 f = fract(x);
-                f = f * f * (3.0 - 2.0 * f);
-                return mix(mix(mix(hash(i), hash(i + vec3(1,0,0)), f.x),
-                               mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
-                           mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x),
-                               mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y), f.z);
+            for(int i = 0; i < 40; i++) {
+                vec3 p = ro + rd * t;
+                
+                p.xy = mod(p.xy, 4.0) - 2.0;
+                
+                p.xy *= rot(iTime * SPEED * 0.5);
+                p.yz *= rot(iTime * SPEED * 0.3);
+                
+                float a = atan(p.z, p.x);
+                p.xy *= rot(a * 2.0);
+                
+                vec2 q = vec2(length(p.xz) - 1.0, p.y);
+                float d = length(q) - 0.15;
+                d -= sin(a * 15.0) * 0.05;
+                
+                ac += 0.01 / (abs(d) + 0.02);
+                t += d * 0.6;
+                if(t > 6.0) break;
             }
+            O = vec4(COLOR * ac * exp(-t * 0.5), 1.0);
+        }
+    """.trimIndent(),
 
-            float fbm(vec3 p) {
-                float f = 0.0;
-                f += 0.5000 * noise(p); p = p * 2.02;
-                f += 0.2500 * noise(p); p = p * 2.03;
-                f += 0.1250 * noise(p);
-                return f;
+        "Fast Nebula" to """
+        #define SPEED 0.15
+        #define COLOR vec3(0.6, 0.1, 1.0)
+        
+        float hash(vec2 p) {
+            return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+        }
+        
+        float noise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+                       mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+        }
+        
+        float fbm(vec2 p) {
+            float f = 0.0;
+            float amp = 0.5;
+            for(int i = 0; i < 4; i++) {
+                f += amp * noise(p);
+                p *= 2.0;
+                amp *= 0.5;
             }
+            return f;
+        }
 
-            void mainImage(out vec4 O, in vec2 U) {
-                vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
-                vec3 ro = vec3(0.0, 0.0, iTime * SPEED);
-                vec3 rd = normalize(vec3(uv, 1.0));
-                rd.xy *= rot(iTime * 0.1); // Slow roll
-                
-                float t = 0.0, acc = 0.0;
-                
-                // Raymarch volume
-                for(int i = 0; i < 30; i++) {
-                    vec3 p = ro + rd * t;
-                    float n = fbm(p * 1.5);
-                    
-                    // Create distinct clouds by cutting off lower values
-                    float density = smoothstep(0.4, 1.0, n);
-                    
-                    // Accumulate light (front-to-back alpha blending)
-                    acc += density * DENSITY * (1.0 - acc); 
-                    
-                    t += max(0.1, 0.05 * t); // Step size increases with depth
-                    if (acc > 0.99) break; // Early exit
-                }
-                
-                O = vec4(COLOR * acc * 1.5, 1.0);
-            }
-        """.trimIndent()
+        void mainImage(out vec4 O, in vec2 U) {
+            vec2 uv = U / iResolution.y;
+            
+            float q = fbm(uv * 3.0 + iTime * SPEED);
+            float n = fbm(uv * 5.0 - iTime * SPEED * 0.8 + vec2(q));
+            
+            float glow = smoothstep(0.2, 0.8, n);
+            vec3 col = COLOR * glow * 2.0;
+            
+            col += vec3(0.2, 0.5, 0.8) * smoothstep(0.4, 1.0, q) * 0.5;
+            
+            O = vec4(col, 1.0);
+        }
+    """.trimIndent()
     )
 
     val effectChain = EffectChain()
