@@ -1412,7 +1412,6 @@ open class PropertyControl(
     }
 
     fun update(deltaTime: Float) {
-        // 1. Handle Animations
         val t = if (isAnimating && animDuration > 0) (animTime / animDuration).coerceIn(0f, 1f) else 1f
         val ease = 1f - (1f - t).toDouble().pow(3.0).toFloat()
 
@@ -1438,14 +1437,12 @@ open class PropertyControl(
             }
         }
 
-        // 2. Smoothing
         val baseLerp = if (smoothing == 0 || !allowSmoothing) 1.0f else {
             val s = smoothing / 1000f
             val speed = 10.0f * (1.0f - s) * (1.0f - s) + 0.1f
             (speed * deltaTime).coerceIn(0f, 1f)
         }
 
-        // 3. Smooth Main Value
         val targetNormalized = (preciseValue / sliderMax.toFloat()).coerceAtLeast(0f)
         if (isAnimating || baseLerp >= 1.0f) {
             smoothedNormalized = targetNormalized
@@ -1456,17 +1453,14 @@ open class PropertyControl(
         smoothedModRate += (preciseModRate - smoothedModRate) * baseLerp
         smoothedModDepth += (preciseModDepth - smoothedModDepth) * baseLerp
 
-        // 4. Calculate LFO Output
         var currentCalculatedOutput = smoothedNormalized
 
         if (hasModulation && (smoothedModRate > 1f || smoothedModDepth > 1f)) {
             val baseSpeed = (smoothedModRate / 1000f + 0.05f).toDouble().pow(3.0).toFloat()
             lfoPhase += baseSpeed * deltaTime * 2.0 * Math.PI
 
-            // --- NEW: Handle Phase Wrapping & Random Generation ---
             if (lfoPhase > 2.0 * Math.PI) {
                 lfoPhase -= 2.0 * Math.PI
-                // Shift the random targets: Target becomes Start, generate new Target
                 noiseValA = noiseValB
                 noiseValB = Math.random().toFloat()
             }
@@ -1476,17 +1470,11 @@ open class PropertyControl(
                 WaveShape.TRIANGLE -> { val p = (lfoPhase / (2.0 * Math.PI)); if (p < 0.5) p * 2.0 else 2.0 - (p * 2.0) }
                 WaveShape.RAMP -> (lfoPhase / (2.0 * Math.PI)) % 1.0
                 WaveShape.WOBBLE_SINE -> { val w = sin(lfoPhase + sin(lfoPhase)); w * 0.5 + 0.5 }
-
-                // NEW TRUE SMOOTH RANDOM
-                // Interpolates from A to B using Cosine interpolation
                 WaveShape.RANDOM_SMOOTH -> {
-                    val progress = (lfoPhase / (2.0 * Math.PI)).toFloat() // 0.0 to 1.0
-                    val smoothT = (1.0 - cos(progress * Math.PI)) * 0.5 // Ease in/out
+                    val progress = (lfoPhase / (2.0 * Math.PI)).toFloat()
+                    val smoothT = (1.0 - cos(progress * Math.PI)) * 0.5
                     (noiseValA * (1.0 - smoothT) + noiseValB * smoothT)
                 }
-
-                // NEW SAMPLE & HOLD (Step Random)
-                // Just holds value A until the phase wraps
                 WaveShape.RANDOM_STEP -> noiseValA.toDouble()
             }
 
@@ -1499,7 +1487,6 @@ open class PropertyControl(
             }
         }
 
-        // 5. Crossfade Logic
         if (isTransitioning) {
             transitionElapsed += deltaTime
             if (transitionElapsed >= transitionTotalTime) {
@@ -1514,14 +1501,13 @@ open class PropertyControl(
             modulatedNormalized = currentCalculatedOutput
         }
 
-        // 6. Update Visuals
         syncUiElements()
         modIndicator?.postInvalidate()
 
         val displayVal = if (logPower > 1) {
-            (smoothedNormalized.toDouble().pow(1.0/logPower) * sliderMax).toInt()
+            (modulatedNormalized.toDouble().pow(1.0/logPower) * sliderMax).roundToInt()
         } else {
-            (smoothedNormalized * sliderMax).toInt()
+            (modulatedNormalized * sliderMax).roundToInt()
         }
         updateLiveValueUI(displayVal)
     }
@@ -1535,10 +1521,16 @@ open class PropertyControl(
 
         // Dirty Checks: Only post to UI thread if values actually changed visually
         if (activeControl == this) {
-            // Text Input
-            if (baseValueInput?.hasFocus() == false) {
-                // Only update text input if drastically different (user is not typing)
-                // Ignored here to prevent cursor jumping, logic handled in openMenu
+            // NEW: Update Big Base Value Indicator if not focused
+            if (baseValueInput != null && !baseValueInput!!.hasFocus()) {
+                val currentText = baseValueInput!!.text.toString()
+                if (currentText != value.toString()) {
+                    baseValueInput!!.post {
+                        if (!baseValueInput!!.hasFocus()) {
+                            baseValueInput!!.setText(value.toString())
+                        }
+                    }
+                }
             }
 
             // SeekBars - Only post if value changed
@@ -1584,6 +1576,11 @@ open class PropertyControl(
         value = clamped
         preciseValue = clamped.toFloat()
         onValueChanged?.invoke(clamped)
+
+        // Explicitly update the text field immediately for +/- button responsiveness
+        if (activeControl == this && baseValueInput != null && !baseValueInput!!.hasFocus()) {
+            baseValueInput!!.setText(clamped.toString())
+        }
     }
 
     fun updateModRate(v: Int) {
