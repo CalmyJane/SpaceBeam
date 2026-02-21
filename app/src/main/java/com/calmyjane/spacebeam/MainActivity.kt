@@ -5406,6 +5406,9 @@ class MainActivity : AppCompatActivity() {
                 controlsObj.put(key, snapObj)
             }
             rootObj.put("controls", controlsObj)
+            val jsonOutput = rootObj.toString()
+            // LOGGING LINE ADDED HERE
+            Log.d("SpaceBeamPreset", "SAVED PRESET $idx: $jsonOutput")
 
             getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
                 .edit()
@@ -5563,16 +5566,19 @@ class MainActivity : AppCompatActivity() {
 
     // Helper to keep the main function clean
     private fun loadFactoryDefault(idx: Int, pFunc: (Int, Array<out Any>) -> Preset) {
+        // Common baseline values to ensure every preset starts from a visible state
+        val base = arrayOf("CAM_MAIN", 1000, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500, "K_AMT", 1000)
+
         presets[idx] = when(idx) {
-            1 -> pFunc(2, arrayOf("M_ZOOM", 320, "M_TX", 500, "M_TY", 500, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500))
-            2 -> pFunc(2, arrayOf("M_ZOOM", 37, "M_TX", 725, "M_TY", 628, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500))
-            3 -> pFunc(2, arrayOf("M_ANGLE", 0, 169, 1000, "RAMP", "M_ZOOM", 168, "M_TX", 500, 480, 378, "M_TY", 546, 340, 698, "M_TILTX", 500, 268, 788, "M_TILTY", 500, 241, 732, "C_ZOOM", 320, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500))
-            4 -> pFunc(2, arrayOf("M_ANGLE", 172, 262, 287, "M_ZOOM", 160, 531, 316, "M_TX", 500, 235, 184, "M_TY", 500, 217, 218, "M_TILTX", 500, 242, 305, "M_TILTY", 500, 318, 343, "C_ZOOM", 500, 583, 365, "HUE", 184, 298, 505, "RAMP", "GLOW", 172, "CONTRAST", 718, "VIBRANCE", 899))
-            5 -> pFunc(2, arrayOf("M_ANGLE", 172, 262, 287, "M_ZOOM", 518, 531, 576, "M_TX", 500, 431, 525, "M_TY", 500, 217, 644, "RANDOM_SMOOTH", "M_TILTX", 500, 498, 1000, "M_TILTY", 500, 318, 1000, "C_ZOOM", 500, 583, 365, "GLOW", 485, "CONTRAST", 788, "VIBRANCE", 899))
-            6 -> pFunc(2, arrayOf("3D_MIX", 1000, "S_FOV", 884, "M_ANGLE", 172, 262, 287, "M_ZOOM", 130, 200, 0, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 345, "RANDOM_SMOOTH", "C_ZOOM", 500, 583, 365, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
-            7 -> pFunc(2, arrayOf("3D_MIX", 1000, "S_SHAPE", 0, 343, 0, "S_SPEED", 206, "S_FOV", 481, "T_WAVE_STR", 454, "T_WAVE_POS", 20, 375, 1000, "RAMP", "M_ANGLE", 870, "M_ZOOM", 77, "M_TX", 500, 320, 328, "M_TY", 500, 323, 343, "M_TILTY", 500, 318, 0, "C_ZOOM", 500, 583, 0, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
-            8 -> pFunc(2, arrayOf("3D_MIX", 1000, "S_SHAPE", 1000, 343, 785, "S_FOV", 481, 496, 704, "S_SPEED", 1000, "M_ANGLE", 172, 262, 287, "M_ZOOM", 160, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 469, "C_ZOOM", 500, 583, 365, "RGB", 490, 534, 634, "GLOW", 285, "CONTRAST", 786, "VIBRANCE", 828) )
-            9 -> pFunc(6, arrayOf("3D_MIX", 1000, "S_FOV", 600, "S_SPEED", 150, "S_SHAPE", 0, 150, 600, "SINE", "M_ZOOM", 120, 150, 200, "SINE", "M_ANGLE", 0, 60, 1000, "RAMP", "HUE", 0, 80, 1000, "RAMP", "VIBRANCE", 600, "GLOW", 600, "RGB", 150, "M_TX", 500, "M_TY", 500, "M_TILTX", 500, "M_TILTY", 500))
+            1 -> pFunc(2, base + arrayOf("M_ZOOM", 320, "C_ZOOM", 320))
+            2 -> pFunc(2, base + arrayOf("M_TX", 725, "M_TY", 628, "M_ANGLE", 0, 122, 758, "M_ZOOM", 158, 400, 478, "WOBBLE_SINE"))
+            3 -> pFunc(2, base + arrayOf("M_ANGLE", 0, 169, 1000, "RAMP", "M_ZOOM", 168, "M_TX", 500, 480, 378, "M_TY", 546, 340, 698, "M_TILTX", 500, 268, 788, "M_TILTY", 500, 241, 732, "M_RGB", 0, 200, 1000, "WOBBLE_SINE"))
+            4 -> pFunc(2, base + arrayOf("M_ANGLE", 172, 262, 287, "M_ZOOM", 74, 531, 316, "M_TX", 500, 235, 184, "M_TY", 500, 217, 218, "M_TILTX", 500, 242, 305, "M_TILTY", 500, 318, 343, "C_ZOOM", 500, 583, 365, "HUE", 184, 298, 505, "RAMP", "GLOW", 172, "CONTRAST", 718, "VIBRANCE", 899))
+            5 -> pFunc(2, base + arrayOf("M_ANGLE", 172, 262, 287, "M_ZOOM", 518, 531, 576, "M_TX", 500, 431, 525, "M_TY", 500, 217, 644, "RANDOM_SMOOTH", "M_TILTX", 500, 498, 1000, "M_TILTY", 500, 318, 1000, "C_ZOOM", 500, 583, 365, "NEG", 1000, "GLOW", 485, "CONTRAST", 788, "VIBRANCE", 899))
+            6 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_FOV", 675, 553, 453, "WOBBLE_SINE", "S_SPEED", 775, "T_FOG", 13, "M_ANGLE", 172, 262, 287, "M_ZOOM", 274, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 345, "RANDOM_SMOOTH", "C_ZOOM", 500, 583, 365, "TWIST", 465, 351, 842, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
+            7 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_SPEED", 206, "S_FOV", 481, "T_WAVE_STR", 454, "T_WAVE_POS", 20, 375, 1000, "RAMP", "M_ANGLE", 870, "M_ZOOM", 77, "M_TX", 500, 320, 328, "M_TY", 500, 323, 343, "CURVE", 332, 200, 718, "WOBBLE_SINE", "FLUX", 0, 389, 358, "WOBBLE_SINE", "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
+            8 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_SHAPE", 1000, 343, 785, "S_FOV", 481, 496, 704, "S_SPEED", 1000, "T_FOG", 12, "T_FOG_H", 0, 200, 1000, "RAMP", "T_FOG_S", 1000, "M_ANGLE", 172, 262, 287, "M_ZOOM", 160, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 469, "C_ZOOM", 500, 583, 365, "GLOW", 285, "CONTRAST", 786, "VIBRANCE", 828))
+            9 -> pFunc(2, base + arrayOf("UTWIRL", 1000, "S_WIDE", 1000, "S_ACTIVITY", 677, "SWIRL_SPEED", 609, "S_FOG", 255, "S_FOG_FALLOFF", 422, "M_ANGLE", 0, 60, 1000, "RAMP", "M_ZOOM", 120, 150, 200, "HUE", 0, 80, 0, "RAMP", "GLOW", 600, "VIBRANCE", 600))
             else -> pFunc(2, emptyArray())
         }
     }
