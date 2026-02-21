@@ -2221,42 +2221,33 @@ class MainActivity : AppCompatActivity() {
         }
     """.trimIndent(),
 
-        "Fractal Abyss" to """
+        "Monochrome Distortion" to """
         #define SPEED 0.4
-        #define COLOR_BASE vec3(0.1, 0.8, 0.9)
-        #define COLOR_VAR vec3(0.6, 0.2, 0.8)
-        #define MAX_STEPS 35
-        
-        mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
 
         void mainImage(out vec4 O, in vec2 U) {
-            vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
-            vec3 ro = vec3(0.0, 0.0, iTime * SPEED); 
-            vec3 rd = normalize(vec3(uv, 1.0)); 
-            rd.xy *= rot(iTime * 0.2); 
+            vec2 uv = U / iResolution.y;
+            float t = iTime * SPEED;
             
-            float t = 0.0, ac = 0.0;
+            // Base asymmetric warping
+            vec2 p = uv * 3.0;
+            p.x += sin(p.y * 2.0 + t) * 1.5;
+            p.y += cos(p.x * 2.2 - t * 0.8) * 1.5;
             
-            for(int i = 0; i < MAX_STEPS; i++) {
-                vec3 p = ro + rd * t;
-                p = mod(p, 2.0) - 1.0; 
-                
-                float s = 1.0;
-                for(int j = 0; j < 4; j++) {
-                    p = abs(p) - 0.5;
-                    p.xy *= rot(0.785);
-                    p.xz *= rot(0.785);
-                    p *= 2.0; s *= 2.0;
-                }
-                
-                float d = (length(p) - 0.2) / s; 
-                ac += exp(-d * 40.0); 
-                t += d * 0.8;
-                if(d < 0.001 || t > 8.0) break;
-            }
+            // Secondary chaotic warping for jagged details
+            p.x += sin(p.y * 4.5 + t * 1.5) * 0.5;
+            p.y += cos(p.x * 4.1 - t * 1.2) * 0.5;
             
-            vec3 finalColor = mix(COLOR_BASE, COLOR_VAR, sin(t * 2.0 + iTime) * 0.5 + 0.5);
-            O = vec4(finalColor * ac * 0.08 * exp(-t * 0.3), 1.0);
+            // Topographical zebra stripes
+            float stripes = sin(p.x * 5.0 + p.y * 3.0);
+            
+            // Sharp threshold for pure black and white, with minimal anti-aliasing
+            float col = smoothstep(0.0, 0.05, stripes);
+            
+            // Carve out asymmetric black voids and white clumps
+            float clumps = cos(p.x * 2.0 - p.y * 2.0);
+            col *= smoothstep(-0.2, 0.0, clumps);
+            
+            O = vec4(vec3(col), 1.0);
         }
     """.trimIndent(),
 
@@ -2290,41 +2281,60 @@ class MainActivity : AppCompatActivity() {
         }
     """.trimIndent(),
 
-        "Quantum Helix" to """
-        #define SPEED 2.5
-        #define COLOR1 vec3(0.0, 1.0, 0.8)
-        #define COLOR2 vec3(0.9, 0.1, 1.0)
-        #define STRANDS 40.0
-        
-        mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+        "Void Eclipse" to """
+        #define SPEED 0.4
+        #define RADIUS 0.25
+        #define GLOW_INTENSITY 0.03
+        #define COLOR vec3(1.0, 0.3, 0.05)
+        #define SECONDARY_COLOR vec3(0.2, 0.5, 1.0)
 
         void mainImage(out vec4 O, in vec2 U) {
             vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
-            vec3 col = vec3(0.0);
+            float t = iTime * SPEED;
             
-            float tRot = iTime * 0.2; 
+            float aspect = iResolution.x / iResolution.y;
             
-            for(float i = 0.0; i < STRANDS; i++) {
-                float t = i / STRANDS * 3.14159 * 6.0 + iTime * SPEED;
-                
-                vec3 pos1 = vec3(cos(t) * 0.3, (i / STRANDS - 0.5) * 2.0, (sin(t) * 0.5 + 0.5) - 0.5);
-                vec3 pos2 = vec3(-pos1.x, pos1.y, (1.0 - (sin(t) * 0.5 + 0.5)) - 0.5);
-                
-                pos1.xy *= rot(tRot); pos1.xz *= rot(tRot * 1.3); pos1.yz *= rot(tRot * 0.7);
-                pos2.xy *= rot(tRot); pos2.xz *= rot(tRot * 1.3); pos2.yz *= rot(tRot * 0.7);
-                
-                pos1.z += 1.5; pos2.z += 1.5;
-                
-                float p1 = 1.0 / pos1.z;
-                float p2 = 1.0 / pos2.z;
-                
-                float d1 = length(uv - pos1.xy * p1);
-                float d2 = length(uv - pos2.xy * p2);
-                
-                col += COLOR1 * (0.003 / d1) * (1.0 / pos1.z);
-                col += COLOR2 * (0.003 / d2) * (1.0 / pos2.z);
-            }
-            O = vec4(col, 1.0);
+            vec2 c1;
+            c1.x = sin(t * 0.8) * (aspect * 0.5 + 0.2) + cos(t * 0.3) * 0.3;
+            c1.y = cos(t * 0.6) * (0.5 + 0.2) + sin(t * 0.4) * 0.2;
+            
+            vec2 c2;
+            c2.x = cos(t * 0.5 + 1.0) * (aspect * 0.5 + 0.2) + sin(t * 0.7) * 0.3;
+            c2.y = sin(t * 0.9 - 2.0) * (0.5 + 0.2) + cos(t * 0.2) * 0.2;
+            
+            vec2 l1 = uv - c1;
+            vec2 l2 = uv - c2;
+            
+            float a1 = atan(l1.y, l1.x);
+            float r1 = length(l1);
+            float a2 = atan(l2.y, l2.x);
+            float r2 = length(l2);
+            
+            float w1 = sin(a1 * 2.0 + t * 2.0) * 0.04 + cos(a1 * 5.0 - t * 1.5) * 0.02;
+            float w2 = sin(a2 * 3.0 - t * 1.8) * 0.04 + cos(a2 * 4.0 + t * 2.1) * 0.02;
+            
+            float rw1 = r1 + w1;
+            float rw2 = r2 + w2;
+            
+            float d1 = abs(rw1 - RADIUS);
+            float d2 = abs(rw2 - RADIUS);
+            
+            float m1 = smoothstep(RADIUS - 0.02, RADIUS + 0.02, rw1);
+            float m2 = smoothstep(RADIUS - 0.02, RADIUS + 0.02, rw2);
+            float combinedMask = m1 * m2;
+            
+            float f1 = sin(a1 - t * 2.0) * 0.5 + 0.5;
+            float f2 = sin(a2 + t * 1.5) * 0.5 + 0.5;
+            
+            float g1 = GLOW_INTENSITY / (d1 + 0.005) * (0.8 + f1 * 1.2);
+            float g2 = GLOW_INTENSITY / (d2 + 0.005) * (0.8 + f2 * 1.2);
+            
+            vec3 col1 = mix(COLOR, SECONDARY_COLOR, sin(a1 * 3.0 + t) * 0.5 + 0.5);
+            vec3 col2 = mix(SECONDARY_COLOR, COLOR, sin(a2 * 2.0 - t) * 0.5 + 0.5);
+            
+            vec3 finalCol = (col1 * g1 + col2 * g2) * combinedMask;
+            
+            O = vec4(finalCol, 1.0);
         }
     """.trimIndent(),
 
@@ -2363,40 +2373,36 @@ class MainActivity : AppCompatActivity() {
         }
     """.trimIndent(),
 
-        "Alien Artifact" to """
-        #define SPEED 0.5
-        #define COLOR vec3(0.2, 1.0, 0.4)
-        
-        mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+        "Cyber Thread" to """
+        #define SPEED 0.3
+        #define THICKNESS 0.015
+        #define INTENSITY 1.2
+        #define ZOOM 0.4
+        #define COLOR vec3(0.0, 0.9, 0.6)
+        #define SHIFT_COLOR vec3(0.8, 0.1, 0.9)
 
         void mainImage(out vec4 O, in vec2 U) {
             vec2 uv = (U - 0.5 * iResolution.xy) / iResolution.y;
+            uv *= ZOOM;
+            float t = iTime * SPEED;
+            vec3 col = vec3(0.0);
             
-            vec3 ro = vec3(iTime * 0.3, iTime * 0.2, -3.0);
-            vec3 rd = normalize(vec3(uv, 1.0));
-            
-            float t = 0.0, ac = 0.0;
-            
-            for(int i = 0; i < 40; i++) {
-                vec3 p = ro + rd * t;
+            for(float i = 1.0; i <= 3.0; i++) {
+                vec2 p = uv;
                 
-                p.xy = mod(p.xy, 4.0) - 2.0;
+                p.x += sin(p.y * 3.0 + t * i) * 0.2;
+                p.y += cos(p.x * 2.5 + t * i * 0.8) * 0.3;
                 
-                p.xy *= rot(iTime * SPEED * 0.5);
-                p.yz *= rot(iTime * SPEED * 0.3);
+                float wave = abs(p.y + sin(p.x * 4.0 - t * 1.2) * 0.2);
+                float glow = THICKNESS / (wave + 0.002);
                 
-                float a = atan(p.z, p.x);
-                p.xy *= rot(a * 2.0);
-                
-                vec2 q = vec2(length(p.xz) - 1.0, p.y);
-                float d = length(q) - 0.15;
-                d -= sin(a * 15.0) * 0.05;
-                
-                ac += 0.01 / (abs(d) + 0.02);
-                t += d * 0.6;
-                if(t > 6.0) break;
+                vec3 curCol = mix(COLOR, SHIFT_COLOR, i * 0.3 + sin(t + p.x)*0.2);
+                col += curCol * glow * INTENSITY;
             }
-            O = vec4(COLOR * ac * exp(-t * 0.5), 1.0);
+            
+            col *= smoothstep(1.5, 0.2, length(uv));
+            
+            O = vec4(col, 1.0);
         }
     """.trimIndent(),
 
