@@ -2099,6 +2099,11 @@ open class PropertyControl(
 
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
+    private var fpsTextView: TextView? = null
+    fun updateFpsUI(fps: Int) {
+        fpsTextView?.text = "FPS: $fps"
+    }
+
     private var activeShaderInput: EditText? = null
     private var currentShaderName = "Custom GLSL"
 
@@ -4162,7 +4167,6 @@ class MainActivity : AppCompatActivity() {
 
         parameterPanel = ScrollView(this).apply {
             if (isPortrait) {
-                // Ensure the ScrollView doesn't request more space than its allotment
                 layoutParams = LinearLayout.LayoutParams(-1, menuHeight)
             } else {
                 layoutParams = LinearLayout.LayoutParams(850, -1)
@@ -4171,7 +4175,6 @@ class MainActivity : AppCompatActivity() {
             id = View.generateViewId()
             layoutDirection = View.LAYOUT_DIRECTION_RTL
             isVerticalScrollBarEnabled = true
-            // CHANGE: Move scrollbar style to outside to prevent it from expanding the view
             scrollBarStyle = View.SCROLLBARS_OUTSIDE_OVERLAY
             visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -4180,7 +4183,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Restore scroll position
             post {
                 scrollTo(0, lastScrollY)
             }
@@ -4188,10 +4190,19 @@ class MainActivity : AppCompatActivity() {
 
         val menuLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            // Adjust bottom padding to ensure the last item isn't cut off by the rounded corners
             setPadding(25, 20, 10, if (isPortrait) 60 else 240)
             layoutDirection = View.LAYOUT_DIRECTION_LTR
         }
+
+        fpsTextView = TextView(this).apply {
+            text = "FPS: --"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            setPadding(15, 0, 15, 20)
+        }
+        menuLayout.addView(fpsTextView)
+
         parameterPanel.addView(menuLayout)
 
         val toggleBtn = createMenuUtilityButton()
@@ -5601,6 +5612,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
+        private var fpsFrameCount = 0
+        private var fpsLastCalcTime = System.currentTimeMillis()
         var globalTime = 0f
         private var simpleProgram = 0
         private var copyOesProgram = 0
@@ -5995,7 +6008,17 @@ class MainActivity : AppCompatActivity() {
             globalTime += deltaTime
             lastTime = now
 
-            // Global Rotation Logic
+            fpsFrameCount++
+            val currentMillis = System.currentTimeMillis()
+            if (currentMillis - fpsLastCalcTime >= 500) {
+                val fps = (fpsFrameCount * 1000f / (currentMillis - fpsLastCalcTime)).toInt()
+                fpsFrameCount = 0
+                fpsLastCalcTime = currentMillis
+                ctx.runOnUiThread {
+                    ctx.updateFpsUI(fps)
+                }
+            }
+
             if (isRotAnimating && rotTargetM != null) {
                 rotAnimTime += deltaTime
                 if (rotAnimTime >= rotAnimDuration) {
@@ -6008,18 +6031,14 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Update Controls & Physics
             ctx.controls.forEach { it.update(deltaTime) }
             ctx.effectChain.effects.forEach { if(it.active) it.update(deltaTime) }
 
-            // Process Inputs
             sources.forEach { it.processToFbo() }
             manageSurfaces()
 
-            // Run Effect Chain
             val finalTex = ctx.effectChain.process(this)
 
-            // Final Output to Screen FBO
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
             GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
