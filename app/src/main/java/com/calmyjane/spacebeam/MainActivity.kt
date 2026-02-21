@@ -6238,10 +6238,8 @@ class MainActivity : AppCompatActivity() {
         abstract fun release()
         abstract fun render(inputTexId: Int, outputFbo: Int, width: Int, height: Int)
 
-        // Allow effects to update physics
         open fun update(deltaTime: Float) {}
 
-        // NEW: Allow effects to reset internal state (like scroll position)
         open fun reset() {}
 
         protected fun addControl(control: PropertyControl) {
