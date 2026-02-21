@@ -6511,18 +6511,12 @@ abstract class SourcePropertyControl(
                 topMargin = 10
                 bottomMargin = 10
             }
-            setOnClickListener { showDeleteConfirmation() }
+            // Deletion logic moved directly here
+            setOnClickListener {
+                mainActivity.removeSource(this@SourcePropertyControl)
+            }
         }
         panel.addView(removeBtn)
-    }
-
-    private fun showDeleteConfirmation() {
-        androidx.appcompat.app.AlertDialog.Builder(mainActivity)
-            .setTitle("Remove Source?")
-            .setMessage("Remove $label from mixer?")
-            .setPositiveButton("Remove") { _, _ -> mainActivity.removeSource(this) }
-            .setNegativeButton("Cancel", null)
-            .show()
     }
 
     abstract fun onRemove()
