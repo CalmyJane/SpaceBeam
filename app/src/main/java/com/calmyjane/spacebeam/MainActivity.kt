@@ -2472,7 +2472,7 @@ class MainActivity : AppCompatActivity() {
     )
 
     val effectChain = EffectChain()
-    private lateinit var glView: GLSurfaceView
+    lateinit var glView: GLSurfaceView
     private val sourceControls = mutableListOf<PropertyControl>()
     private var mixerGroupContainer: LinearLayout? = null
     private lateinit var saveConfirmBtn: View
@@ -4369,7 +4369,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showShaderSourceDialog() {
+    fun showShaderSourceDialog(
+        existingCode: String? = null,
+        isEditing: Boolean = false,
+        onUpdate: ((String) -> Unit)? = null
+    ) {
         val dialog = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
         val rootLayout = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#121212"))
@@ -4393,13 +4397,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Title
         content.addView(TextView(this).apply {
-            text = "ADD GENERATIVE SHADER"; textSize = 18f; setTypeface(null, Typeface.BOLD)
+            text = if (isEditing) "EDIT GENERATIVE SHADER" else "ADD GENERATIVE SHADER"
+            textSize = 18f; setTypeface(null, Typeface.BOLD)
             setTextColor(Color.LTGRAY); setPadding(0, 0, 0, 30)
         })
 
+        // Top Selection Row (Only visible when adding new)
         val topControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(-1, 120).apply { bottomMargin=20 }
+            visibility = if (isEditing) View.GONE else View.VISIBLE
         }
 
         val spinnerKeys = BUILTIN_SHADERS.keys.toList()
@@ -4415,14 +4423,13 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE); textSize=12f
             background = GradientDrawable().apply { setColor(Color.parseColor("#333333")); cornerRadius=15f }
             layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { leftMargin=10 }
-            setOnClickListener {
-                shaderFileLauncher.launch(arrayOf("*/*"))
-            }
+            setOnClickListener { shaderFileLauncher.launch(arrayOf("*/*")) }
         }
 
         topControls.addView(spinner); topControls.addView(fileBtn)
         content.addView(topControls)
 
+        // The Code Editor
         activeShaderInput = EditText(this).apply {
             setTextColor(Color.WHITE); textSize = 12f; typeface = Typeface.MONOSPACE
             gravity = Gravity.TOP or Gravity.START
@@ -4431,33 +4438,43 @@ class MainActivity : AppCompatActivity() {
             setPadding(30, 30, 30, 30)
             layoutParams = LinearLayout.LayoutParams(-1, 600)
             setHorizontallyScrolling(true)
+            if (existingCode != null) setText(existingCode)
         }
 
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
-                activeShaderInput?.setText(BUILTIN_SHADERS[spinnerKeys[pos]])
-                currentShaderName = spinnerKeys[pos]
+                if (!isEditing) {
+                    activeShaderInput?.setText(BUILTIN_SHADERS[spinnerKeys[pos]])
+                    currentShaderName = spinnerKeys[pos]
+                }
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
-
         content.addView(activeShaderInput)
 
-        content.addView(Button(this).apply {
-            text = "ADD SHADER"
+        // THE MAIN ACTION BUTTON (Always added to content)
+        val actionBtn = Button(this).apply {
+            text = if (isEditing) "APPLY CHANGES" else "ADD SHADER"
             setTextColor(Color.WHITE); textSize = 16f; setTypeface(null, Typeface.BOLD)
-            background = GradientDrawable().apply { setColor(Color.parseColor("#0066CC")); cornerRadius = 15f }
+            background = GradientDrawable().apply {
+                setColor(if (isEditing) Color.parseColor("#228B22") else Color.parseColor("#0066CC"))
+                cornerRadius = 15f
+            }
             layoutParams = LinearLayout.LayoutParams(-1, 120).apply { topMargin = 40 }
             setOnClickListener {
                 val code = activeShaderInput?.text.toString().trim()
                 if (code.isNotEmpty()) {
-                    // Pass the tracked name into the creation function
-                    attemptAddShaderSource(code, currentShaderName)
+                    if (isEditing && onUpdate != null) {
+                        onUpdate(code)
+                    } else {
+                        attemptAddShaderSource(code, currentShaderName)
+                    }
                     dialog.dismiss()
                     hideSystemUI()
                 }
             }
-        })
+        }
+        content.addView(actionBtn)
 
         rootLayout.addView(content); rootLayout.addView(closeBtn)
         dialog.setContentView(rootLayout)
@@ -6511,10 +6528,54 @@ class ShaderSourceControl(
     sourceId: String,
     mainActivity: MainActivity
 ) : SourcePropertyControl(id, label, 0, sourceId, mainActivity) {
+
+    override fun addExtraControls(panel: LinearLayout, context: Context) {
+        // First add the standard geometry controls (Flips, etc)
+        super.addExtraControls(panel, context)
+
+        // Create the EDIT button styled like the RESET button
+        val editBtn = Button(context).apply {
+            text = "EDIT SHADER"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#444444"))
+                cornerRadius = 10f
+                setStroke(1, Color.GRAY)
+            }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110).apply {
+                topMargin = 10
+                bottomMargin = 10
+            }
+            setOnClickListener {
+                val channel = mainActivity.getRendererSource(sourceId)
+                val currentCode = channel?.customShaderCode ?: ""
+
+                // Open the dialog in "Editing" mode
+                mainActivity.showShaderSourceDialog(existingCode = currentCode, isEditing = true) { newCode ->
+                    channel?.let {
+                        it.customShaderCode = newCode
+                        // Signal the renderer to re-compile the program on next frame
+                        mainActivity.glView.queueEvent { it.isReady = false }
+                    }
+                }
+            }
+        }
+
+        // Insert above the "REMOVE SOURCE" button (which is the last child)
+        if (panel.childCount > 0) {
+            panel.addView(editBtn, panel.childCount - 1)
+        } else {
+            panel.addView(editBtn)
+        }
+    }
+
     override fun onRemove() {
-        // GL resources are automatically handled by SourceChannel.release()
+        // GL resources handled by SourceChannel.release()
     }
 }
+
 
 class CameraSourceControl(val mainActivity: MainActivity) : PropertyControl(
     id = "CAM_MAIN",
