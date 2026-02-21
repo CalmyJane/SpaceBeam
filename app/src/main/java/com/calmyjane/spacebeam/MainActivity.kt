@@ -1426,7 +1426,14 @@ open class PropertyControl(
                 modRateTarget = null; modDepthTarget = null
                 isAnimating = false
             } else {
-                preciseValue = animStart + (animTarget!! - animStart) * ease
+                // SPECIAL CASE: Modular lerp for ANGLE parameters to prevent 360->0 spinning
+                if (id.endsWith("_ANGLE")) {
+                    val diff = animTarget!! - animStart
+                    val modDiff = ((diff + 500f) % 1000f + 1000f) % 1000f - 500f
+                    preciseValue = (animStart + modDiff * ease + 1000f) % 1000f
+                } else {
+                    preciseValue = animStart + (animTarget!! - animStart) * ease
+                }
                 newValueInt = preciseValue.toInt()
                 modRateTarget?.let { preciseModRate = modRateStart + (it - modRateStart) * ease }
                 modDepthTarget?.let { preciseModDepth = modDepthStart + (it - modDepthStart) * ease }
@@ -1444,10 +1451,18 @@ open class PropertyControl(
         }
 
         val targetNormalized = (preciseValue / sliderMax.toFloat()).coerceAtLeast(0f)
+
+        // Applying Shortest-Path Smoothing for ANGLE even outside of animations (for touch)
         if (isAnimating || baseLerp >= 1.0f) {
             smoothedNormalized = targetNormalized
         } else {
-            smoothedNormalized += (targetNormalized - smoothedNormalized) * baseLerp
+            if (id.endsWith("_ANGLE")) {
+                val diff = targetNormalized - smoothedNormalized
+                val modDiff = ((diff + 0.5f) % 1.0f + 1.0f) % 1.0f - 0.5f
+                smoothedNormalized = ((smoothedNormalized + modDiff * baseLerp) + 1.0f) % 1.0f
+            } else {
+                smoothedNormalized += (targetNormalized - smoothedNormalized) * baseLerp
+            }
         }
 
         smoothedModRate += (preciseModRate - smoothedModRate) * baseLerp
@@ -1495,7 +1510,14 @@ open class PropertyControl(
             } else {
                 val progress = (transitionElapsed / transitionTotalTime).coerceIn(0f, 1f)
                 val fadeT = progress * progress * (3.0f - 2.0f * progress)
-                modulatedNormalized = transitionStartVal + (currentCalculatedOutput - transitionStartVal) * fadeT
+
+                if (id.endsWith("_ANGLE")) {
+                    val diff = currentCalculatedOutput - transitionStartVal
+                    val modDiff = ((diff + 0.5f) % 1.0f + 1.0f) % 1.0f - 0.5f
+                    modulatedNormalized = ((transitionStartVal + modDiff * fadeT) + 1.0f) % 1.0f
+                } else {
+                    modulatedNormalized = transitionStartVal + (currentCalculatedOutput - transitionStartVal) * fadeT
+                }
             }
         } else {
             modulatedNormalized = currentCalculatedOutput
@@ -2796,7 +2818,7 @@ class MainActivity : AppCompatActivity() {
             val defZoom = 320
 
             addControl(PropertyControl(pAngle, "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-            addControl(PropertyControl(pZoom, "ZOOM", defaultValue = defZoom, outMin=0.1f, outMax=4.0f, hasModulation = true))
+            addControl(PropertyControl(pZoom, "ZOOM", defaultValue = 700, outMin=0.05f, outMax=2.0f, hasModulation = true, logPower = 2))
             addControl(PropertyControl(pTx, "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
             addControl(PropertyControl(pTy, "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
             addControl(PropertyControl(pTiltX, "TILT X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
@@ -2860,7 +2882,7 @@ class MainActivity : AppCompatActivity() {
             // Value at 320 is ~1.348. Value at 231 is ~1.00.
             // Correction factor = 1.0 / 1.348 = ~0.7418
             val rawZoom = mainActivity.controlsMap[pZoom]?.computedValue ?: 1f
-            val correctedZoom = rawZoom * 0.7418f
+            val correctedZoom = rawZoom * 0.7067f
 
             GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
@@ -3707,8 +3729,6 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun handleInteraction(event: MotionEvent) {
-        // Find the LAST TransformEffect in the chain to modify
-        // We search backwards from the end
         var targetEffect: TransformEffect? = null
         for (i in effectChain.effects.indices.reversed()) {
             val fx = effectChain.effects[i]
@@ -3717,13 +3737,11 @@ class MainActivity : AppCompatActivity() {
                 break
             }
         }
-        // If no transform effect found, fallback to map lookup (legacy safety)
         val pAngleId = if (targetEffect != null) "${targetEffect.id}_ANGLE" else "M_ANGLE"
         val pZoomId = if (targetEffect != null) "${targetEffect.id}_ZOOM" else "M_ZOOM"
         val pTxId = if (targetEffect != null) "${targetEffect.id}_TX" else "M_TX"
         val pTyId = if (targetEffect != null) "${targetEffect.id}_TY" else "M_TY"
 
-        // 1. Handle Multi-touch Gestures (Pinch/Rotate)
         if (event.pointerCount >= 2) {
             isDraggingOrGesturing = true
 
@@ -3744,27 +3762,22 @@ class MainActivity : AppCompatActivity() {
                 val dx = (focusX - lastFingerFocusX) / glView.width.toFloat() * 2.0f
                 val dy = (focusY - lastFingerFocusY) / glView.height.toFloat() * 2.0f
 
-                // Invert dx/dy if needed based on user feedback
                 controlsMap[pTxId]?.let { it.setProgress((it.value + (dx * 500).toInt()).coerceIn(0, 1000)) }
                 controlsMap[pTyId]?.let { it.setProgress((it.value - (dy * 500).toInt()).coerceIn(0, 1000)) }
 
                 val scaleFactor = dist / lastFingerDist
                 if (scaleFactor > 0 && lastFingerDist > 0) {
-                    controlsMap[pZoomId]?.let { it.setProgress((it.value - (log2(scaleFactor) * 300).toInt()).coerceIn(0, 1000)) }
+                    controlsMap[pZoomId]?.let { it.setProgress((it.value + (log2(scaleFactor) * 450).toInt()).coerceIn(0, 1000)) }
                 }
 
-                // Fix Rotation Inversion: Swap sign of dAngle
                 val dAngle = angle - lastFingerAngle
                 controlsMap[pAngleId]?.let {
-                    // + instead of - to invert direction
                     it.setProgress((it.value + (dAngle * (1000f / 360f)).toInt() + 1000) % 1000)
                 }
             }
 
             lastFingerDist = dist; lastFingerAngle = angle; lastFingerFocusX = focusX; lastFingerFocusY = focusY
-        }
-        // 2. Handle Single Pointer
-        else {
+        } else {
             if (event.pointerCount < 2) { lastFingerDist = 0f }
 
             when (event.actionMasked) {
@@ -5578,21 +5591,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Helper to keep the main function clean
     private fun loadFactoryDefault(idx: Int, pFunc: (Int, Array<out Any>) -> Preset) {
-        // Common baseline values to ensure every preset starts from a visible state
         val base = arrayOf("CAM_MAIN", 1000, "BRIT", 500, "CONTRAST", 500, "VIBRANCE", 500, "K_AMT", 1000)
 
         presets[idx] = when(idx) {
-            1 -> pFunc(2, base + arrayOf("M_ZOOM", 320, "C_ZOOM", 320))
-            2 -> pFunc(2, base + arrayOf("M_TX", 725, "M_TY", 628, "M_ANGLE", 0, 122, 758, "M_ZOOM", 158, 400, 478, "WOBBLE_SINE"))
-            3 -> pFunc(2, base + arrayOf("M_ANGLE", 0, 169, 1000, "RAMP", "M_ZOOM", 168, "M_TX", 500, 480, 378, "M_TY", 546, 340, 698, "M_TILTX", 500, 268, 788, "M_TILTY", 500, 241, 732, "M_RGB", 0, 200, 1000, "WOBBLE_SINE"))
-            4 -> pFunc(2, base + arrayOf("M_ANGLE", 172, 262, 287, "M_ZOOM", 74, 531, 316, "M_TX", 500, 235, 184, "M_TY", 500, 217, 218, "M_TILTX", 500, 242, 305, "M_TILTY", 500, 318, 343, "C_ZOOM", 500, 583, 365, "HUE", 184, 298, 505, "RAMP", "GLOW", 172, "CONTRAST", 718, "VIBRANCE", 899))
-            5 -> pFunc(2, base + arrayOf("M_ANGLE", 172, 262, 287, "M_ZOOM", 518, 531, 576, "M_TX", 500, 431, 525, "M_TY", 500, 217, 644, "RANDOM_SMOOTH", "M_TILTX", 500, 498, 1000, "M_TILTY", 500, 318, 1000, "C_ZOOM", 500, 583, 365, "NEG", 1000, "GLOW", 485, "CONTRAST", 788, "VIBRANCE", 899))
-            6 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_FOV", 675, 553, 453, "WOBBLE_SINE", "S_SPEED", 775, "T_FOG", 13, "M_ANGLE", 172, 262, 287, "M_ZOOM", 274, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 345, "RANDOM_SMOOTH", "C_ZOOM", 500, 583, 365, "TWIST", 465, 351, 842, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
-            7 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_SPEED", 206, "S_FOV", 481, "T_WAVE_STR", 454, "T_WAVE_POS", 20, 375, 1000, "RAMP", "M_ANGLE", 870, "M_ZOOM", 77, "M_TX", 500, 320, 328, "M_TY", 500, 323, 343, "CURVE", 332, 200, 718, "WOBBLE_SINE", "FLUX", 0, 389, 358, "WOBBLE_SINE", "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
-            8 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_SHAPE", 1000, 343, 785, "S_FOV", 481, 496, 704, "S_SPEED", 1000, "T_FOG", 12, "T_FOG_H", 0, 200, 1000, "RAMP", "T_FOG_S", 1000, "M_ANGLE", 172, 262, 287, "M_ZOOM", 160, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 469, "C_ZOOM", 500, 583, 365, "GLOW", 285, "CONTRAST", 786, "VIBRANCE", 828))
-            9 -> pFunc(2, base + arrayOf("UTWIRL", 1000, "S_WIDE", 1000, "S_ACTIVITY", 677, "SWIRL_SPEED", 609, "S_FOG", 255, "S_FOG_FALLOFF", 422, "M_ANGLE", 0, 60, 1000, "RAMP", "M_ZOOM", 120, 150, 200, "HUE", 0, 80, 0, "RAMP", "GLOW", 600, "VIBRANCE", 600))
+            1 -> pFunc(2, base + arrayOf("M_ZOOM", 700, "C_ZOOM", 700))
+            2 -> pFunc(2, base + arrayOf("M_TX", 725, "M_TY", 628, "M_ANGLE", 0, 122, 758, "M_ZOOM", 345, 400, 478, "WOBBLE_SINE"))
+            3 -> pFunc(2, base + arrayOf("M_ANGLE", 0, 169, 1000, "RAMP", "M_ZOOM", 366, "M_TX", 500, 480, 378, "M_TY", 546, 340, 698, "M_TILTX", 500, 268, 788, "M_TILTY", 500, 241, 732, "M_RGB", 0, 200, 1000, "WOBBLE_SINE"))
+            4 -> pFunc(2, base + arrayOf("M_ANGLE", 172, 262, 287, "M_ZOOM", 161, 531, 316, "M_TX", 500, 235, 184, "M_TY", 500, 217, 218, "M_TILTX", 500, 242, 305, "M_TILTY", 500, 318, 343, "C_ZOOM", 1000, 583, 365, "HUE", 184, 298, 505, "RAMP", "GLOW", 172, "CONTRAST", 718, "VIBRANCE", 899))
+            5 -> pFunc(2, base + arrayOf("M_ANGLE", 172, 262, 287, "M_ZOOM", 1000, 531, 576, "M_TX", 500, 431, 525, "M_TY", 500, 217, 644, "RANDOM_SMOOTH", "M_TILTX", 500, 498, 1000, "M_TILTY", 500, 318, 1000, "C_ZOOM", 1000, 583, 365, "NEG", 1000, "GLOW", 485, "CONTRAST", 788, "VIBRANCE", 899))
+            6 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_FOV", 675, 553, 453, "WOBBLE_SINE", "S_SPEED", 775, "T_FOG", 13, "M_ANGLE", 172, 262, 287, "M_ZOOM", 597, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 345, "RANDOM_SMOOTH", "C_ZOOM", 1000, 583, 365, "TWIST", 465, 351, 842, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
+            7 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_SPEED", 206, "S_FOV", 481, "T_WAVE_STR", 454, "T_WAVE_POS", 20, 375, 1000, "RAMP", "M_ANGLE", 870, "M_ZOOM", 168, "M_TX", 500, 320, 328, "M_TY", 500, 323, 343, "CURVE", 332, 200, 718, "WOBBLE_SINE", "FLUX", 0, 389, 358, "WOBBLE_SINE", "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
+            8 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_SHAPE", 1000, 343, 785, "S_FOV", 481, 496, 704, "S_SPEED", 1000, "T_FOG", 12, "T_FOG_H", 0, 200, 1000, "RAMP", "T_FOG_S", 1000, "M_ANGLE", 172, 262, 287, "M_ZOOM", 349, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 469, "C_ZOOM", 1000, 583, 365, "GLOW", 285, "CONTRAST", 786, "VIBRANCE", 828))
+            9 -> pFunc(2, base + arrayOf("UTWIRL", 1000, "S_WIDE", 1000, "S_ACTIVITY", 677, "SWIRL_SPEED", 609, "S_FOG", 255, "S_FOG_FALLOFF", 422, "M_ANGLE", 0, 60, 1000, "RAMP", "M_ZOOM", 262, 150, 200, "HUE", 0, 80, 0, "RAMP", "GLOW", 600, "VIBRANCE", 600))
             else -> pFunc(2, emptyArray())
         }
     }
