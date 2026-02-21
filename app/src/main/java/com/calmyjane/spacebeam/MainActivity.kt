@@ -2814,9 +2814,6 @@ class MainActivity : AppCompatActivity() {
         private val pRgb = "${idPrefix}_RGB"
 
         init {
-            // Reverted to your original defaults (130 and 320)
-            val defZoom = 320
-
             addControl(PropertyControl(pAngle, "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
             addControl(PropertyControl(pZoom, "ZOOM", defaultValue = 700, outMin=0.05f, outMax=2.0f, hasModulation = true, logPower = 2))
             addControl(PropertyControl(pTx, "MOVE X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
