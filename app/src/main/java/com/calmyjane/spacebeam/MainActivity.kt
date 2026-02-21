@@ -2121,6 +2121,21 @@ open class PropertyControl(
 
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
+    private var pendingShaderSaveCode: String? = null
+
+    val shaderSaveLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri != null && pendingShaderSaveCode != null) {
+            try {
+                contentResolver.openOutputStream(uri)?.use { os ->
+                    os.write(pendingShaderSaveCode!!.toByteArray())
+                }
+                Toast.makeText(this, "Shader Saved", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     private var fpsTextView: TextView? = null
     fun updateFpsUI(fps: Int) {
         fpsTextView?.text = "FPS: $fps"
@@ -4375,6 +4390,7 @@ class MainActivity : AppCompatActivity() {
         onUpdate: ((String) -> Unit)? = null
     ) {
         val dialog = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+
         val rootLayout = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#121212"))
             layoutParams = ViewGroup.LayoutParams(-1, -1)
@@ -4384,83 +4400,98 @@ class MainActivity : AppCompatActivity() {
         val closeBtn = Button(this).apply {
             text = "✕"; textSize = 24f; setTextColor(Color.GRAY); background = null
             layoutParams = FrameLayout.LayoutParams(150, 150).apply {
-                gravity = Gravity.TOP or Gravity.END; topMargin = 30; rightMargin = 30
+                gravity = Gravity.TOP or Gravity.END; topMargin = 10; rightMargin = 10
             }
             setOnClickListener { dialog.dismiss(); hideSystemUI() }
         }
 
+        // --- RECONFIGURABLE CONTENT CONTAINER ---
+        // Using MATCH_PARENT for both dimensions so it can respond to rotation
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            layoutParams = FrameLayout.LayoutParams(-1, -2).apply {
-                gravity = Gravity.CENTER; leftMargin = 50; rightMargin = 50
+            layoutParams = FrameLayout.LayoutParams(-1, -1).apply {
+                // Horizontal margins stay consistent
+                leftMargin = 50; rightMargin = 50
+                // Vertical margins provide breathing room for the Close button and bottom edge
+                topMargin = 130; bottomMargin = 30
             }
         }
 
-        // Title
         content.addView(TextView(this).apply {
-            text = if (isEditing) "EDIT GENERATIVE SHADER" else "ADD GENERATIVE SHADER"
+            text = if (isEditing) "EDIT SHADER" else "ADD SHADER"
             textSize = 18f; setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.LTGRAY); setPadding(0, 0, 0, 30)
+            setTextColor(Color.LTGRAY); setPadding(0, 0, 0, 15)
         })
 
-        // Top Selection Row (Only visible when adding new)
-        val topControls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(-1, 120).apply { bottomMargin=20 }
-            visibility = if (isEditing) View.GONE else View.VISIBLE
+        // --- TOP ROW ---
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 15 }
         }
 
         val spinnerKeys = BUILTIN_SHADERS.keys.toList()
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, spinnerKeys)
         val spinner = Spinner(this).apply {
             this.adapter = adapter
-            background = GradientDrawable().apply { setColor(Color.parseColor("#222222")); cornerRadius=15f }
-            layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { rightMargin=10 }
+            background = GradientDrawable().apply { setColor(Color.parseColor("#222222")); cornerRadius = 12f }
+            layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { rightMargin = 10 }
         }
 
-        val fileBtn = Button(this).apply {
-            text = "LOAD FILE"
-            setTextColor(Color.WHITE); textSize=12f
-            background = GradientDrawable().apply { setColor(Color.parseColor("#333333")); cornerRadius=15f }
-            layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { leftMargin=10 }
-            setOnClickListener { shaderFileLauncher.launch(arrayOf("*/*")) }
+        val loadBtn = Button(this).apply {
+            text = "LOAD"; setTextColor(Color.WHITE); textSize = 11f
+            background = GradientDrawable().apply { setColor(Color.parseColor("#333333")); cornerRadius = 12f }
+            layoutParams = LinearLayout.LayoutParams(0, -1, 0.5f).apply { rightMargin = 10 }
+            setOnClickListener { shaderFileLauncher.launch(arrayOf("text/plain", "application/octet-stream")) }
         }
 
-        topControls.addView(spinner); topControls.addView(fileBtn)
-        content.addView(topControls)
+        val saveBtn = Button(this).apply {
+            text = "SAVE"; setTextColor(Color.WHITE); textSize = 11f
+            background = GradientDrawable().apply { setColor(Color.parseColor("#333333")); cornerRadius = 12f }
+            layoutParams = LinearLayout.LayoutParams(0, -1, 0.5f)
+            setOnClickListener {
+                val code = activeShaderInput?.text.toString()
+                if (code.isNotEmpty()) {
+                    pendingShaderSaveCode = code
+                    shaderSaveLauncher.launch("shader_export.txt")
+                }
+            }
+        }
 
-        // The Code Editor
+        topRow.addView(spinner); topRow.addView(loadBtn); topRow.addView(saveBtn)
+        content.addView(topRow)
+
+        // --- FLEXIBLE CODE EDITOR ---
         activeShaderInput = EditText(this).apply {
-            setTextColor(Color.WHITE); textSize = 12f; typeface = Typeface.MONOSPACE
+            setTextColor(Color.WHITE); textSize = 11f; typeface = Typeface.MONOSPACE
             gravity = Gravity.TOP or Gravity.START
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            background = GradientDrawable().apply { setColor(Color.parseColor("#1A1A1A")); setStroke(2, Color.DKGRAY); cornerRadius = 15f }
-            setPadding(30, 30, 30, 30)
-            layoutParams = LinearLayout.LayoutParams(-1, 600)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#1A1A1A"))
+                setStroke(2, Color.DKGRAY)
+                cornerRadius = 12f
+            }
+            setPadding(25, 25, 25, 25)
+
+            // By setting height to 0 and weight to 1f, it will ALWAYS
+            // expand to fill the available space between topRow and actionBtn
+            // regardless of whether the device is in Portrait or Landscape.
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+
             setHorizontallyScrolling(true)
             if (existingCode != null) setText(existingCode)
         }
-
-        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
-                if (!isEditing) {
-                    activeShaderInput?.setText(BUILTIN_SHADERS[spinnerKeys[pos]])
-                    currentShaderName = spinnerKeys[pos]
-                }
-            }
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
-        }
         content.addView(activeShaderInput)
 
-        // THE MAIN ACTION BUTTON (Always added to content)
+        // --- ACTION BUTTON ---
         val actionBtn = Button(this).apply {
-            text = if (isEditing) "APPLY CHANGES" else "ADD SHADER"
-            setTextColor(Color.WHITE); textSize = 16f; setTypeface(null, Typeface.BOLD)
+            text = if (isEditing) "APPLY CHANGES" else "ADD TO MIXER"
+            setTextColor(Color.WHITE); textSize = 14f; setTypeface(null, Typeface.BOLD)
             background = GradientDrawable().apply {
                 setColor(if (isEditing) Color.parseColor("#228B22") else Color.parseColor("#0066CC"))
                 cornerRadius = 15f
             }
-            layoutParams = LinearLayout.LayoutParams(-1, 120).apply { topMargin = 40 }
+            layoutParams = LinearLayout.LayoutParams(-1, 110).apply { topMargin = 20 }
             setOnClickListener {
                 val code = activeShaderInput?.text.toString().trim()
                 if (code.isNotEmpty()) {
@@ -4476,11 +4507,30 @@ class MainActivity : AppCompatActivity() {
         }
         content.addView(actionBtn)
 
+        // Dropdown logic
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                val selectedCode = BUILTIN_SHADERS[spinnerKeys[pos]]
+                if (!isEditing || activeShaderInput?.text.isNullOrEmpty()) {
+                    activeShaderInput?.setText(selectedCode)
+                    currentShaderName = spinnerKeys[pos]
+                }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
         rootLayout.addView(content); rootLayout.addView(closeBtn)
         dialog.setContentView(rootLayout)
+
+        // This allows the dialog to resize itself when the keyboard appears or orientation changes
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+
         dialog.setOnDismissListener { hideSystemUI(); activeShaderInput = null }
         dialog.show()
     }
+
+
+
 
     private fun setupGeometrySpecifics(parent: LinearLayout) {
         val axisId = "AXIS"
