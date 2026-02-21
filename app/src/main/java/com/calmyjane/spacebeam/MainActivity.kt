@@ -4397,23 +4397,20 @@ class MainActivity : AppCompatActivity() {
             isClickable = true
         }
 
+        // CLOSE BUTTON: Only dismisses the dialog, discarding changes
         val closeBtn = Button(this).apply {
             text = "✕"; textSize = 24f; setTextColor(Color.GRAY); background = null
             layoutParams = FrameLayout.LayoutParams(150, 150).apply {
                 gravity = Gravity.TOP or Gravity.END; topMargin = 10; rightMargin = 10
             }
-            setOnClickListener { dialog.dismiss(); hideSystemUI() }
+            setOnClickListener { dialog.dismiss() }
         }
 
-        // --- RECONFIGURABLE CONTENT CONTAINER ---
-        // Using MATCH_PARENT for both dimensions so it can respond to rotation
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             layoutParams = FrameLayout.LayoutParams(-1, -1).apply {
-                // Horizontal margins stay consistent
                 leftMargin = 50; rightMargin = 50
-                // Vertical margins provide breathing room for the Close button and bottom edge
                 topMargin = 130; bottomMargin = 30
             }
         }
@@ -4424,7 +4421,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.LTGRAY); setPadding(0, 0, 0, 15)
         })
 
-        // --- TOP ROW ---
+        // --- TOP ROW: SELECTOR, LOAD, & SAVE ---
         val topRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 15 }
@@ -4472,18 +4469,32 @@ class MainActivity : AppCompatActivity() {
                 cornerRadius = 12f
             }
             setPadding(25, 25, 25, 25)
-
-            // By setting height to 0 and weight to 1f, it will ALWAYS
-            // expand to fill the available space between topRow and actionBtn
-            // regardless of whether the device is in Portrait or Landscape.
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
-
             setHorizontallyScrolling(true)
+            // Set initial text if provided (only once at creation)
             if (existingCode != null) setText(existingCode)
         }
         content.addView(activeShaderInput)
 
-        // --- ACTION BUTTON ---
+        // --- DROPDOWN LOGIC: Forces update of the text field ---
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            private var isFirstSelection = true
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                // When editing, we ignore the initial "automatic" selection triggered by Spinner on creation
+                if (isEditing && isFirstSelection) {
+                    isFirstSelection = false
+                    return
+                }
+
+                val selectedCode = BUILTIN_SHADERS[spinnerKeys[pos]]
+                activeShaderInput?.setText(selectedCode)
+                currentShaderName = spinnerKeys[pos]
+                isFirstSelection = false
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        // --- APPLY/ADD BUTTON ---
         val actionBtn = Button(this).apply {
             text = if (isEditing) "APPLY CHANGES" else "ADD TO MIXER"
             setTextColor(Color.WHITE); textSize = 14f; setTypeface(null, Typeface.BOLD)
@@ -4501,31 +4512,19 @@ class MainActivity : AppCompatActivity() {
                         attemptAddShaderSource(code, currentShaderName)
                     }
                     dialog.dismiss()
-                    hideSystemUI()
                 }
             }
         }
         content.addView(actionBtn)
 
-        // Dropdown logic
-        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
-                val selectedCode = BUILTIN_SHADERS[spinnerKeys[pos]]
-                if (!isEditing || activeShaderInput?.text.isNullOrEmpty()) {
-                    activeShaderInput?.setText(selectedCode)
-                    currentShaderName = spinnerKeys[pos]
-                }
-            }
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
-        }
-
         rootLayout.addView(content); rootLayout.addView(closeBtn)
         dialog.setContentView(rootLayout)
-
-        // This allows the dialog to resize itself when the keyboard appears or orientation changes
         dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
-        dialog.setOnDismissListener { hideSystemUI(); activeShaderInput = null }
+        dialog.setOnDismissListener {
+            hideSystemUI()
+            activeShaderInput = null
+        }
         dialog.show()
     }
 
