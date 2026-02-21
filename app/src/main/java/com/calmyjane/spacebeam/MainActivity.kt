@@ -6257,48 +6257,38 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
     private var muxer: MediaMuxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
     private var muxerStarted = false
 
-    // --- VIDEO VARIABLES ---
     private var videoEncoder: MediaCodec
     val inputSurface: Surface
     private var videoTrackIndex = -1
 
-    // Expose the "Safe" dimensions to the Renderer
-    val width: Int
-    val height: Int
+    val width: Int = 1920
+    val height: Int = 1080
 
-    // --- AUDIO VARIABLES ---
     private var audioEncoder: MediaCodec? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrackIndex = -1
     private var audioThread: Thread? = null
     private var isRecording = true
 
-    // Audio configuration
     private val sampleRate = 44100
     private val channelCount = 1
     private val audioBitRate = 128000
 
     init {
-        // 1. Calculate Safe Dimensions (Multiple of 16)
-        // We calculate this once and store it in the public properties
-        width = 1920
-        height = 1080
-
-        // 2. Configure Format
         val vFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, 6_000_000)
+            // Increased Bitrate for high-detail kaleidoscope movement
+            setInteger(MediaFormat.KEY_BIT_RATE, 12_000_000)
             setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // Keyframe every 1 second
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
 
-            // This ensures maximum compatibility for playback on the same device.
+            // Optimization: Use Main Profile for better compression/quality ratio
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel3)
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileMain)
+                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
             }
         }
 
-        // Use standard AVC (H.264)
         videoEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         videoEncoder.configure(vFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         inputSurface = videoEncoder.createInputSurface()
@@ -6307,48 +6297,33 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
         setupAudio()
     }
 
-    // ... (Keep the rest of the class: setupAudio, drain, audioLoop, drainEncoder, startMuxerIfReady, release same as before) ...
-    // Just ensure you include the rest of the functions from the previous version here.
-
     private fun setupAudio() {
         try {
             val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
             val bufferSize = minBufferSize * 4
 
-            try {
-                if (ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                    // In a real app, handle this. Here we assume permission is checked in MainActivity
-                    return
-                }
+            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                 audioRecord = AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize)
-            } catch (e: Exception) {
-                Log.e("VideoRecorder", "Audio Init Failed", e)
-                audioRecord = null
-                return
-            }
 
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                audioRecord = null
-                return
-            }
+                if (audioRecord?.state == AudioRecord.STATE_INITIALIZED) {
+                    val aFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channelCount).apply {
+                        setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                        setInteger(MediaFormat.KEY_BIT_RATE, audioBitRate)
+                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+                    }
 
-            val aFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channelCount).apply {
-                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                setInteger(MediaFormat.KEY_BIT_RATE, audioBitRate)
-                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
-            }
+                    audioEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+                    audioEncoder?.configure(aFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    audioEncoder?.start()
 
-            audioEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-            audioEncoder?.configure(aFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            audioEncoder?.start()
-            isRecording = true
-            audioRecord?.startRecording()
-            audioThread = Thread { audioLoop() }
-            audioThread?.start()
+                    isRecording = true
+                    audioRecord?.startRecording()
+                    audioThread = Thread { audioLoop() }
+                    audioThread?.start()
+                }
+            }
         } catch (e: Exception) {
-            Log.e("VideoRecorder", "Audio setup crashed", e)
-            audioEncoder = null
-            audioRecord = null
+            Log.e("VideoRecorder", "Audio setup failed", e)
         }
     }
 
@@ -6356,7 +6331,8 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
         if (endOfStream) {
             try { videoEncoder.signalEndOfInputStream() } catch (e: Exception) { }
         }
-        drainEncoder(videoEncoder, isVideo = true)
+        // Use 0 timeout for video to ensure we don't block the GL thread
+        drainEncoder(videoEncoder, isVideo = true, timeoutUs = 0L)
     }
 
     private fun audioLoop() {
@@ -6376,32 +6352,32 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
                         val pts = (totalBytesRead * 1_000_000L) / (sampleRate * 2)
                         audioEncoder!!.queueInputBuffer(inputBufferIndex, 0, readBytes, pts, 0)
                     }
-                    drainEncoder(audioEncoder!!, isVideo = false)
+                    drainEncoder(audioEncoder!!, isVideo = false, timeoutUs = 10000L)
                 } catch (e: Exception) { }
             }
         }
     }
 
-    private fun drainEncoder(encoder: MediaCodec, isVideo: Boolean) {
-        val timeoutUs = if (isVideo) 0L else 10000L
+    private fun drainEncoder(encoder: MediaCodec, isVideo: Boolean, timeoutUs: Long) {
         val bufferInfo = MediaCodec.BufferInfo()
 
         while (true) {
             val idx = try { encoder.dequeueOutputBuffer(bufferInfo, timeoutUs) } catch (e: Exception) { -1 }
             if (idx == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                if (!isVideo && !isRecording) break
                 break
             } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 synchronized(this) {
-                    if (muxerStarted) return
-                    val newFormat = encoder.outputFormat
-                    if (isVideo) videoTrackIndex = muxer.addTrack(newFormat)
-                    else audioTrackIndex = muxer.addTrack(newFormat)
-                    startMuxerIfReady()
+                    if (!muxerStarted) {
+                        val newFormat = encoder.outputFormat
+                        if (isVideo) videoTrackIndex = muxer.addTrack(newFormat)
+                        else audioTrackIndex = muxer.addTrack(newFormat)
+                        startMuxerIfReady()
+                    }
                 }
             } else if (idx >= 0) {
                 val encodedData = encoder.getOutputBuffer(idx) ?: continue
                 if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) bufferInfo.size = 0
+
                 if (bufferInfo.size != 0) {
                     synchronized(this) {
                         if (muxerStarted) {
@@ -6445,6 +6421,7 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
         } catch (e: Exception) { }
     }
 }
+
 enum class SourceType {
     CAMERA,
     MEDIA_VIDEO,
