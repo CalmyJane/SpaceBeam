@@ -87,6 +87,38 @@ import android.annotation.SuppressLint
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 
+class BpmManager {
+    var bpm = 120f
+        private set
+    private val tapTimes = mutableListOf<Long>()
+    private val MAX_TAPS = 8
+
+    fun tap() {
+        val now = System.currentTimeMillis()
+
+        if (tapTimes.isNotEmpty() && now - tapTimes.last() > 2500) {
+            tapTimes.clear()
+        }
+
+        tapTimes.add(now)
+        if (tapTimes.size > MAX_TAPS) {
+            tapTimes.removeAt(0)
+        }
+
+        if (tapTimes.size >= 3) {
+            val intervals = mutableListOf<Long>()
+            for (i in 1 until tapTimes.size) {
+                intervals.add(tapTimes[i] - tapTimes[i - 1])
+            }
+
+            val avgInterval = intervals.average()
+            if (avgInterval > 0) {
+                bpm = (60000.0 / avgInterval).toFloat().coerceIn(30f, 300f)
+            }
+        }
+    }
+}
+
 class MidiHelper(private val activity: MainActivity) {
     // Standard BLE MIDI UUIDs
     private val MIDI_SERVICE_UUID = java.util.UUID.fromString("03B80E5A-EDE8-4B33-A751-6CE34EC4C700")
@@ -1317,6 +1349,12 @@ open class PropertyControl(
     private var noiseValA: Float = Math.random().toFloat()
     private var noiseValB: Float = Math.random().toFloat()
 
+    var isBeatSynced: Boolean = false
+    var beatMultiplierIndex: Int = 3
+    val beatMultipliers = floatArrayOf(0.125f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f)
+    val multiplierLabels = arrayOf("8 BEATS", "4 BEATS", "2 BEATS", "1 BEAT", "1/2 BEAT", "1/4 BEAT")
+    private var smoothedFrequency: Float = 0f
+
     private var modRateStart = 0f
     private var modRateTarget: Float? = null
     private var modDepthStart = 0f
@@ -1355,9 +1393,9 @@ open class PropertyControl(
             return outMin + (modulatedNormalized * (outMax - outMin))
         }
 
-    data class Snapshot(val value: Int, val active: Boolean, val rate: Int, val depth: Int, val shape: String, val smoothing: Int)
+    data class Snapshot(val value: Int, val active: Boolean, val rate: Int, val depth: Int, val shape: String, val smoothing: Int, val isSynced: Boolean = false, val syncIndex: Int = 3)
 
-    fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name, smoothing)
+    fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name, smoothing, isBeatSynced, beatMultiplierIndex)
 
     fun restore(s: Snapshot, durationSec: Float) {
         if (isLocked) return
@@ -1367,6 +1405,8 @@ open class PropertyControl(
             animateModulation(s.rate.toFloat(), s.depth.toFloat(), durationSec)
         }
         this.smoothing = s.smoothing
+        this.isBeatSynced = s.isSynced
+        this.beatMultiplierIndex = s.syncIndex
     }
 
     fun animateTo(target: Float, durationSec: Float, newShape: String? = null) {
@@ -1473,8 +1513,18 @@ open class PropertyControl(
 
         var currentCalculatedOutput = smoothedNormalized
 
-        if (hasModulation && (smoothedModRate > 1f || smoothedModDepth > 1f)) {
-            val baseSpeed = (smoothedModRate / 1000f + 0.05f).toDouble().pow(3.0).toFloat()
+        if (hasModulation && (smoothedModRate > 1f || smoothedModDepth > 1f || isBeatSynced)) {
+            val baseSpeed: Float
+            if (isBeatSynced && currentContext is MainActivity) {
+                val bpm = (currentContext as MainActivity).bpmManager.bpm
+                val targetHz = (bpm / 60f) * beatMultipliers[beatMultiplierIndex]
+                smoothedFrequency += (targetHz - smoothedFrequency) * baseLerp
+                baseSpeed = smoothedFrequency
+            } else {
+                baseSpeed = (smoothedModRate / 1000f + 0.05f).toDouble().pow(3.0).toFloat()
+                smoothedFrequency = baseSpeed
+            }
+
             lfoPhase += baseSpeed * deltaTime * 2.0 * Math.PI
 
             while (lfoPhase >= 2.0 * Math.PI) {
@@ -1545,10 +1595,18 @@ open class PropertyControl(
                 }
             }
 
-            val curRate = smoothedModRate.toInt()
-            if (curRate != lastSyncedModRate && !isRateDragging) {
-                lastSyncedModRate = curRate
-                modPanelSpeedSeekBar?.post { modPanelSpeedSeekBar?.progress = curRate }
+            val speedLabel = floatingPanel?.findViewWithTag<TextView>("SPEED_LABEL")
+            if (isBeatSynced) {
+                speedLabel?.text = multiplierLabels[beatMultiplierIndex]
+                val curRate = (beatMultiplierIndex * 200).coerceIn(0, 1000)
+                if (!isRateDragging) modPanelSpeedSeekBar?.post { modPanelSpeedSeekBar?.progress = curRate }
+            } else {
+                speedLabel?.text = "SPEED"
+                val curRate = smoothedModRate.toInt()
+                if (curRate != lastSyncedModRate && !isRateDragging) {
+                    lastSyncedModRate = curRate
+                    modPanelSpeedSeekBar?.post { modPanelSpeedSeekBar?.progress = curRate }
+                }
             }
 
             val curDepth = smoothedModDepth.toInt()
@@ -1593,8 +1651,12 @@ open class PropertyControl(
     }
 
     fun updateModRate(v: Int) {
-        modRate = v.coerceIn(0, 1000)
-        preciseModRate = modRate.toFloat()
+        if (isBeatSynced) {
+            beatMultiplierIndex = (v / 200).coerceIn(0, 5)
+        } else {
+            modRate = v.coerceIn(0, 1000)
+            preciseModRate = modRate.toFloat()
+        }
     }
 
     fun updateModDepth(v: Int) {
@@ -1876,13 +1938,40 @@ open class PropertyControl(
 
             contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 2).apply { bottomMargin = 20 }; setBackgroundColor(Color.DKGRAY) })
 
+            val shapeSyncRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 25 }
+            }
+
             shapeBtn = Button(context).apply {
                 text = modShape.name; textSize = 14f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; includeFontPadding = false; setPadding(0, 0, 0, 0)
                 background = GradientDrawable().apply { setColor(Color.parseColor("#444444")); cornerRadius = 10f; setStroke(1, Color.GRAY) }
-                layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 25 }
+                layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { rightMargin = 10 }
                 setOnClickListener { modShape = WaveShape.values()[(modShape.ordinal + 1) % WaveShape.values().size]; text = modShape.name }
             }
-            contentLayout.addView(shapeBtn)
+
+            val syncBtn = Button(context).apply {
+                text = if (isBeatSynced) "SYNC: ON" else "SYNC: OFF"
+                textSize = 14f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; includeFontPadding = false; setPadding(0, 0, 0, 0)
+                background = GradientDrawable().apply {
+                    setColor(if(isBeatSynced) Color.parseColor("#0066CC") else Color.parseColor("#444444"))
+                    cornerRadius = 10f; setStroke(1, Color.GRAY)
+                }
+                layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { leftMargin = 10 }
+                setOnClickListener {
+                    isBeatSynced = !isBeatSynced
+                    text = if (isBeatSynced) "SYNC: ON" else "SYNC: OFF"
+                    background = GradientDrawable().apply {
+                        setColor(if(isBeatSynced) Color.parseColor("#0066CC") else Color.parseColor("#444444"))
+                        cornerRadius = 10f; setStroke(1, Color.GRAY)
+                    }
+                    syncUiElements()
+                }
+            }
+
+            shapeSyncRow.addView(shapeBtn)
+            shapeSyncRow.addView(syncBtn)
+            contentLayout.addView(shapeSyncRow)
 
             modPanelSpeedSeekBar = addSliderToPanel(context, contentLayout, "SPEED", modRate) { updateModRate(it) }
             modPanelSpeedSeekBar?.setOnTouchListener { v, event ->
@@ -1934,6 +2023,7 @@ open class PropertyControl(
         }
         val labelView = TextView(ctx).apply {
             text = name
+            tag = "${name}_LABEL"
             textSize = 10f
             setTextColor(Color.LTGRAY)
             maxLines = 1
@@ -2093,6 +2183,7 @@ open class PropertyControl(
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
     private var pendingShaderSaveCode: String? = null
+    val bpmManager = BpmManager()
 
     val shaderSaveLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null && pendingShaderSaveCode != null) {
@@ -3441,6 +3532,7 @@ class MainActivity : AppCompatActivity() {
 
             // Handle specific Commands
             when (commandId) {
+                "CMD_TAP_TEMPO" -> bpmManager.tap()
                 "CMD_RECORD" -> toggleRecording()
                 "CMD_PHOTO" -> {
                     renderer.capturePhoto()
@@ -4656,6 +4748,36 @@ class MainActivity : AppCompatActivity() {
             }
         }
         updatePlayButtonState()
+        val tapBtn = Button(this).apply {
+            text = "TAP"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#333333"))
+                cornerRadius = 15f
+                setStroke(1, Color.GRAY)
+            }
+            layoutParams = LinearLayout.LayoutParams(110, 110).apply { setMargins(10, 0, 10, 0) }
+        }
+
+        val resetTapTextRunnable = Runnable { tapBtn.text = "TAP" }
+
+        tapBtn.setOnClickListener {
+            bpmManager.tap()
+            tapBtn.text = "${bpmManager.bpm.toInt()}"
+            handler.removeCallbacks(resetTapTextRunnable)
+            handler.postDelayed(resetTapTextRunnable, 2000)
+        }
+
+        tapBtn.setOnLongClickListener {
+            if (midiHelper.isConnected) {
+                showMidiLearnOverlay("CMD_TAP_TEMPO", "TAP TEMPO")
+                true
+            } else false
+        }
+
+        transContainer.addView(tapBtn)
         transContainer.addView(playBtn)
 
         presetPanel.addView(transContainer)
@@ -5464,6 +5586,8 @@ class MainActivity : AppCompatActivity() {
                 snapObj.put("d", snap.depth)
                 snapObj.put("shape", snap.shape)
                 snapObj.put("s", snap.smoothing)
+                snapObj.put("synced", snap.isSynced)
+                snapObj.put("syncIdx", snap.syncIndex)
                 controlsObj.put(key, snapObj)
             }
             rootObj.put("controls", controlsObj)
@@ -5610,7 +5734,9 @@ class MainActivity : AppCompatActivity() {
                             s.optInt("r", 200),
                             s.optInt("d", 0),
                             s.optString("shape", "SINE"),
-                            s.optInt("s", 500)
+                            s.optInt("s", 500),
+                            s.optBoolean("synced", false),
+                            s.optInt("syncIdx", 3)
                         )
                     }
                     presets[idx] = Preset(snapshots, fx, fy, r180, ax)
