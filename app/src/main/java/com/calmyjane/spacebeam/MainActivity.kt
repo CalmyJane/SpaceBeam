@@ -1285,42 +1285,27 @@ open class PropertyControl(
         }
     }
 
-    // --- STATE VARIABLES ---
     @Volatile var value: Int = defaultValue
         private set
     @Volatile var preciseValue: Float = defaultValue.toFloat()
         private set
 
-    // Locking State
     var isLocked: Boolean = defaultLocked
     var subtitle: String? = null
     private var lockButton: Button? = null
 
-    // Default Smoothing: 50%
     var smoothing: Int = 500
-
-    // Base value (slider position) smoothed over time
     private var smoothedNormalized: Float = 0f
-
-    // Final Output (Base + LFO)
     @Volatile private var modulatedNormalized: Float = 0f
 
-    // LFO Smoothing State
     private var smoothedModRate: Float = 200f
     private var smoothedModDepth: Float = 0f
 
-    // Animation / LFO State
     private var animTarget: Float? = null
     private var animStart: Float = 0f
     private var animDuration: Float = 0f
     private var animTime: Float = 0f
     private var isAnimating = false
-
-    // Transition Crossfade State
-    private var isTransitioning = false
-    private var transitionStartVal: Float = 0f
-    private var transitionTotalTime: Float = 0f
-    private var transitionElapsed: Float = 0f
 
     var modRate: Int = 200
     var modDepth: Int = 0
@@ -1337,7 +1322,9 @@ open class PropertyControl(
     private var modDepthStart = 0f
     private var modDepthTarget: Float? = null
 
-    // UI References
+    private var oldModShape: WaveShape? = null
+    private var shapeFadeProgress: Float = 1f
+
     private var sliderView: SliderBox? = null
     private var modIndicator: View? = null
     private var mainRowLayout: LinearLayout? = null
@@ -1349,12 +1336,9 @@ open class PropertyControl(
     private var shapeBtn: Button? = null
     protected var currentContext: Context? = null
 
-    // Interaction Flags
     private var isRateDragging = false
     private var isDepthDragging = false
 
-    // --- OPTIMIZATION FLAGS ---
-    // Prevent flooding the UI thread with redundant posts
     private var lastDisplayedValue: Int = -Int.MAX_VALUE
     private var lastSyncedModRate: Int = -1
     private var lastSyncedModDepth: Int = -1
@@ -1378,11 +1362,6 @@ open class PropertyControl(
     fun restore(s: Snapshot, durationSec: Float) {
         if (isLocked) return
 
-        transitionStartVal = modulatedNormalized
-        transitionTotalTime = durationSec
-        transitionElapsed = 0f
-        isTransitioning = true
-
         animateTo(s.value.toFloat(), durationSec, s.shape)
         if (hasModulation) {
             animateModulation(s.rate.toFloat(), s.depth.toFloat(), durationSec)
@@ -1398,8 +1377,19 @@ open class PropertyControl(
         isAnimating = true
         if (newShape != null) {
             try {
-                modShape = WaveShape.valueOf(newShape)
-                shapeBtn?.text = modShape.name
+                val parsedShape = WaveShape.valueOf(newShape)
+                if (parsedShape != modShape) {
+                    if (oldModShape != null && parsedShape == oldModShape) {
+                        oldModShape = modShape
+                        modShape = parsedShape
+                        shapeFadeProgress = 1f - shapeFadeProgress
+                    } else {
+                        oldModShape = modShape
+                        modShape = parsedShape
+                        shapeFadeProgress = 0f
+                    }
+                    shapeBtn?.post { shapeBtn?.text = modShape.name }
+                }
             } catch (e: Exception) {}
         }
     }
@@ -1411,9 +1401,24 @@ open class PropertyControl(
         modDepthTarget = targetDepth
     }
 
+    private fun getWaveValue(shape: WaveShape, phase: Double): Double {
+        return when (shape) {
+            WaveShape.SINE -> Math.sin(phase) * 0.5 + 0.5
+            WaveShape.TRIANGLE -> { val p = (phase / (2.0 * Math.PI)); if (p < 0.5) p * 2.0 else 2.0 - (p * 2.0) }
+            WaveShape.RAMP -> (phase / (2.0 * Math.PI)) % 1.0
+            WaveShape.WOBBLE_SINE -> { val w = Math.sin(phase + Math.sin(phase)); w * 0.5 + 0.5 }
+            WaveShape.RANDOM_SMOOTH -> {
+                val progress = (phase / (2.0 * Math.PI)).toFloat()
+                val smoothT = (1.0 - Math.cos(progress * Math.PI)) * 0.5
+                (noiseValA * (1.0 - smoothT) + noiseValB * smoothT)
+            }
+            WaveShape.RANDOM_STEP -> noiseValA.toDouble()
+        }
+    }
+
     fun update(deltaTime: Float) {
         val t = if (isAnimating && animDuration > 0) (animTime / animDuration).coerceIn(0f, 1f) else 1f
-        val ease = 1f - (1f - t).toDouble().pow(3.0).toFloat()
+        val ease = t * t * (3.0f - 2.0f * t)
 
         if (isAnimating && animTarget != null) {
             animTime += deltaTime
@@ -1426,7 +1431,6 @@ open class PropertyControl(
                 modRateTarget = null; modDepthTarget = null
                 isAnimating = false
             } else {
-                // SPECIAL CASE: Modular lerp for ANGLE parameters to prevent 360->0 spinning
                 if (id.endsWith("_ANGLE")) {
                     val diff = animTarget!! - animStart
                     val modDiff = ((diff + 500f) % 1000f + 1000f) % 1000f - 500f
@@ -1452,7 +1456,6 @@ open class PropertyControl(
 
         val targetNormalized = (preciseValue / sliderMax.toFloat()).coerceAtLeast(0f)
 
-        // Applying Shortest-Path Smoothing for ANGLE even outside of animations (for touch)
         if (isAnimating || baseLerp >= 1.0f) {
             smoothedNormalized = targetNormalized
         } else {
@@ -1474,54 +1477,44 @@ open class PropertyControl(
             val baseSpeed = (smoothedModRate / 1000f + 0.05f).toDouble().pow(3.0).toFloat()
             lfoPhase += baseSpeed * deltaTime * 2.0 * Math.PI
 
-            if (lfoPhase > 2.0 * Math.PI) {
+            while (lfoPhase >= 2.0 * Math.PI) {
                 lfoPhase -= 2.0 * Math.PI
                 noiseValA = noiseValB
                 noiseValB = Math.random().toFloat()
             }
 
-            val rawWave: Double = when (modShape) {
-                WaveShape.SINE -> sin(lfoPhase) * 0.5 + 0.5
-                WaveShape.TRIANGLE -> { val p = (lfoPhase / (2.0 * Math.PI)); if (p < 0.5) p * 2.0 else 2.0 - (p * 2.0) }
-                WaveShape.RAMP -> (lfoPhase / (2.0 * Math.PI)) % 1.0
-                WaveShape.WOBBLE_SINE -> { val w = sin(lfoPhase + sin(lfoPhase)); w * 0.5 + 0.5 }
-                WaveShape.RANDOM_SMOOTH -> {
-                    val progress = (lfoPhase / (2.0 * Math.PI)).toFloat()
-                    val smoothT = (1.0 - cos(progress * Math.PI)) * 0.5
-                    (noiseValA * (1.0 - smoothT) + noiseValB * smoothT)
+            if (oldModShape != null) {
+                if (animDuration > 0) {
+                    shapeFadeProgress += deltaTime / animDuration
+                } else {
+                    shapeFadeProgress = 1f
                 }
-                WaveShape.RANDOM_STEP -> noiseValA.toDouble()
+
+                if (shapeFadeProgress >= 1f) {
+                    shapeFadeProgress = 1f
+                    oldModShape = null
+                }
+            }
+
+            var rawWave = getWaveValue(modShape, lfoPhase)
+
+            if (oldModShape != null && shapeFadeProgress < 1f) {
+                val oldWave = getWaveValue(oldModShape!!, lfoPhase)
+                val fadeEased = shapeFadeProgress * shapeFadeProgress * (3.0f - 2.0f * shapeFadeProgress)
+                rawWave = oldWave + (rawWave - oldWave) * fadeEased
             }
 
             val depthNorm = (smoothedModDepth / 1000f).toDouble().pow(2.0).toFloat()
 
             if (modMode == ModMode.WRAP) {
-                currentCalculatedOutput = (smoothedNormalized + (rawWave.toFloat() * depthNorm)) % 1.0f
+                val raw = smoothedNormalized + (rawWave.toFloat() * depthNorm)
+                currentCalculatedOutput = ((raw % 1.0f) + 1.0f) % 1.0f
             } else {
                 currentCalculatedOutput = (smoothedNormalized * (1.0f - depthNorm)) + (rawWave.toFloat() * depthNorm)
             }
         }
 
-        if (isTransitioning) {
-            transitionElapsed += deltaTime
-            if (transitionElapsed >= transitionTotalTime) {
-                isTransitioning = false
-                modulatedNormalized = currentCalculatedOutput
-            } else {
-                val progress = (transitionElapsed / transitionTotalTime).coerceIn(0f, 1f)
-                val fadeT = progress * progress * (3.0f - 2.0f * progress)
-
-                if (id.endsWith("_ANGLE")) {
-                    val diff = currentCalculatedOutput - transitionStartVal
-                    val modDiff = ((diff + 0.5f) % 1.0f + 1.0f) % 1.0f - 0.5f
-                    modulatedNormalized = ((transitionStartVal + modDiff * fadeT) + 1.0f) % 1.0f
-                } else {
-                    modulatedNormalized = transitionStartVal + (currentCalculatedOutput - transitionStartVal) * fadeT
-                }
-            }
-        } else {
-            modulatedNormalized = currentCalculatedOutput
-        }
+        modulatedNormalized = currentCalculatedOutput
 
         syncUiElements()
         modIndicator?.postInvalidate()
@@ -1535,15 +1528,12 @@ open class PropertyControl(
     }
 
     private fun syncUiElements() {
-        // SliderBox uses postInvalidate(), safe to call frequently
         if (sliderView != null) {
             val visualT = if (logPower > 1) smoothedNormalized.toDouble().pow(1.0/logPower).toFloat() else smoothedNormalized
             sliderView!!.setVisualState(visualT, formatValue(value))
         }
 
-        // Dirty Checks: Only post to UI thread if values actually changed visually
         if (activeControl == this) {
-            // NEW: Update Big Base Value Indicator if not focused
             if (baseValueInput != null && !baseValueInput!!.hasFocus()) {
                 val currentText = baseValueInput!!.text.toString()
                 if (currentText != value.toString()) {
@@ -1555,7 +1545,6 @@ open class PropertyControl(
                 }
             }
 
-            // SeekBars - Only post if value changed
             val curRate = smoothedModRate.toInt()
             if (curRate != lastSyncedModRate && !isRateDragging) {
                 lastSyncedModRate = curRate
@@ -1583,7 +1572,6 @@ open class PropertyControl(
     }
 
     private fun updateLiveValueUI(v: Int) {
-        // Dirty Check: Only Post if text value changed
         if (activeControl == this && liveValueDisplay != null) {
             if (v != lastDisplayedValue) {
                 lastDisplayedValue = v
@@ -1599,7 +1587,6 @@ open class PropertyControl(
         preciseValue = clamped.toFloat()
         onValueChanged?.invoke(clamped)
 
-        // Explicitly update the text field immediately for +/- button responsiveness
         if (activeControl == this && baseValueInput != null && !baseValueInput!!.hasFocus()) {
             baseValueInput!!.setText(clamped.toString())
         }
@@ -1622,7 +1609,6 @@ open class PropertyControl(
 
     fun reset() {
         stopAnimation()
-        isTransitioning = false
         setProgress(defaultValue)
 
         val ratio = (defaultValue.toFloat() / sliderMax.toFloat()).coerceAtLeast(0f)
@@ -1637,13 +1623,16 @@ open class PropertyControl(
 
             updateSmoothing(500)
             modShape = if (modMode == ModMode.WRAP) WaveShape.RAMP else WaveShape.SINE
+            oldModShape = null
+            shapeFadeProgress = 1f
             updateIndicatorVisuals()
-            shapeBtn?.text = modShape.name
+            shapeBtn?.post { shapeBtn?.text = modShape.name }
         }
     }
 
     fun stopAnimation() {
-        isAnimating = false; animTarget = null; modRateTarget = null; modDepthTarget = null; isTransitioning = false
+        isAnimating = false; animTarget = null; modRateTarget = null; modDepthTarget = null
+        oldModShape = null; shapeFadeProgress = 1f
     }
 
     fun detach() {
@@ -1672,7 +1661,6 @@ open class PropertyControl(
         }
         rootLayout = container
 
-        // --- LABEL BOX ---
         val labelContainer = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1709,28 +1697,24 @@ open class PropertyControl(
         })
         container.addView(labelContainer)
 
-        // --- CUSTOM SLIDER BOX ---
         val sliderRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, 70, 1f) // Matches label height
+            layoutParams = LinearLayout.LayoutParams(0, 70, 1f)
         }
         mainRowLayout = sliderRow
 
         val ratio = (value.toFloat() / sliderMax.toFloat()).coerceIn(0f, 1f)
         val initialT = if (logPower > 1) ratio.toDouble().pow(1.0/logPower).toFloat() else ratio
 
-        // Create Custom Slider View
         sliderView = SliderBox(context).apply {
             setVisualState(initialT, formatValue(value))
-            // Apply margins to mimic original SeekBar padding so it doesn't look too wide/touch edges
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
                 setMargins(15, 0, 15, 0)
             }
         }
         sliderRow.addView(sliderView)
 
-        // --- LFO INDICATOR ---
         if (hasModulation) {
             modIndicator = object : View(context) {
                 private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -1823,15 +1807,13 @@ open class PropertyControl(
                 text = subtitle
                 textSize = 10f
                 setTextColor(Color.GRAY)
-                // --- Marquee Setup ---
                 setSingleLine(true)
                 ellipsize = android.text.TextUtils.TruncateAt.MARQUEE
-                marqueeRepeatLimit = -1 // Infinite scroll
+                marqueeRepeatLimit = -1
                 isFocusable = true
                 isFocusableInTouchMode = true
-                isSelected = true // Required to trigger the marquee animation
-                // ---------------------
-                setPadding(0, 2, 20, 0) // Extra right padding so it doesn't touch the lock button
+                isSelected = true
+                setPadding(0, 2, 20, 0)
             })
         }
         titleRow.addView(titleTextContainer)
@@ -1985,7 +1967,7 @@ open class PropertyControl(
             })
         }
         row.addView(sb)
-        parent.addView(row) // Adds directly to the specified parent container
+        parent.addView(row)
         return sb
     }
 
@@ -2007,7 +1989,6 @@ open class PropertyControl(
             setOnClickListener { action() } }
     }
 
-    // --- INNER CLASS: Custom SliderBox View ---
     private inner class SliderBox(context: Context) : View(context) {
         private var visualProgress = 0f
         private var displayText = ""
@@ -2016,7 +1997,7 @@ open class PropertyControl(
             style = Paint.Style.FILL
         }
         private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#CCCCCC") // Light Grey Fill
+            color = Color.parseColor("#CCCCCC")
             style = Paint.Style.FILL
         }
         private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -2026,7 +2007,7 @@ open class PropertyControl(
         }
         private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
-            textSize = 32f // Will be adjusted in onSizeChanged if needed
+            textSize = 32f
             typeface = Typeface.DEFAULT_BOLD
             textAlign = Paint.Align.CENTER
         }
@@ -2061,16 +2042,13 @@ open class PropertyControl(
             val w = width.toFloat()
             if (w <= 0) return
             val t = (x / w).coerceIn(0f, 1f)
-            // Apply curve logic matching PropertyControl's logic
             val curvedT = if (logPower > 1) t.toDouble().pow(logPower.toDouble()).toFloat() else t
             val calcVal = (curvedT * sliderMax).toInt().coerceIn(min, max)
 
-            // Update PropertyControl
             value = calcVal
             preciseValue = calcVal.toFloat()
             onValueChanged?.invoke(calcVal)
 
-            // Update local visual immediately for responsiveness
             visualProgress = t
             displayText = formatValue(calcVal)
             invalidate()
@@ -2081,10 +2059,8 @@ open class PropertyControl(
             val h = height.toFloat()
             val box = RectF(0f, 0f, w, h)
 
-            // 1. Background
             canvas.drawRoundRect(box, cornerRadius, cornerRadius, bgPaint)
 
-            // 2. Fill (Clipped to progress)
             val fillW = w * visualProgress
             if (fillW > 0) {
                 canvas.save()
@@ -2093,22 +2069,17 @@ open class PropertyControl(
                 canvas.restore()
             }
 
-            // 3. Border
             canvas.drawRoundRect(box, cornerRadius, cornerRadius, strokePaint)
 
-            // 4. Text - Center coordinates
             val cx = w / 2f
             val cy = (h / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f)
 
-            // 5. Draw Text (Double Draw for Contrast)
-            // Pass 1: White text on Dark Background (Right Side)
             canvas.save()
             canvas.clipRect(fillW, 0f, w, h)
             textPaint.color = Color.WHITE
             canvas.drawText(displayText, cx, cy, textPaint)
             canvas.restore()
 
-            // Pass 2: Black text on Light Fill (Left Side)
             canvas.save()
             canvas.clipRect(0f, 0f, fillW, h)
             textPaint.color = Color.BLACK
@@ -6105,7 +6076,7 @@ class MainActivity : AppCompatActivity() {
                     mRotAccum = rotTargetM!!; cRotAccum = rotTargetC!!; isRotAnimating = false
                 } else {
                     val t = (rotAnimTime / rotAnimDuration).coerceIn(0f, 1f)
-                    val ease = 1f - (1f - t).pow(3f)
+                    val ease = t * t * (3f - 2f * t)
                     mRotAccum = rotStartM + (rotTargetM!! - rotStartM) * ease
                     cRotAccum = rotStartC + (rotTargetC!! - rotStartC) * ease
                 }
