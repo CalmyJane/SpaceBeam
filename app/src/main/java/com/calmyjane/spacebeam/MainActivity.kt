@@ -89,7 +89,6 @@ import android.view.inputmethod.EditorInfo
 
 class BpmManager {
     var bpm = 120f
-        private set
     private val tapTimes = mutableListOf<Long>()
     private val MAX_TAPS = 8
 
@@ -578,6 +577,64 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
                 dismiss()
             }
         })
+
+        contentLayout.addView(createStyledDivider())
+
+        // --- TEMPO SECTION ---
+        contentLayout.addView(TextView(activity).apply {
+            text = "TEMPO"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 10, 0, 20)
+        })
+
+        val bpmRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2).apply { bottomMargin = 10 }
+        }
+
+        bpmRow.addView(TextView(activity).apply {
+            text = "CURRENT BPM"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        })
+
+        val bpmInput = EditText(activity).apply {
+            setText(activity.bpmManager.bpm.toInt().toString())
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#222222"))
+                setStroke(2, Color.DKGRAY)
+                cornerRadius = 10f
+            }
+            setPadding(20, 10, 20, 10)
+            layoutParams = LinearLayout.LayoutParams(150, -2)
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setOnEditorActionListener { v, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_DONE) {
+                    val newBpm = v.text.toString().toFloatOrNull()
+                    if (newBpm != null && newBpm > 0) {
+                        activity.bpmManager.bpm = newBpm.coerceIn(30f, 300f)
+                        v.text = activity.bpmManager.bpm.toInt().toString()
+                        Toast.makeText(activity, "BPM set to ${activity.bpmManager.bpm.toInt()}", Toast.LENGTH_SHORT).show()
+                    }
+                    val imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    imm.hideSoftInputFromWindow(v.windowToken, 0)
+                    v.clearFocus()
+                    true
+                } else false
+            }
+        }
+
+        bpmRow.addView(bpmInput)
+        contentLayout.addView(bpmRow)
 
         contentLayout.addView(createStyledDivider())
 
@@ -1177,6 +1234,15 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             }
             elevation = 10f
             setOnClickListener { action() }
+
+            // Force the scroll view to let this click through
+            setOnTouchListener { v, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> v.parent?.requestDisallowInterceptTouchEvent(true)
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.parent?.requestDisallowInterceptTouchEvent(false)
+                }
+                false
+            }
         }
     }
 
@@ -1381,6 +1447,8 @@ open class PropertyControl(
     private var lastSyncedModRate: Int = -1
     private var lastSyncedModDepth: Int = -1
     private var lastSyncedSmoothing: Int = -1
+    private var lastInputSyncValue: Int = -Int.MAX_VALUE
+    private var lastSyncSpeedLabel: String = ""
 
     init {
         val ratio = (defaultValue.toFloat() / sliderMax.toFloat()).coerceAtLeast(0f)
@@ -1580,28 +1648,39 @@ open class PropertyControl(
     private fun syncUiElements() {
         if (sliderView != null) {
             val visualT = if (logPower > 1) smoothedNormalized.toDouble().pow(1.0/logPower).toFloat() else smoothedNormalized
+            // setVisualState uses postInvalidate() internally, so it is inherently thread-safe
             sliderView!!.setVisualState(visualT, formatValue(value))
         }
 
         if (activeControl == this) {
-            if (baseValueInput != null && !baseValueInput!!.hasFocus()) {
-                val currentText = baseValueInput!!.text.toString()
-                if (currentText != value.toString()) {
-                    baseValueInput!!.post {
-                        if (!baseValueInput!!.hasFocus()) {
-                            baseValueInput!!.setText(value.toString())
-                        }
+            // THREAD-SAFE: Sync the base value input box
+            if (value != lastInputSyncValue) {
+                lastInputSyncValue = value
+                val valStr = value.toString()
+                baseValueInput?.post {
+                    if (baseValueInput?.hasFocus() == false) {
+                        baseValueInput?.setText(valStr)
                     }
                 }
             }
 
+            // THREAD-SAFE: Sync the "SPEED" vs "SYNC" label
             val speedLabel = floatingPanel?.findViewWithTag<TextView>("SPEED_LABEL")
             if (isBeatSynced) {
-                speedLabel?.text = multiplierLabels[beatMultiplierIndex]
+                val newLabel = multiplierLabels[beatMultiplierIndex]
+                if (newLabel != lastSyncSpeedLabel) {
+                    lastSyncSpeedLabel = newLabel
+                    speedLabel?.post { speedLabel.text = newLabel }
+                }
+
                 val curRate = (beatMultiplierIndex * 200).coerceIn(0, 1000)
                 if (!isRateDragging) modPanelSpeedSeekBar?.post { modPanelSpeedSeekBar?.progress = curRate }
             } else {
-                speedLabel?.text = "SPEED"
+                if (lastSyncSpeedLabel != "SPEED") {
+                    lastSyncSpeedLabel = "SPEED"
+                    speedLabel?.post { speedLabel.text = "SPEED" }
+                }
+
                 val curRate = smoothedModRate.toInt()
                 if (curRate != lastSyncedModRate && !isRateDragging) {
                     lastSyncedModRate = curRate
@@ -1609,12 +1688,14 @@ open class PropertyControl(
                 }
             }
 
+            // THREAD-SAFE: Sync the Depth Slider
             val curDepth = smoothedModDepth.toInt()
             if (curDepth != lastSyncedModDepth && !isDepthDragging) {
                 lastSyncedModDepth = curDepth
                 modPanelDepthSeekBar?.post { modPanelDepthSeekBar?.progress = curDepth }
             }
 
+            // THREAD-SAFE: Sync the Smoothing Slider
             val curSmooth = smoothing
             if (curSmooth != lastSyncedSmoothing) {
                 lastSyncedSmoothing = curSmooth
@@ -2184,6 +2265,17 @@ open class PropertyControl(
 class MainActivity : AppCompatActivity() {
     private var pendingShaderSaveCode: String? = null
     val bpmManager = BpmManager()
+
+    @SuppressLint("ClickableViewAccessibility")
+    fun applyRobustTouch(view: View) {
+        view.setOnTouchListener { v, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> v.parent?.requestDisallowInterceptTouchEvent(true)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.parent?.requestDisallowInterceptTouchEvent(false)
+            }
+            false // Return false so the normal onClickListener still fires
+        }
+    }
 
     val shaderSaveLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null && pendingShaderSaveCode != null) {
@@ -4881,6 +4973,7 @@ class MainActivity : AppCompatActivity() {
                     true
                 }
             }
+            applyRobustTouch(b)
             btnRow.addView(b)
         }
 
@@ -5094,6 +5187,7 @@ class MainActivity : AppCompatActivity() {
                 expandedGroups.add(title)
             }
         }
+        applyRobustTouch(header)
         groupContainer.addView(header); groupContainer.addView(content)
         return Pair(groupContainer, content)
     }
