@@ -86,6 +86,7 @@ import org.json.JSONArray
 import android.annotation.SuppressLint
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
+import android.util.Range // Add this import
 
 data class PlaylistItem(
     val uri: android.net.Uri,
@@ -3784,8 +3785,10 @@ class MainActivity : AppCompatActivity() {
             setEGLConfigChooser(8, 8, 8, 8, 0, 0)
             setPreserveEGLContextOnPause(true)
             setRenderer(renderer)
-            renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+            // CHANGE THIS FROM RENDERMODE_CONTINUOUSLY to RENDERMODE_WHEN_DIRTY
+            renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         }
+        renderer.startContinuousRendering()
         glView.setOnTouchListener { _, event ->
             // Clear save confirmation if user touches anywhere
             if (event.action == MotionEvent.ACTION_DOWN && saveConfirmBtn.visibility == View.VISIBLE) {
@@ -3851,7 +3854,11 @@ class MainActivity : AppCompatActivity() {
             provider.unbindAll()
             glView.queueEvent {
                 runOnUiThread {
-                    val preview = Preview.Builder().setTargetRotation(Surface.ROTATION_90).build()
+                    // Removed setTargetFramerate to ensure compatibility across all CameraX versions
+                    val preview = Preview.Builder()
+                        .setTargetRotation(Surface.ROTATION_90)
+                        .build()
+
                     preview.setSurfaceProvider { req -> renderer.provideCameraSurface(req) }
                     try { provider.bindToLifecycle(this, currentSelector, preview) } catch (e: Exception) { Log.e("Camera", "Bind failed", e) }
                 }
@@ -3874,6 +3881,7 @@ class MainActivity : AppCompatActivity() {
 
         exoPlayer?.release()
         exoPlayer = null
+        renderer.stopContinuousRendering()
         displayHelper.stop()
     }
 
@@ -5842,7 +5850,7 @@ class MainActivity : AppCompatActivity() {
             7 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_SPEED", 206, "S_FOV", 481, "T_WAVE_STR", 454, "T_WAVE_POS", 20, 375, 1000, "RAMP", "M_ANGLE", 870, "M_ZOOM", 168, "M_TX", 500, 320, 328, "M_TY", 500, 323, 343, "CURVE", 332, 200, 718, "WOBBLE_SINE", "FLUX", 0, 389, 358, "WOBBLE_SINE", "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
             8 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_SHAPE", 1000, 343, 785, "S_FOV", 481, 496, 704, "S_SPEED", 1000, "T_FOG", 12, "T_FOG_H", 0, 200, 1000, "RAMP", "T_FOG_S", 1000, "M_ANGLE", 172, 262, 287, "M_ZOOM", 349, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 469, "C_ZOOM", 1000, 583, 365, "GLOW", 285, "CONTRAST", 786, "VIBRANCE", 828))
             9 -> pFunc(2, base + arrayOf("UTWIRL", 1000, "S_WIDE", 1000, "S_ACTIVITY", 677, "SWIRL_SPEED", 609, "S_FOG", 255, "S_FOG_FALLOFF", 422, "M_ANGLE", 0, 60, 1000, "RAMP", "M_ZOOM", 262, 150, 200, "HUE", 0, 80, 0, "RAMP", "GLOW", 600, "VIBRANCE", 600))
-            else -> pFunc(2, emptyArray())
+            else -> pFunc(2, emptyArray<Any>())
         }
     }
 
@@ -5889,8 +5897,8 @@ class MainActivity : AppCompatActivity() {
         var rot180 = false
 
         // Standard 1080p Resolution
-        private val FIXED_WIDTH = 1920
-        private val FIXED_HEIGHT = 1080
+        private val FIXED_WIDTH = 1280
+        private val FIXED_HEIGHT = 720
         private var viewWidth = 1
         private var viewHeight = 1
 
@@ -5899,6 +5907,23 @@ class MainActivity : AppCompatActivity() {
 
         val sources = java.util.concurrent.CopyOnWriteArrayList<SourceChannel>()
         private val MAX_SOURCES = 8
+
+        private val renderHandler = Handler(Looper.getMainLooper())
+        private val renderRunnable = object : Runnable {
+            override fun run() {
+                ctx.glView.requestRender()
+                // Target ~60fps (16ms per frame)
+                renderHandler.postDelayed(this, 16)
+            }
+        }
+
+        fun startContinuousRendering() {
+            renderHandler.post(renderRunnable)
+        }
+
+        fun stopContinuousRendering() {
+            renderHandler.removeCallbacks(renderRunnable)
+        }
 
         inner class SourceChannel(val type: SourceType, val id: String) : SurfaceTexture.OnFrameAvailableListener {
             @Volatile var isReady = false
@@ -6019,7 +6044,6 @@ class MainActivity : AppCompatActivity() {
             override fun onFrameAvailable(st: SurfaceTexture?) {
                 if (st == layerA.surfaceTexture) layerA.frameAvailable = true
                 if (st == layerB.surfaceTexture) layerB.frameAvailable = true
-                glView.requestRender()
             }
 
             fun release() {
