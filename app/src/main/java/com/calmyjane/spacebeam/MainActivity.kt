@@ -159,7 +159,6 @@ class MediaPickerDialog(
             layoutParams = LinearLayout.LayoutParams(-2, -2).apply { rightMargin = 20 }
         })
 
-        // Fixed Button Layout (No Cropping)
         fun createFilterBtn(textStr: String, mode: Int): Button {
             return Button(activityContext).apply {
                 text = textStr
@@ -332,7 +331,6 @@ class MediaPickerDialog(
                             if (idCol == -1) continue
                             val id = c.getLong(idCol)
 
-                            // Construct a unified virtual path regardless of Android version
                             val rawPath = if (isQ) {
                                 val rp = if (relPathCol >= 0) c.getString(relPathCol) ?: "" else ""
                                 val nm = if (nameCol >= 0) c.getString(nameCol) ?: "" else ""
@@ -889,7 +887,6 @@ class MidiHelper(private val activity: MainActivity) {
                     forcedMode = parts[1]
                 }
 
-                // If specific mode is forced (RATE/DEPTH), use it. Otherwise guess based on prefix.
                 val mode = forcedMode ?: (if (target.startsWith("CMD_") || target.startsWith("PRESET_")) "TRIG" else "VAL")
 
                 // Remove existing bindings for this specific target & mode pair (to avoid duplicates)
@@ -898,8 +895,6 @@ class MidiHelper(private val activity: MainActivity) {
                     bindingMap[oldCC]?.removeIf { it.target == target && it.mode == "VAL" }
                 }
 
-                // Also clean up if this CC was already doing something else?
-                // For simplicity in learning, we usually wipe the CC for this specific binding type.
                 bindingMap[cc]?.removeIf { it.target == target && it.mode == mode }
 
                 addBinding(cc, target, mode, 1.0f, true)
@@ -3368,21 +3363,17 @@ class MainActivity : AppCompatActivity() {
         fun process(renderer: MainActivity.KaleidoscopeRenderer): Int {
             if (!isReady || effects.isEmpty()) return 0
 
-            // 1. First pass: Mixer (Special case, takes no single input texture, uses source list)
-            // We render the first effect into FBO A
             effects[0].render(0, fboA, width, height)
 
             var currentInput = texA
             var currentOutputFbo = fboB
             var currentOutputTex = texB
 
-            // 2. Subsequent passes
             for (i in 1 until effects.size) {
                 val effect = effects[i]
                 if (effect.active) {
                     effect.render(currentInput, currentOutputFbo, width, height)
 
-                    // Output becomes next Input
                     currentInput = currentOutputTex
 
                     // Swap Ping-Pong
@@ -4320,7 +4311,6 @@ class MainActivity : AppCompatActivity() {
             provider.unbindAll()
             glView.queueEvent {
                 runOnUiThread {
-                    // Removed setTargetFramerate to ensure compatibility across all CameraX versions
                     val preview = Preview.Builder()
                         .setTargetRotation(Surface.ROTATION_90)
                         .build()
@@ -4544,7 +4534,6 @@ class MainActivity : AppCompatActivity() {
         }
         overlayHUD.addView(cameraPanel, cameraParams)
 
-        // Removed addContentView here because it's handled in the check at the top
         updateSidebarVisuals()
     }
     fun showMidiLearnOverlay(targetId: String, label: String) {
@@ -6353,8 +6342,8 @@ class MainActivity : AppCompatActivity() {
         var rot180 = false
 
         // Standard 1080p Resolution
-        private val FIXED_WIDTH = 1280
-        private val FIXED_HEIGHT = 720
+        private val FIXED_WIDTH = 1920
+        private val FIXED_HEIGHT = 1080
         private var viewWidth = 1
         private var viewHeight = 1
 
@@ -7580,8 +7569,6 @@ class MediaSourceControl(
                 safeCrossfade = min(currentItem.crossfade, currentItem.durationVal - 0.1f).coerceAtLeast(0f)
             }
 
-            // HUGE OPTIMIZATION: If list size is 1 and crossfade is 0, DO NOT SWAP LAYERS.
-            // Just seek to 0 and natively repeat. This frees up the 2nd hardware decoder!
             if (playlist.size == 1 && safeCrossfade == 0f) {
                 if (timeRemaining <= 0f) {
                     if (currentItem.isVideo) {
