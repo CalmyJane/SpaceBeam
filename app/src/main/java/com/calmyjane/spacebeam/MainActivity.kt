@@ -4454,6 +4454,7 @@ class MainActivity : AppCompatActivity() {
 
 
 
+    @SuppressLint("ClickableViewAccessibility")
     private fun setupOverlayHUD() {
         val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
 
@@ -4471,10 +4472,33 @@ class MainActivity : AppCompatActivity() {
         val recordPanel = createRecordControls()
         val presetPanel = createPresetPanel()
 
-        // Create Orientation Button
+        val tapBtn = Button(this).apply {
+            text = "TAP"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(180, 0x33, 0x33, 0x33))
+                cornerRadius = 15f
+                setStroke(1, Color.argb(150, 128, 128, 128))
+            }
+        }
+        val resetTapTextRunnable = Runnable { tapBtn.text = "TAP" }
+        tapBtn.setOnClickListener {
+            bpmManager.tap()
+            tapBtn.text = "${bpmManager.bpm.toInt()}"
+            handler.removeCallbacks(resetTapTextRunnable)
+            handler.postDelayed(resetTapTextRunnable, 2000)
+        }
+        tapBtn.setOnLongClickListener {
+            if (midiHelper.isConnected) {
+                showMidiLearnOverlay("CMD_TAP_TEMPO", "TAP TEMPO")
+                true
+            } else false
+        }
+
         val orientationBtnView = createOrientationButton()
 
-        // Create Settings Gear Button
         settingsBtn = ImageButton(this).apply {
             setImageResource(android.R.drawable.ic_menu_preferences)
             setColorFilter(Color.WHITE)
@@ -4514,17 +4538,46 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 bottomMargin = 50
                 rightMargin = 44
-                presetPanel.scaleX = 1.0f; presetPanel.scaleY = 1.0f
             } else {
                 gravity = Gravity.BOTTOM or Gravity.END
                 bottomMargin = 15
                 rightMargin = 400
-                presetPanel.scaleX = 1.1f; presetPanel.scaleY = 1.1f
             }
         }
         overlayHUD.addView(presetPanel, presetParams)
 
-        // Add Utility Buttons (Right Side)
+        overlayHUD.addView(tapBtn, FrameLayout.LayoutParams(0, 0))
+
+        recordPanel.viewTreeObserver.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                recordPanel.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                val recW = recordPanel.width
+                val recH = recordPanel.height
+                if (recW == 0 || recH == 0) return
+
+                val recLoc = IntArray(2)
+                recordPanel.getLocationOnScreen(recLoc)
+                val hudLoc = IntArray(2)
+                overlayHUD.getLocationOnScreen(hudLoc)
+
+                val recX = recLoc[0] - hudLoc[0]
+                val recY = recLoc[1] - hudLoc[1]
+
+                val tapSize = 150
+
+                tapBtn.layoutParams = FrameLayout.LayoutParams(tapSize, tapSize).apply {
+                    gravity = Gravity.TOP or Gravity.START
+                    if (isPortrait) {
+                        leftMargin = recX + (recW / 2) - (tapSize / 2)
+                        topMargin = recY - tapSize - 20
+                    } else {
+                        leftMargin = recX + recW + 20
+                        topMargin = recY + (recH / 2) - (tapSize / 2)
+                    }
+                }
+            }
+        })
+
         overlayHUD.addView(settingsBtn)
         overlayHUD.addView(orientationBtnView)
 
@@ -4535,7 +4588,10 @@ class MainActivity : AppCompatActivity() {
         overlayHUD.addView(cameraPanel, cameraParams)
 
         updateSidebarVisuals()
+        applyReadabilityStyle()
     }
+
+
     fun showMidiLearnOverlay(targetId: String, label: String) {
         if (!midiHelper.isConnected) {
             Toast.makeText(this, "Connect Bluetooth MIDI first", Toast.LENGTH_SHORT).show()
@@ -5283,36 +5339,6 @@ class MainActivity : AppCompatActivity() {
         }
         updatePlayButtonState()
 
-        val tapBtn = Button(this).apply {
-            text = "TAP"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setTypeface(null, Typeface.BOLD)
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#333333"))
-                cornerRadius = 15f
-                setStroke(1, Color.GRAY)
-            }
-            layoutParams = LinearLayout.LayoutParams(110, 110).apply { setMargins(10, 0, 10, 0) }
-        }
-
-        val resetTapTextRunnable = Runnable { tapBtn.text = "TAP" }
-
-        tapBtn.setOnClickListener {
-            bpmManager.tap()
-            tapBtn.text = "${bpmManager.bpm.toInt()}"
-            handler.removeCallbacks(resetTapTextRunnable)
-            handler.postDelayed(resetTapTextRunnable, 2000)
-        }
-
-        tapBtn.setOnLongClickListener {
-            if (midiHelper.isConnected) {
-                showMidiLearnOverlay("CMD_TAP_TEMPO", "TAP TEMPO")
-                true
-            } else false
-        }
-
-        transContainer.addView(tapBtn)
         transContainer.addView(playBtn)
 
         presetPanel.addView(transContainer)
