@@ -87,6 +87,14 @@ import android.annotation.SuppressLint
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 
+data class PlaylistItem(
+    val uri: android.net.Uri,
+    val isVideo: Boolean,
+    var name: String,
+    var durationVal: Float, // For images: seconds (0.5 to 30.0). For videos: percent (0.0 to 1.0)
+    var crossfade: Float    // Seconds (0.0 to 15.0)
+)
+
 class BpmManager {
     var bpm = 120f
     private val tapTimes = mutableListOf<Long>()
@@ -1524,7 +1532,7 @@ open class PropertyControl(
         }
     }
 
-    fun update(deltaTime: Float) {
+    open fun update(deltaTime: Float) {
         val t = if (isAnimating && animDuration > 0) (animTime / animDuration).coerceIn(0f, 1f) else 1f
         val ease = t * t * (3.0f - 2.0f * t)
 
@@ -2265,6 +2273,7 @@ open class PropertyControl(
 class MainActivity : AppCompatActivity() {
     private var pendingShaderSaveCode: String? = null
     val bpmManager = BpmManager()
+    var activePlaylistEditor: MediaSourceControl? = null
 
     @SuppressLint("ClickableViewAccessibility")
     fun applyRobustTouch(view: View) {
@@ -3703,78 +3712,52 @@ class MainActivity : AppCompatActivity() {
 
     }
 
-    private val mediaPickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+    val mediaPickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK) {
-            val uri = result.data?.data
-            if (uri != null) {
-                try {
-                    val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    contentResolver.takePersistableUriPermission(uri, flags)
-                } catch (e: Exception) {}
-                attemptAddMediaSource(uri)
+            val intentData = result.data
+            val uris = mutableListOf<android.net.Uri>()
+
+            if (intentData?.clipData != null) {
+                val count = intentData.clipData!!.itemCount
+                for (i in 0 until count) {
+                    uris.add(intentData.clipData!!.getItemAt(i).uri)
+                }
+            } else if (intentData?.data != null) {
+                uris.add(intentData.data!!)
+            }
+
+            if (uris.isNotEmpty()) {
+                uris.forEach { uri ->
+                    try {
+                        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    } catch (e: Exception) {}
+                }
+                attemptAddMediaSource(uris)
             }
         }
     }
 
-    // Replace your existing attemptAddMediaSource with this:
-    private fun attemptAddMediaSource(uri: android.net.Uri) {
-        val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
-        val isImage = mimeType.startsWith("image")
+    private fun attemptAddMediaSource(uris: List<android.net.Uri>) {
+        if (uris.isEmpty()) return
         val uniqueId = "SRC_${System.currentTimeMillis()}"
-        val fileName = getFileNameFromUri(uri)
 
-        if (isImage) {
-            val bitmap = loadScaledBitmap(uri)
-            if (bitmap != null) {
-                val channel = renderer.addSource(SourceType.MEDIA_IMAGE, uniqueId, bitmap)
-                if (channel != null) {
-                    if (bitmap.height > bitmap.width) channel.rotation = -90f else channel.rotation = 0f
-                    val ctrl = MediaSourceControl(uniqueId, "IMAGE", uniqueId, this, null)
-                    ctrl.subtitle = fileName
-                    addDynamicSourceControl(ctrl)
-                    Toast.makeText(this, "Image Added", Toast.LENGTH_SHORT).show()
-                }
-            } else {
-                Toast.makeText(this, "Failed to load image", Toast.LENGTH_SHORT).show()
-            }
+        val playlist = uris.map { uri ->
+            val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+            val isImage = mimeType.startsWith("image")
+            val name = getFileNameFromUri(uri)
+            PlaylistItem(uri, !isImage, name, if (isImage) 3.0f else 1.0f, 1.0f) // 1s crossfade default
+        }.toMutableList()
+
+        if (activePlaylistEditor != null) {
+            activePlaylistEditor?.addItems(playlist)
+            Toast.makeText(this, "Added to playlist", Toast.LENGTH_SHORT).show()
         } else {
-            val channel = renderer.addSource(SourceType.MEDIA_VIDEO, uniqueId)
-
+            val channel = renderer.addSource(SourceType.PLAYLIST, uniqueId)
             if (channel != null) {
-                val player = createOptimizedExoPlayer()
-                player.volume = 0f
-                player.repeatMode = Player.REPEAT_MODE_ONE
-
-                val ctrl = MediaSourceControl(uniqueId, "VIDEO", uniqueId, this@MainActivity, player)
-                ctrl.subtitle = fileName
+                val ctrl = MediaSourceControl(uniqueId, "PLAYLIST", uniqueId, this, playlist)
+                ctrl.subtitle = if (playlist.size == 1) playlist[0].name else "${playlist.size} Items"
                 addDynamicSourceControl(ctrl)
-
-                channel.onSurfaceReady = { surface ->
-                    Log.d("SpaceBeamDebug", "Surface Ready! Attaching to ExoPlayer.")
-                    try {
-                        player.setVideoSurface(surface)
-                        player.setMediaItem(MediaItem.fromUri(uri))
-                        player.prepare()
-                        player.play()
-
-                        player.addListener(object : Player.Listener {
-                            override fun onVideoSizeChanged(videoSize: VideoSize) {
-                                if (videoSize.width > 0) {
-                                    channel.updateSize(videoSize.width, videoSize.height)
-                                    if (videoSize.height > videoSize.width) channel.rotation = -90f else channel.rotation = 0f
-                                }
-                            }
-                            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                                Toast.makeText(this@MainActivity, "Video Error", Toast.LENGTH_SHORT).show()
-                                removeSource(ctrl)
-                            }
-                        })
-                    } catch (e: Exception) {
-                        Log.e("SpaceBeamDebug", "Player Attach Error", e)
-                    }
-                }
-
-                Toast.makeText(this, "Video Added (Loading...)", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Playlist Added", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -4265,7 +4248,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Add this inside MainActivity class
-    private fun loadScaledBitmap(uri: android.net.Uri): Bitmap? {
+    fun loadScaledBitmap(uri: android.net.Uri): Bitmap? {
         Log.d("SpaceBeamDebug", "--- Loading Bitmap: $uri ---")
         try {
             val stream = contentResolver.openInputStream(uri)
@@ -4491,6 +4474,7 @@ class MainActivity : AppCompatActivity() {
                             addCategory(Intent.CATEGORY_OPENABLE)
                             type = "*/*"
                             putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+                            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
                         }
                         mediaPickerLauncher.launch(intent)
                     }
@@ -5919,22 +5903,64 @@ class MainActivity : AppCompatActivity() {
         inner class SourceChannel(val type: SourceType, val id: String) : SurfaceTexture.OnFrameAvailableListener {
             @Volatile var isReady = false
             var onSurfaceReady: ((Surface) -> Unit)? = null
-            var inputTexId = 0
-            var surfaceTexture: SurfaceTexture? = null
-            var surface: Surface? = null
+
             var fboId = 0; var fboTexId = 0
-
             var width = 1920; var height = 1080
-
             var rotation = 0f
             var userFlipX = 1.0f; var userFlipY = 1.0f; var userRot180 = false
-            var bitmap: Bitmap? = null
-            @Volatile var imageUploaded = false
-            @Volatile var frameAvailable = false
-            private val frameSync = Object()
 
             var customShaderCode: String? = null
             var customProgram: Int = 0
+
+            // Playlist & Crossfade specifics
+            @Volatile var baseLayerIndex = 0
+            @Volatile var topLayerAlpha = 0f
+            @Volatile var isEmpty = false
+
+            inner class MediaLayer(val side: Int) {
+                var isVideo = true
+                var oesTexId = 0
+                var tex2dId = 0
+                var surfaceTexture: SurfaceTexture? = null
+                var surface: Surface? = null
+                var bitmap: Bitmap? = null
+
+                @Volatile var imageUploaded = false
+                @Volatile var frameAvailable = false
+
+                var stMatrix = FloatArray(16)
+                var width = 1920
+                var height = 1080
+                var rotation = 0f
+
+                fun init() {
+                    val tex = IntArray(2)
+                    GLES20.glGenTextures(2, tex, 0)
+                    oesTexId = tex[0]
+                    tex2dId = tex[1]
+
+                    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTexId)
+                    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                    surfaceTexture = SurfaceTexture(oesTexId)
+                    surfaceTexture?.setDefaultBufferSize(width, height)
+                    surfaceTexture?.setOnFrameAvailableListener(this@SourceChannel)
+                    surface = Surface(surfaceTexture)
+
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex2dId)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                }
+
+                fun release() {
+                    surface?.release(); surfaceTexture?.release()
+                    val t = IntArray(2) { if (it == 0) oesTexId else tex2dId }
+                    GLES20.glDeleteTextures(2, t, 0)
+                }
+            }
+
+            val layerA = MediaLayer(0)
+            val layerB = MediaLayer(1)
 
             fun init() {
                 if (isReady) return
@@ -5956,162 +5982,125 @@ class MainActivity : AppCompatActivity() {
                 GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, fboTexId, 0)
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-                // Skip Surface generation for Shaders
                 if (type == SourceType.SHADER) {
                     val vSrc = """
                         attribute vec4 p; attribute vec2 t; varying vec2 v;
                         uniform vec2 uFlip; uniform float uRotation;
                         void main() {
-                            gl_Position = p;
-                            vec2 uv = t - 0.5;
-                            uv = uv * uFlip;
+                            gl_Position = p; vec2 uv = t - 0.5; uv = uv * uFlip;
                             float c = cos(uRotation); float s = sin(uRotation);
                             uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
                             v = uv + 0.5;
                         }
                     """.trimIndent()
-
                     val fSrc = ctx.wrapShaderCode(customShaderCode ?: "void main(){ gl_FragColor=vec4(0.0); }")
                     customProgram = ShaderHelper.createProgram(vSrc, fSrc)
-
-                    if (customProgram == 0) {
-                        val errSrc = ctx.wrapShaderCode("void main(){ gl_FragColor=vec4(1.0, 0.0, 0.0, 1.0); }")
-                        customProgram = ShaderHelper.createProgram(vSrc, errSrc)
-                        ctx.runOnUiThread { Toast.makeText(ctx, "Shader Compile Error", Toast.LENGTH_LONG).show() }
-                    }
                     isReady = true
                     return
                 }
 
-                val inp = IntArray(1); GLES20.glGenTextures(1, inp, 0)
-                inputTexId = inp[0]
-                if (inputTexId == 0) return
+                layerA.init()
+                layerB.init()
 
-                if (type == SourceType.MEDIA_IMAGE) {
-                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
-                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-                    imageUploaded = false
-                } else {
-                    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, inputTexId)
-                    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-                    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-                    surfaceTexture = SurfaceTexture(inputTexId)
-                    surfaceTexture?.setDefaultBufferSize(width, height)
-                    surfaceTexture?.setOnFrameAvailableListener(this)
-                    surface = Surface(surfaceTexture)
-                    if (onSurfaceReady != null) {
-                        val s = surface!!
-                        android.os.Handler(android.os.Looper.getMainLooper()).post { onSurfaceReady?.invoke(s) }
-                    }
+                if (type == SourceType.MEDIA_IMAGE) layerA.isVideo = false
+
+                if (onSurfaceReady != null) {
+                    val s = layerA.surface!!
+                    android.os.Handler(android.os.Looper.getMainLooper()).post { onSurfaceReady?.invoke(s) }
                 }
                 isReady = true
             }
 
             fun getSurfaceForInput(): Surface? {
-                if (!isReady && inputTexId == 0) init()
-                return surface
+                if (!isReady) init()
+                return layerA.surface
             }
 
             override fun onFrameAvailable(st: SurfaceTexture?) {
-                synchronized(frameSync) { frameAvailable = true }
+                if (st == layerA.surfaceTexture) layerA.frameAvailable = true
+                if (st == layerB.surfaceTexture) layerB.frameAvailable = true
                 glView.requestRender()
             }
 
             fun release() {
                 isReady = false
                 if (customProgram != 0) { GLES20.glDeleteProgram(customProgram); customProgram = 0 }
-                if (surface != null) { surface?.release(); surface = null }
-                if (surfaceTexture != null) { surfaceTexture?.release(); surfaceTexture = null }
-                if (inputTexId != 0) { val t = IntArray(1){inputTexId}; GLES20.glDeleteTextures(1, t, 0); inputTexId = 0 }
+                layerA.release(); layerB.release()
                 if (fboId != 0) { val f = IntArray(1){fboId}; GLES20.glDeleteFramebuffers(1, f, 0); fboId = 0 }
                 if (fboTexId != 0) { val t = IntArray(1){fboTexId}; GLES20.glDeleteTextures(1, t, 0); fboTexId = 0 }
             }
 
             fun updateSize(w: Int, h: Int) {
                 width = w; height = h
+                layerA.width = w; layerA.height = h
+                layerB.width = w; layerB.height = h
                 if (type != SourceType.MEDIA_IMAGE && type != SourceType.SHADER) {
-                    glView.queueEvent { surfaceTexture?.setDefaultBufferSize(w, h) }
+                    glView.queueEvent { layerA.surfaceTexture?.setDefaultBufferSize(w, h) }
                 }
             }
 
-            fun processToFbo() {
-                if (!isReady) return
-
-                if (type == SourceType.SHADER) {
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-                    GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
-                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                    GLES20.glUseProgram(customProgram)
-
-                    val time1 = GLES20.glGetUniformLocation(customProgram, "iTime")
-                    if (time1 >= 0) GLES20.glUniform1f(time1, globalTime)
-
-                    val time2 = GLES20.glGetUniformLocation(customProgram, "uTime")
-                    if (time2 >= 0) GLES20.glUniform1f(time2, globalTime)
-
-                    val resLoc = GLES20.glGetUniformLocation(customProgram, "iResolution")
-                    if (resLoc >= 0) GLES20.glUniform2f(resLoc, FIXED_WIDTH.toFloat(), FIXED_HEIGHT.toFloat())
-
-                    val flipLoc = GLES20.glGetUniformLocation(customProgram, "uFlip")
-                    if (flipLoc >= 0) GLES20.glUniform2f(flipLoc, userFlipX, userFlipY)
-
-                    val rotLoc = GLES20.glGetUniformLocation(customProgram, "uRotation")
-                    if (rotLoc >= 0) GLES20.glUniform1f(rotLoc, Math.toRadians((rotation + if(userRot180) 180f else 0f).toDouble()).toFloat())
-
-                    ShaderHelper.bindQuad(customProgram)
-                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-                    return
-                }
-
-                val program = if (type == SourceType.MEDIA_IMAGE) copy2dProgram else copyOesProgram
-                val target = if (type == SourceType.MEDIA_IMAGE) GLES20.GL_TEXTURE_2D else GLES11Ext.GL_TEXTURE_EXTERNAL_OES
-
-                if (program == 0) return
-
-                if (type == SourceType.MEDIA_IMAGE) {
-                    if (!imageUploaded && bitmap != null) {
-                        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                        GLES20.glBindTexture(target, inputTexId)
+            private fun updateSurfaces() {
+                // Safely drain Layer A
+                if (layerA.isVideo) {
+                    if (layerA.frameAvailable) {
+                        layerA.frameAvailable = false
                         try {
-                            android.opengl.GLUtils.texImage2D(target, 0, bitmap, 0)
-                            imageUploaded = true
-                        } catch (e: Exception) { }
+                            layerA.surfaceTexture?.updateTexImage()
+                            if (type != SourceType.CAMERA) layerA.surfaceTexture?.getTransformMatrix(layerA.stMatrix)
+                        } catch (e: Exception) {}
                     }
-                    if (!imageUploaded) return
                 } else {
-                    synchronized(frameSync) {
-                        if (frameAvailable) {
-                            try { surfaceTexture?.updateTexImage(); frameAvailable = false } catch (e: Exception) { }
-                        }
-                    }
-                    if (type == SourceType.CAMERA) {
-                        android.opengl.Matrix.setIdentityM(stMatrix, 0)
-                    } else {
-                        surfaceTexture?.getTransformMatrix(stMatrix)
+                    if (!layerA.imageUploaded && layerA.bitmap != null) {
+                        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, layerA.tex2dId)
+                        try { android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, layerA.bitmap, 0); layerA.imageUploaded = true } catch (e: Exception) {}
                     }
                 }
 
-                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-                GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
-                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                // Safely drain Layer B
+                if (layerB.isVideo) {
+                    if (layerB.frameAvailable) {
+                        layerB.frameAvailable = false
+                        try {
+                            layerB.surfaceTexture?.updateTexImage()
+                            if (type != SourceType.CAMERA) layerB.surfaceTexture?.getTransformMatrix(layerB.stMatrix)
+                        } catch (e: Exception) {}
+                    }
+                } else {
+                    if (!layerB.imageUploaded && layerB.bitmap != null) {
+                        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, layerB.tex2dId)
+                        try { android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, layerB.bitmap, 0); layerB.imageUploaded = true } catch (e: Exception) {}
+                    }
+                }
+            }
+
+            private fun drawMediaLayer(layer: MediaLayer, alpha: Float) {
+                val program = if (layer.isVideo) copyOesProgram else copy2dProgram
+                val target = if (layer.isVideo) GLES11Ext.GL_TEXTURE_EXTERNAL_OES else GLES20.GL_TEXTURE_2D
+                if (program == 0) return
+                if (!layer.isVideo && !layer.imageUploaded) return
+
+                if (layer.isVideo && type == SourceType.CAMERA) {
+                    android.opengl.Matrix.setIdentityM(layer.stMatrix, 0)
+                }
 
                 GLES20.glUseProgram(program)
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                GLES20.glBindTexture(target, inputTexId)
+                GLES20.glBindTexture(target, if(layer.isVideo) layer.oesTexId else layer.tex2dId)
+
                 GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uTex"), 0)
+                GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uAlpha"), alpha)
 
                 val extraRot = if (userRot180) 180f else 0f
-                val finalRot = rotation + extraRot
+                val finalRot = rotation + layer.rotation + extraRot
                 val rad = Math.toRadians(-finalRot.toDouble()).toFloat()
                 GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uRotation"), rad)
-
                 GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uFlip"), userFlipX, userFlipY)
 
-                val isSideways = (kotlin.math.abs(rotation) % 180f) > 45f
-                val effectiveW = if (isSideways) height.toFloat() else width.toFloat()
-                val effectiveH = if (isSideways) width.toFloat() else height.toFloat()
+                val isSideways = (kotlin.math.abs(rotation + layer.rotation) % 180f) > 45f
+                val effectiveW = if (isSideways) layer.height.toFloat() else layer.width.toFloat()
+                val effectiveH = if (isSideways) layer.width.toFloat() else layer.height.toFloat()
                 val fboAspect = FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat()
                 val safeH = if (effectiveH > 0) effectiveH else 1.0f
                 val srcAspect = effectiveW / safeH
@@ -6123,11 +6112,52 @@ class MainActivity : AppCompatActivity() {
 
                 if (program == copyOesProgram) {
                     val stLoc = GLES20.glGetUniformLocation(program, "uSTMatrix")
-                    GLES20.glUniformMatrix4fv(stLoc, 1, false, stMatrix, 0)
+                    GLES20.glUniformMatrix4fv(stLoc, 1, false, layer.stMatrix, 0)
                 }
 
                 ShaderHelper.bindQuad(program)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            }
+
+            fun processToFbo() {
+                if (!isReady) return
+
+                updateSurfaces() // Always drain decoders independent of alpha!
+
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+                GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
+
+                if (type == SourceType.SHADER) {
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    GLES20.glUseProgram(customProgram)
+                    GLES20.glUniform1f(GLES20.glGetUniformLocation(customProgram, "iTime"), globalTime)
+                    GLES20.glUniform1f(GLES20.glGetUniformLocation(customProgram, "uTime"), globalTime)
+                    GLES20.glUniform2f(GLES20.glGetUniformLocation(customProgram, "iResolution"), FIXED_WIDTH.toFloat(), FIXED_HEIGHT.toFloat())
+                    GLES20.glUniform2f(GLES20.glGetUniformLocation(customProgram, "uFlip"), userFlipX, userFlipY)
+                    GLES20.glUniform1f(GLES20.glGetUniformLocation(customProgram, "uRotation"), Math.toRadians((rotation + if(userRot180) 180f else 0f).toDouble()).toFloat())
+                    ShaderHelper.bindQuad(customProgram)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                } else if (type == SourceType.PLAYLIST) {
+                    GLES20.glClearColor(0f, 0f, 0f, 1f)
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+                    if (!isEmpty) {
+                        val base = if (baseLayerIndex == 0) layerA else layerB
+                        val top = if (baseLayerIndex == 0) layerB else layerA
+
+                        drawMediaLayer(base, 1.0f)
+
+                        if (topLayerAlpha > 0.01f) {
+                            GLES20.glEnable(GLES20.GL_BLEND)
+                            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                            drawMediaLayer(top, topLayerAlpha)
+                            GLES20.glDisable(GLES20.GL_BLEND)
+                        }
+                    }
+                } else {
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    drawMediaLayer(layerA, 1.0f)
+                }
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
             }
         }
@@ -6135,10 +6165,18 @@ class MainActivity : AppCompatActivity() {
         fun addSource(type: SourceType, id: String, bitmap: Bitmap? = null): SourceChannel? {
             if (sources.size >= MAX_SOURCES) return null
             val ch = SourceChannel(type, id)
-            ch.bitmap = bitmap
+
+            // Assign the bitmap to the new base layer instead of the channel root
+            ch.layerA.bitmap = bitmap
+
             if (bitmap != null) {
-                ch.width = bitmap.width; ch.height = bitmap.height
+                // Update dimensions for both the channel and the layer
+                ch.width = bitmap.width
+                ch.height = bitmap.height
+                ch.layerA.width = bitmap.width
+                ch.layerA.height = bitmap.height
             }
+
             sources.add(ch)
             return ch
         }
@@ -6184,10 +6222,12 @@ class MainActivity : AppCompatActivity() {
         fun startRecording(file: File) { pendingRecordFile = file; recordStartTimeNs = 0 }
         fun setExternalSurface(s: Surface, w: Int, h: Int) { extSurfaceArgs = Triple(s, w, h) }
         fun removeExternalSurface() { extSurfaceArgs = null }
+
         fun provideCameraSurface(req: SurfaceRequest) {
             val cam = getSource("CAM_MAIN") ?: return
-            if (cam.isReady && cam.surface != null) {
-                req.provideSurface(cam.surface!!, ContextCompat.getMainExecutor(ctx)) {}
+            val surf = cam.getSurfaceForInput()
+            if (cam.isReady && surf != null) {
+                req.provideSurface(surf, ContextCompat.getMainExecutor(ctx)) {}
             } else {
                 cam.onSurfaceReady = { surface -> req.provideSurface(surface, ContextCompat.getMainExecutor(ctx)) {} }
             }
@@ -6206,6 +6246,7 @@ class MainActivity : AppCompatActivity() {
             uniform float uRotation;
             uniform vec2 uFlip;
             uniform mat4 uSTMatrix;
+            uniform float uAlpha;
             void main() {
                 vec2 uv = v - 0.5;
                 uv = uv * uScale;
@@ -6217,7 +6258,7 @@ class MainActivity : AppCompatActivity() {
                 uv = abs(mod(uv + 1.0, 2.0) - 1.0);
                 
                 vec2 stUV = (uSTMatrix * vec4(uv, 0.0, 1.0)).xy;
-                gl_FragColor = texture2D(uTex, stUV);
+                gl_FragColor = vec4(texture2D(uTex, stUV).rgb, uAlpha);
             }""".trimIndent()
             copyOesProgram = ShaderHelper.createProgram(vSrc, fSrcCopyOes)
 
@@ -6227,6 +6268,7 @@ class MainActivity : AppCompatActivity() {
             uniform vec2 uScale; 
             uniform float uRotation;
             uniform vec2 uFlip;
+            uniform float uAlpha;
             void main() {
                 vec2 uv = v - 0.5;
                 uv = uv * uScale;
@@ -6237,9 +6279,10 @@ class MainActivity : AppCompatActivity() {
                 uv = uv + 0.5;
                 uv = abs(mod(uv + 1.0, 2.0) - 1.0);
                 
-                gl_FragColor = texture2D(uTex, uv);
+                gl_FragColor = vec4(texture2D(uTex, uv).rgb, uAlpha);
             }""".trimIndent()
             copy2dProgram = ShaderHelper.createProgram(vSrc, fSrcCopy2d)
+
 
             val fSimple = "precision mediump float; varying vec2 v; uniform sampler2D uTex; void main() { gl_FragColor = texture2D(uTex, v); }"
             simpleProgram = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; uniform mat4 uMVPMatrix; void main() { gl_Position = uMVPMatrix * p; v = t; }", fSimple)
@@ -6682,7 +6725,8 @@ enum class SourceType {
     MEDIA_VIDEO,
     MEDIA_IMAGE,
     RTSP,
-    SHADER
+    SHADER,
+    PLAYLIST
 }
 // In MainActivity.kt
 
@@ -6869,14 +6913,486 @@ class MediaSourceControl(
     label: String,
     sourceId: String,
     mainActivity: MainActivity,
-    private val exoPlayer: ExoPlayer?
+    private val playlist: MutableList<PlaylistItem>
 ) : SourcePropertyControl(id, label, 0, sourceId, mainActivity) {
+
+    private var playerA: ExoPlayer? = null
+    private var playerB: ExoPlayer? = null
+
+    // Thread-safe variables shared between Main Thread & GL Thread
+    @Volatile private var activeLayerIndex = 0 // 0 = A, 1 = B
+    @Volatile private var currentIndex = 0
+    @Volatile private var nextIndex = 0
+    @Volatile private var timeInCurrentItem = 0f
+    @Volatile private var isTransitioning = false
+    @Volatile private var currentCrossfadeDuration = 1f
+    @Volatile private var crossfadeProgress = 0f
+
+    var onPlaylistUpdated: (() -> Unit)? = null
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val playbackChecker = object : Runnable {
+        override fun run() {
+            checkPlayback()
+            mainHandler.postDelayed(this, 50)
+        }
+    }
+
+    init {
+        mainActivity.runOnUiThread {
+            playerA = createPlayer()
+            playerB = createPlayer()
+            forceResync()
+            mainHandler.post(playbackChecker)
+        }
+    }
+
+    private fun createPlayer(): ExoPlayer {
+        val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+            .setBufferDurationsMs(10000, 20000, 1000, 1000).build()
+        return ExoPlayer.Builder(mainActivity).setLoadControl(loadControl).build().apply {
+            volume = 0f
+            repeatMode = Player.REPEAT_MODE_OFF
+            addListener(object : Player.Listener {
+                override fun onVideoSizeChanged(videoSize: VideoSize) {
+                    if (videoSize.width > 0) {
+                        val ch = mainActivity.getRendererSource(sourceId)
+                        val layer = if (this@apply == playerA) ch?.layerA else ch?.layerB
+                        layer?.width = videoSize.width
+                        layer?.height = videoSize.height
+                        layer?.rotation = if (videoSize.height > videoSize.width) -90f else 0f
+                    }
+                }
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    startTransition(0f)
+                }
+            })
+        }
+    }
+
+    fun addItems(newItems: List<PlaylistItem>) {
+        synchronized(playlist) {
+            val wasEmpty = playlist.isEmpty()
+            val oldSize = playlist.size
+            playlist.addAll(newItems)
+            subtitle = "${playlist.size} Items"
+
+            if (wasEmpty) {
+                forceResync()
+            } else if (oldSize == 1 && playlist.size > 1) {
+                nextIndex = 1
+                preloadItem(nextIndex, if (activeLayerIndex == 0) 1 else 0, autoPlay = false)
+            }
+        }
+        mainActivity.runOnUiThread { onPlaylistUpdated?.invoke() }
+    }
+
+    private fun forceResync() {
+        synchronized(playlist) {
+            val ch = mainActivity.getRendererSource(sourceId)
+            if (playlist.isEmpty()) {
+                ch?.isEmpty = true
+                playerA?.pause()
+                playerB?.pause()
+                return
+            }
+
+            ch?.isEmpty = false
+            if (currentIndex >= playlist.size) currentIndex = 0
+            nextIndex = if (playlist.size > 1) (currentIndex + 1) % playlist.size else 0
+
+            isTransitioning = false
+            ch?.topLayerAlpha = 0f
+            timeInCurrentItem = 0f
+
+            preloadItem(currentIndex, activeLayerIndex, autoPlay = true)
+
+            if (playlist.size > 1 || playlist.firstOrNull()?.crossfade ?: 0f > 0f) {
+                preloadItem(nextIndex, if (activeLayerIndex == 0) 1 else 0, autoPlay = false)
+            }
+        }
+    }
+
+    private fun preloadItem(index: Int, targetLayer: Int, autoPlay: Boolean) {
+        synchronized(playlist) {
+            if (playlist.isEmpty() || index >= playlist.size) return
+            val item = playlist[index]
+            val ch = mainActivity.getRendererSource(sourceId) ?: return
+            val layer = if (targetLayer == 0) ch.layerA else ch.layerB
+            val player = if (targetLayer == 0) playerA else playerB
+
+            layer.isVideo = item.isVideo
+            if (item.isVideo) {
+                mainActivity.glView.queueEvent {
+                    if (!ch.isReady) ch.init()
+                    mainActivity.runOnUiThread {
+                        player?.setVideoSurface(layer.surface)
+
+                        // FIX: Unconditionally force a fresh 'prepare' to fully reset the decoder buffer.
+                        // This prevents ExoPlayer from holding onto the last frame from a previous loop.
+                        player?.setMediaItem(MediaItem.fromUri(item.uri))
+                        player?.prepare()
+                        player?.seekTo(0)
+
+                        if (autoPlay) {
+                            player?.play()
+                        } else {
+                            player?.pause()
+                        }
+                    }
+                }
+            } else {
+                val bmp = mainActivity.loadScaledBitmap(item.uri)
+                if (bmp != null) {
+                    layer.bitmap = bmp
+                    layer.imageUploaded = false
+                    layer.width = bmp.width
+                    layer.height = bmp.height
+                    layer.rotation = if (bmp.height > bmp.width) -90f else 0f
+                }
+            }
+        }
+    }
+
+    // Runs strictly on the Main UI Thread
+    private fun checkPlayback() {
+        synchronized(playlist) {
+            if (playlist.isEmpty() || isTransitioning) return
+
+            if (currentIndex >= playlist.size) {
+                forceResync()
+                return
+            }
+
+            val currentItem = playlist[currentIndex]
+            var timeRemaining = 0f
+            var safeCrossfade = 0f
+            val player = if (activeLayerIndex == 0) playerA else playerB
+
+            if (currentItem.isVideo) {
+                val state = player?.playbackState
+                val durLong = player?.duration ?: 0L
+
+                if (state == Player.STATE_IDLE || state == Player.STATE_BUFFERING || durLong < 0L) return
+
+                var targetDurationMs = durLong.toFloat() * currentItem.durationVal
+                if (targetDurationMs < 500f) targetDurationMs = 500f
+
+                val currentPos = player?.currentPosition?.toFloat() ?: 0f
+                timeRemaining = (targetDurationMs - currentPos) / 1000f
+
+                safeCrossfade = min(currentItem.crossfade, (targetDurationMs / 1000f) - 0.1f).coerceAtLeast(0f)
+
+                if (state == Player.STATE_ENDED) timeRemaining = 0f
+            } else {
+                timeRemaining = currentItem.durationVal - timeInCurrentItem
+                safeCrossfade = min(currentItem.crossfade, currentItem.durationVal - 0.1f).coerceAtLeast(0f)
+            }
+
+            // HUGE OPTIMIZATION: If list size is 1 and crossfade is 0, DO NOT SWAP LAYERS.
+            // Just seek to 0 and natively repeat. This frees up the 2nd hardware decoder!
+            if (playlist.size == 1 && safeCrossfade == 0f) {
+                if (timeRemaining <= 0f) {
+                    if (currentItem.isVideo) {
+                        player?.seekTo(0)
+                        player?.play()
+                    }
+                    timeInCurrentItem = 0f
+                }
+                return
+            }
+
+            // Normal layer transition logic
+            if (timeRemaining <= safeCrossfade && safeCrossfade > 0f) {
+                startTransition(safeCrossfade)
+            } else if (timeRemaining <= 0f) {
+                startTransition(0f)
+            }
+        }
+    }
+
+    // Runs strictly on the GL Rendering Thread
+    override fun update(deltaTime: Float) {
+        super.update(deltaTime)
+
+        synchronized(playlist) {
+            if (playlist.isEmpty() || currentIndex >= playlist.size) return
+
+            val currentItem = playlist[currentIndex]
+
+            if (!currentItem.isVideo && !isTransitioning) {
+                timeInCurrentItem += deltaTime
+            }
+
+            if (isTransitioning) {
+                val ch = mainActivity.getRendererSource(sourceId)
+                crossfadeProgress += deltaTime / currentCrossfadeDuration
+
+                if (crossfadeProgress >= 1f) {
+                    isTransitioning = false
+
+                    val nextActiveLayer = if (activeLayerIndex == 0) 1 else 0
+                    activeLayerIndex = nextActiveLayer
+                    ch?.baseLayerIndex = nextActiveLayer
+                    ch?.topLayerAlpha = 0f
+
+                    mainActivity.runOnUiThread { endTransition(nextActiveLayer) }
+                } else {
+                    ch?.topLayerAlpha = crossfadeProgress
+                }
+            }
+        }
+    }
+
+    private fun startTransition(duration: Float) {
+        isTransitioning = true
+        currentCrossfadeDuration = duration.coerceAtLeast(0.01f)
+        crossfadeProgress = 0f
+
+        synchronized(playlist) {
+            if (playlist.isEmpty() || nextIndex >= playlist.size) return
+            val nextItem = playlist[nextIndex]
+
+            if (nextItem.isVideo) {
+                val inactivePlayer = if (activeLayerIndex == 0) playerB else playerA
+                inactivePlayer?.play()
+            }
+        }
+    }
+
+    private fun endTransition(newActiveLayer: Int) {
+        val oldPlayer = if (newActiveLayer == 1) playerA else playerB
+        oldPlayer?.pause()
+
+        currentIndex = nextIndex
+        timeInCurrentItem = 0f
+
+        synchronized(playlist) {
+            if (playlist.isNotEmpty()) {
+                nextIndex = (currentIndex + 1) % playlist.size
+                preloadItem(nextIndex, if (newActiveLayer == 0) 1 else 0, autoPlay = false)
+            }
+        }
+    }
+
+    override fun addExtraControls(panel: LinearLayout, context: Context) {
+        super.addExtraControls(panel, context)
+
+        val editBtn = Button(context).apply {
+            text = "EDIT PLAYLIST"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#444444"))
+                cornerRadius = 10f
+                setStroke(1, Color.GRAY)
+            }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110).apply {
+                topMargin = 10; bottomMargin = 10
+            }
+            setOnClickListener { showPlaylistEditor() }
+        }
+
+        if (panel.childCount > 0) {
+            panel.addView(editBtn, panel.childCount - 1)
+        } else {
+            panel.addView(editBtn)
+        }
+    }
+
+    private fun showPlaylistEditor() {
+        mainActivity.activePlaylistEditor = this
+        val dialog = android.app.Dialog(mainActivity, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+
+        val rootLayout = FrameLayout(mainActivity).apply {
+            setBackgroundColor(Color.parseColor("#121212"))
+            layoutParams = ViewGroup.LayoutParams(-1, -1)
+            isClickable = true
+        }
+
+        val closeBtn = Button(mainActivity).apply {
+            text = "✕"; textSize = 24f; setTextColor(Color.GRAY); background = null
+            layoutParams = FrameLayout.LayoutParams(150, 150).apply {
+                gravity = Gravity.TOP or Gravity.END; topMargin = 10; rightMargin = 10
+            }
+            setOnClickListener {
+                mainActivity.activePlaylistEditor = null
+                subtitle = "${playlist.size} Items"
+                dialog.dismiss()
+            }
+        }
+
+        val content = LinearLayout(mainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = FrameLayout.LayoutParams(-1, -1).apply {
+                leftMargin = 50; rightMargin = 50; topMargin = 80; bottomMargin = 30
+            }
+        }
+
+        content.addView(TextView(mainActivity).apply {
+            text = "PLAYLIST EDITOR"; textSize = 18f; setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY); setPadding(0, 0, 0, 30)
+        })
+
+        val listContainer = LinearLayout(mainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(-1, -2)
+        }
+
+        fun refreshList() {
+            listContainer.removeAllViews()
+            synchronized(playlist) {
+                if (playlist.isEmpty()) {
+                    listContainer.addView(TextView(mainActivity).apply {
+                        text = "Playlist is empty."; setTextColor(Color.DKGRAY); gravity = Gravity.CENTER; setPadding(0,50,0,50)
+                    })
+                    return
+                }
+
+                playlist.forEachIndexed { i, item ->
+                    val row = LinearLayout(mainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        background = GradientDrawable().apply { setColor(Color.parseColor("#222222")); cornerRadius = 15f }
+                        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 15 }
+                        setPadding(20, 20, 20, 20)
+                    }
+
+                    val infoCol = LinearLayout(mainActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+                    }
+
+                    infoCol.addView(TextView(mainActivity).apply {
+                        text = "${i + 1}. ${item.name}"; setTextColor(Color.WHITE); textSize = 14f; setTypeface(null, Typeface.BOLD)
+                    })
+
+                    val isVid = item.isVideo
+                    val durMax = if (isVid) 100 else 300
+                    val durMin = if (isVid) 10 else 5
+                    val durCur = if (isVid) (item.durationVal * 100).toInt() else (item.durationVal * 10).toInt()
+
+                    val durLabel = TextView(mainActivity).apply {
+                        text = "Duration: " + if(isVid) "$durCur%" else "${durCur/10f}s"
+                        setTextColor(Color.LTGRAY); textSize = 10f; setPadding(0, 10, 0, 0)
+                    }
+                    val durSeek = SeekBar(mainActivity).apply {
+                        max = durMax - durMin; progress = durCur - durMin
+                        setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                            override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
+                                val realVal = p + durMin
+                                if (isVid) item.durationVal = realVal / 100f else item.durationVal = realVal / 10f
+                                durLabel.text = "Duration: " + if(isVid) "$realVal%" else "${realVal/10f}s"
+                            }
+                            override fun onStartTrackingTouch(s: SeekBar?) {}
+                            override fun onStopTrackingTouch(s: SeekBar?) {}
+                        })
+                    }
+                    infoCol.addView(durLabel); infoCol.addView(durSeek)
+
+                    val xfCur = (item.crossfade * 10).toInt()
+                    val xfLabel = TextView(mainActivity).apply {
+                        text = "Crossfade: ${xfCur/10f}s"; setTextColor(Color.LTGRAY); textSize = 10f; setPadding(0, 10, 0, 0)
+                    }
+                    val xfSeek = SeekBar(mainActivity).apply {
+                        max = 150; progress = xfCur
+                        setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                            override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
+                                item.crossfade = p / 10f
+                                xfLabel.text = "Crossfade: ${p/10f}s"
+                            }
+                            override fun onStartTrackingTouch(s: SeekBar?) {}
+                            override fun onStopTrackingTouch(s: SeekBar?) {}
+                        })
+                    }
+                    infoCol.addView(xfLabel); infoCol.addView(xfSeek)
+                    row.addView(infoCol)
+
+                    val btnCol = LinearLayout(mainActivity).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(120, -2) }
+
+                    btnCol.addView(Button(mainActivity).apply {
+                        text = "▲"; setTextColor(Color.WHITE); background = null; setPadding(0,0,0,0); layoutParams = LinearLayout.LayoutParams(-1, 60)
+                        setOnClickListener {
+                            synchronized(playlist) {
+                                if (i > 0) {
+                                    java.util.Collections.swap(playlist, i, i - 1)
+                                    forceResync()
+                                    refreshList()
+                                }
+                            }
+                        }
+                    })
+                    btnCol.addView(Button(mainActivity).apply {
+                        text = "▼"; setTextColor(Color.WHITE); background = null; setPadding(0,0,0,0); layoutParams = LinearLayout.LayoutParams(-1, 60)
+                        setOnClickListener {
+                            synchronized(playlist) {
+                                if (i < playlist.size - 1) {
+                                    java.util.Collections.swap(playlist, i, i + 1)
+                                    forceResync()
+                                    refreshList()
+                                }
+                            }
+                        }
+                    })
+                    btnCol.addView(Button(mainActivity).apply {
+                        text = "✕"; setTextColor(Color.parseColor("#FF6666")); background = null; setPadding(0,0,0,0); layoutParams = LinearLayout.LayoutParams(-1, 60)
+                        setOnClickListener {
+                            synchronized(playlist) {
+                                playlist.removeAt(i)
+                                subtitle = "${playlist.size} Items"
+                                forceResync()
+                                refreshList()
+                            }
+                        }
+                    })
+                    row.addView(btnCol)
+                    listContainer.addView(row)
+                }
+            }
+        }
+
+        // Link the auto-refresh callback
+        onPlaylistUpdated = { mainActivity.runOnUiThread { refreshList() } }
+        refreshList()
+
+        val scroller = ScrollView(mainActivity).apply {
+            layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
+            addView(listContainer)
+        }
+        content.addView(scroller)
+
+        val addBtn = Button(mainActivity).apply {
+            text = "ADD MEDIA"
+            setTextColor(Color.WHITE); textSize = 14f; setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply { setColor(Color.parseColor("#0066CC")); cornerRadius = 15f }
+            layoutParams = LinearLayout.LayoutParams(-1, 120).apply { topMargin = 20 }
+            setOnClickListener {
+                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                }
+                mainActivity.mediaPickerLauncher.launch(intent)
+            }
+        }
+        content.addView(addBtn)
+
+        rootLayout.addView(content); rootLayout.addView(closeBtn)
+        dialog.setContentView(rootLayout)
+        dialog.setOnDismissListener { mainActivity.hideSystemUI() }
+        dialog.show()
+    }
+
     override fun onRemove() {
-        try {
-            exoPlayer?.stop()
-            exoPlayer?.release()
-        } catch(e: Exception) {
-            e.printStackTrace()
+        mainHandler.removeCallbacks(playbackChecker)
+        mainActivity.runOnUiThread {
+            try {
+                playerA?.stop(); playerA?.release()
+                playerB?.stop(); playerB?.release()
+            } catch(e: Exception) {}
         }
     }
 }
