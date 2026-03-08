@@ -3254,7 +3254,7 @@ class MainActivity : AppCompatActivity() {
     )
     private val presets = mutableMapOf<Int, Preset>()
     private var pendingSaveIndex: Int? = null
-    private var transitionMs: Long = 1000L
+    private var transitionMs: Long = 2500L
     private var transitionStartTime: Long = 0L
     private var isHudVisible = true
     private var isMenuExpanded = true
@@ -5247,7 +5247,6 @@ class MainActivity : AppCompatActivity() {
             clipToPadding = false
         }
 
-        // --- Transition Time + Play Button Row ---
         val transContainer = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -5260,15 +5259,15 @@ class MainActivity : AppCompatActivity() {
         if (transCtrl == null) {
             transCtrl = PropertyControl(
                 transId, "TIME",
-                min = 0, max = 300000, sliderMax = 30000,
-                defaultValue = 1000,
+                min = 0, max = 30000, sliderMax = 30000,
+                defaultValue = 2500,
                 layoutStyle = PropertyControl.LayoutStyle.ROW,
                 iconResId = android.R.drawable.ic_menu_recent_history,
                 includeInPreset = false,
                 hasModulation = false,
-                logPower = 3,
+                logPower = 2,
                 showValue = true,
-                allowSmoothing = false, // DISABLE SMOOTHING FOR TRANSITION TIME
+                allowSmoothing = false,
                 valueFormatter = { "%.1fs".format(it / 1000f) }
             ) { transitionMs = it.toLong() }
             controls.add(transCtrl)
@@ -5279,7 +5278,6 @@ class MainActivity : AppCompatActivity() {
         transCtrl.attachTo(this, sliderWrapper)
         transContainer.addView(sliderWrapper)
 
-        // Play Button with Long Press Mapping
         playBtn = ImageButton(this).apply {
             setImageDrawable(createPlayIcon(isAutoPlaying))
             background = null
@@ -5295,6 +5293,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         updatePlayButtonState()
+
         val tapBtn = Button(this).apply {
             text = "TAP"
             textSize = 12f
@@ -5329,7 +5328,6 @@ class MainActivity : AppCompatActivity() {
 
         presetPanel.addView(transContainer)
 
-        // --- Preset Buttons ---
         val presetRow = FrameLayout(this)
         val scroller = HorizontalScrollView(this).apply {
             isFillViewport = true
@@ -5347,32 +5345,28 @@ class MainActivity : AppCompatActivity() {
         presetAnimators.values.forEach { it.cancel() }
         presetAnimators.clear()
 
-        // Container for the Long-Press Option Buttons (Save/Map)
         val optionsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             visibility = View.GONE
             background = GradientDrawable().apply { setColor(Color.argb(240, 0,0,0)); cornerRadius = 15f }
-            // Increased height from 110 to 120 to fit text comfortably
             layoutParams = FrameLayout.LayoutParams(-2, 120, Gravity.CENTER)
             elevation = 100f
             isClickable = true
         }
 
-        // We need references to add buttons dynamically
         fun showOptionsForPreset(idx: Int) {
             optionsContainer.removeAllViews()
             pendingSaveIndex = idx
 
-            // SAVE BUTTON
             optionsContainer.addView(Button(this).apply {
                 text = "SAVE $idx"
                 setTextColor(Color.BLACK)
-                textSize = 14f // Increased text size slightly
+                textSize = 14f
                 setTypeface(null, Typeface.BOLD)
                 gravity = Gravity.CENTER
-                includeFontPadding = false // Important for centering
-                setPadding(0, 0, 0, 0) // Remove padding to prevent clipping
+                includeFontPadding = false
+                setPadding(0, 0, 0, 0)
                 background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = 12f }
                 layoutParams = LinearLayout.LayoutParams(180, 100).apply { setMargins(15,10,10,10) }
                 setOnClickListener {
@@ -5381,7 +5375,6 @@ class MainActivity : AppCompatActivity() {
                 }
             })
 
-            // MAP BUTTON (Only if connected)
             if (midiHelper.isConnected) {
                 optionsContainer.addView(Button(this).apply {
                     text = "MAP"
@@ -5436,7 +5429,7 @@ class MainActivity : AppCompatActivity() {
         presetRow.addView(scroller)
         presetRow.addView(optionsContainer)
 
-        saveConfirmBtn = Button(this) // Dummy ref
+        saveConfirmBtn = Button(this)
 
         presetPanel.addView(presetRow)
         return presetPanel
