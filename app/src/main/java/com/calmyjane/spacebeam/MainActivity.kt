@@ -5908,21 +5908,32 @@ class MainActivity : AppCompatActivity() {
         val sources = java.util.concurrent.CopyOnWriteArrayList<SourceChannel>()
         private val MAX_SOURCES = 8
 
-        private val renderHandler = Handler(Looper.getMainLooper())
-        private val renderRunnable = object : Runnable {
-            override fun run() {
-                ctx.glView.requestRender()
-                // Target ~60fps (16ms per frame)
-                renderHandler.postDelayed(this, 16)
+        private var isContinuousRendering = false
+
+        private val frameCallback = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (isContinuousRendering) {
+                    ctx.glView.requestRender()
+                    // Hooks directly into the display's hardware refresh rate
+                    Choreographer.getInstance().postFrameCallback(this)
+                }
             }
         }
 
         fun startContinuousRendering() {
-            renderHandler.post(renderRunnable)
+            if (!isContinuousRendering) {
+                isContinuousRendering = true
+                ctx.runOnUiThread {
+                    Choreographer.getInstance().postFrameCallback(frameCallback)
+                }
+            }
         }
 
         fun stopContinuousRendering() {
-            renderHandler.removeCallbacks(renderRunnable)
+            isContinuousRendering = false
+            ctx.runOnUiThread {
+                Choreographer.getInstance().removeFrameCallback(frameCallback)
+            }
         }
 
         inner class SourceChannel(val type: SourceType, val id: String) : SurfaceTexture.OnFrameAvailableListener {
