@@ -3554,45 +3554,43 @@ class MainActivity : AppCompatActivity() {
 
         override fun init() {
             val fSrc = """
-            precision highp float; varying vec2 v; uniform sampler2D uTex;
+            precision highp float; 
+            varying vec2 v; 
+            uniform sampler2D uTex;
             uniform float uAx, uAmt, uZoom, uRatio;
+        
             void main() {
+                // Use a slight inset to avoid the absolute edge of the texture 
+                // where the 1px wrap line usually lives.
                 vec2 uv = v - 0.5;
                 
-                // Transition logic for Amount (Normal vs Kaleidoscope)
                 float zoomAmt = mix(1.0, 2.0, uAmt);
                 float shift = mix(0.5, 0.0, uAmt);
                 
-                // Apply internal Zoom Out
-                // uZoom starts at 1.0 and increases, so dividing by it zooms OUT.
                 uv *= uZoom;
-                
                 uv *= zoomAmt;
                 
-                // Radial Logic (Axis > 2)
                 if (uAx > 2.1) {
                     vec2 rUV = uv;
                     rUV.x *= uRatio;
-                    
                     float r = length(rUV);
                     float angle = atan(rUV.y, rUV.x);
-                    
                     float slice = 6.2831853 / uAx;
                     float a = mod(angle, slice);
                     a = abs(a - slice * 0.5);
-                    
                     rUV = vec2(cos(a), sin(a)) * r;
                     rUV.x /= uRatio;
-                    
-                    uv = mix(uv, rUV, smoothstep(0.0, 1.0, uAmt));
+                    uv = mix(uv, rUV, uAmt);
                 }
                 
-                // Mirroring Logic
                 uv += shift;
+        
+                // CLEAN MIRROR: This avoids the 'mod' jump by using a continuous triangle wave
+                // 0.0001 offset pushes the "seam" into a sub-pixel area
+                vec2 mirroredUV = 1.0 - abs(fract(uv * 0.5 + 0.0001) * 2.0 - 1.0);
                 
-                // INFINITE MIRROR REPEAT
-                // This replaces the clamp. It reflects the coordinates whenever they cross 0.0 or 1.0.
-                vec2 mirroredUV = abs(mod(uv - 1.0, 2.0) - 1.0);
+                // Final safety clamp to keep sampler away from the 1.0/0.0 edge
+                mirroredUV = clamp(mirroredUV, 0.002, 0.998);
                 
                 gl_FragColor = texture2D(uTex, mirroredUV);
             }"""
