@@ -3397,6 +3397,9 @@ class MainActivity : AppCompatActivity() {
     // SHADERS
     class MixerEffect(val activity: MainActivity) : MainActivity.ShaderEffect("FX_MIXER", "MIXER", activity) {
         private var prog = 0
+        private var locCount = -1
+        private val locTex = IntArray(8)
+        private val locMix = IntArray(8)
         override fun init() {
             val fSrc = """
             precision mediump float; varying vec2 v; 
@@ -3415,6 +3418,11 @@ class MainActivity : AppCompatActivity() {
             }"""
             // Use ShaderHelper here
             prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+            locCount = GLES20.glGetUniformLocation(prog, "uCount")
+            for (i in 0 until 8) {
+                locTex[i] = GLES20.glGetUniformLocation(prog, "uTex[$i]")
+                locMix[i] = GLES20.glGetUniformLocation(prog, "uMix[$i]")
+            }
         }
 
         override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
@@ -3423,15 +3431,14 @@ class MainActivity : AppCompatActivity() {
 
             val sources = activity.renderer.sources
             val cnt = min(sources.size, 8)
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uCount"), cnt)
+            GLES20.glUniform1i(locCount, cnt)
 
             for(i in 0 until cnt) {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + i); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, sources[i].fboTexId)
-                GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex[$i]"), i)
+                GLES20.glUniform1i(locTex[i], i)
                 val v = activity.controlsMap[sources[i].id]?.computedValue ?: 0f
-                GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uMix[$i]"), v)
+                GLES20.glUniform1f(locMix[i], v)
             }
-            // Use ShaderHelper here
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
         override fun release() { GLES20.glDeleteProgram(prog) }
@@ -3439,6 +3446,9 @@ class MainActivity : AppCompatActivity() {
 
     class TransformEffect(idPrefix: String, title: String, activity: MainActivity) : MainActivity.ShaderEffect(idPrefix, title, activity) {
         private var prog = 0
+        private var locTex = -1; private var locRatio = -1; private var locZ = -1; private var locR = -1
+        private var locTx = -1; private var locTy = -1; private var locTiX = -1; private var locTiY = -1
+        private var locWarp = -1; private var locRGB = -1
         private val pZoom = "${idPrefix}_ZOOM"
         private val pAngle = "${idPrefix}_ANGLE"
         private val pTx = "${idPrefix}_TX"
@@ -3499,6 +3509,11 @@ class MainActivity : AppCompatActivity() {
                 gl_FragColor = vec4(col, 1.0);
             }"""
             prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+            locTex = GLES20.glGetUniformLocation(prog, "uTex"); locRatio = GLES20.glGetUniformLocation(prog, "uRatio")
+            locZ = GLES20.glGetUniformLocation(prog, "uZ"); locR = GLES20.glGetUniformLocation(prog, "uR")
+            locTx = GLES20.glGetUniformLocation(prog, "uTx"); locTy = GLES20.glGetUniformLocation(prog, "uTy")
+            locTiX = GLES20.glGetUniformLocation(prog, "uTiX"); locTiY = GLES20.glGetUniformLocation(prog, "uTiY")
+            locWarp = GLES20.glGetUniformLocation(prog, "uWarp"); locRGB = GLES20.glGetUniformLocation(prog, "uRGB")
         }
 
         override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
@@ -3515,19 +3530,16 @@ class MainActivity : AppCompatActivity() {
             val rawZoom = mainActivity.controlsMap[pZoom]?.computedValue ?: 1f
             val correctedZoom = rawZoom * 0.7067f
 
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
-
-            // Pass the corrected zoom value
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uZ"), correctedZoom)
-
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uR"), Math.toRadians(angle).toFloat())
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTx"), mainActivity.controlsMap[pTx]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTy"), mainActivity.controlsMap[pTy]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTiX"), (mainActivity.controlsMap[pTiltX]?.computedValue ?: 0f) * 1.5f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTiY"), (mainActivity.controlsMap[pTiltY]?.computedValue ?: 0f) * 1.5f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWarp"), mainActivity.controlsMap["WARP"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRGB"), mainActivity.controlsMap[pRgb]?.computedValue ?: 0f)
+            GLES20.glUniform1i(locTex, 0)
+            GLES20.glUniform1f(locRatio, w.toFloat()/h.toFloat())
+            GLES20.glUniform1f(locZ, correctedZoom)
+            GLES20.glUniform1f(locR, Math.toRadians(angle).toFloat())
+            GLES20.glUniform1f(locTx, mainActivity.controlsMap[pTx]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locTy, mainActivity.controlsMap[pTy]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locTiX, (mainActivity.controlsMap[pTiltX]?.computedValue ?: 0f) * 1.5f)
+            GLES20.glUniform1f(locTiY, (mainActivity.controlsMap[pTiltY]?.computedValue ?: 0f) * 1.5f)
+            GLES20.glUniform1f(locWarp, mainActivity.controlsMap["WARP"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locRGB, mainActivity.controlsMap[pRgb]?.computedValue ?: 0f)
 
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -3536,6 +3548,8 @@ class MainActivity : AppCompatActivity() {
 
     class KaleidoscopeEffect(activity: MainActivity) : MainActivity.ShaderEffect("FX_KALEIDO", "KALEIDOSCOPE", activity) {
         private var prog = 0
+        private var locTex = -1; private var locAx = -1; private var locAmt = -1
+        private var locZoom = -1; private var locRatio = -1
         init {
             addControl(PropertyControl("AXIS", "AXIS", min=1, max=25, sliderMax=25, defaultValue=2, includeInPreset=true, defaultLocked=true, allowSmoothing=false))
             addControl(PropertyControl("K_AMT", "AMOUNT", defaultValue=1000, outMin=0f, outMax=1f, hasModulation=true))
@@ -3586,18 +3600,19 @@ class MainActivity : AppCompatActivity() {
                 gl_FragColor = texture2D(uTex, mirroredUV);
             }"""
             prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+            locTex = GLES20.glGetUniformLocation(prog, "uTex"); locAx = GLES20.glGetUniformLocation(prog, "uAx")
+            locAmt = GLES20.glGetUniformLocation(prog, "uAmt"); locZoom = GLES20.glGetUniformLocation(prog, "uZoom")
+            locRatio = GLES20.glGetUniformLocation(prog, "uRatio")
         }
 
         override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
-
-            val axis = mainActivity.controlsMap["AXIS"]?.value?.toFloat() ?: 2f
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uAx"), axis)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uAmt"), mainActivity.controlsMap["K_AMT"]?.computedValue ?: 1f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uZoom"), mainActivity.controlsMap["K_ZOOM"]?.computedValue ?: 1f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
+            GLES20.glUniform1i(locTex, 0)
+            GLES20.glUniform1f(locAx, mainActivity.controlsMap["AXIS"]?.value?.toFloat() ?: 2f)
+            GLES20.glUniform1f(locAmt, mainActivity.controlsMap["K_AMT"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(locZoom, mainActivity.controlsMap["K_ZOOM"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(locRatio, w.toFloat()/h.toFloat())
 
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -3607,6 +3622,10 @@ class MainActivity : AppCompatActivity() {
     class TunnelEffect(activity: MainActivity) : MainActivity.ShaderEffect("FX_TUNNEL", "3D TUNNEL", activity) {
         private var prog = 0
         private var scrollAccum = 0.0f
+        private var locTex = -1; private var locRatio = -1; private var locMix = -1; private var locShape = -1
+        private var locFov = -1; private var locScroll = -1; private var locHStr = -1; private var locHPos = -1
+        private var locWStr = -1; private var locWPos = -1; private var locCurve = -1; private var locTwist = -1
+        private var locFlux = -1; private var locFogD = -1; private var locFogH = -1; private var locFogS = -1; private var locFogV = -1
 
         init {
             addControl(PropertyControl("3D_MIX", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
@@ -3733,34 +3752,43 @@ class MainActivity : AppCompatActivity() {
                 gl_FragColor = col;
             }"""
             prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+            locTex = GLES20.glGetUniformLocation(prog, "uTex"); locRatio = GLES20.glGetUniformLocation(prog, "uRatio")
+            locMix = GLES20.glGetUniformLocation(prog, "uMix"); locShape = GLES20.glGetUniformLocation(prog, "uShape")
+            locFov = GLES20.glGetUniformLocation(prog, "uFov"); locScroll = GLES20.glGetUniformLocation(prog, "uScroll")
+            locHStr = GLES20.glGetUniformLocation(prog, "uHStr"); locHPos = GLES20.glGetUniformLocation(prog, "uHPos")
+            locWStr = GLES20.glGetUniformLocation(prog, "uWStr"); locWPos = GLES20.glGetUniformLocation(prog, "uWPos")
+            locCurve = GLES20.glGetUniformLocation(prog, "uCurve"); locTwist = GLES20.glGetUniformLocation(prog, "uTwist")
+            locFlux = GLES20.glGetUniformLocation(prog, "uFlux"); locFogD = GLES20.glGetUniformLocation(prog, "uFogD")
+            locFogH = GLES20.glGetUniformLocation(prog, "uFogH"); locFogS = GLES20.glGetUniformLocation(prog, "uFogS")
+            locFogV = GLES20.glGetUniformLocation(prog, "uFogV")
         }
 
         override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uMix"), mainActivity.controlsMap["3D_MIX"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uShape"), mainActivity.controlsMap["S_SHAPE"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFov"), mainActivity.controlsMap["S_FOV"]?.computedValue ?: 0.5f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uScroll"), scrollAccum)
+            GLES20.glUniform1i(locTex, 0)
+            GLES20.glUniform1f(locRatio, w.toFloat()/h.toFloat())
+            GLES20.glUniform1f(locMix, mainActivity.controlsMap["3D_MIX"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locShape, mainActivity.controlsMap["S_SHAPE"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locFov, mainActivity.controlsMap["S_FOV"]?.computedValue ?: 0.5f)
+            GLES20.glUniform1f(locScroll, scrollAccum)
 
             // Color
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uHStr"), mainActivity.controlsMap["T_HUE_STR"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uHPos"), mainActivity.controlsMap["T_HUE_POS"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWStr"), mainActivity.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWPos"), mainActivity.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locHStr, mainActivity.controlsMap["T_HUE_STR"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locHPos, mainActivity.controlsMap["T_HUE_POS"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locWStr, mainActivity.controlsMap["T_WAVE_STR"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locWPos, mainActivity.controlsMap["T_WAVE_POS"]?.computedValue ?: 0f)
 
             // Distort
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uCurve"), mainActivity.controlsMap["CURVE"]?.computedValue ?: 1.0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTwist"), mainActivity.controlsMap["TWIST"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFlux"), mainActivity.controlsMap["FLUX"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locCurve, mainActivity.controlsMap["CURVE"]?.computedValue ?: 1.0f)
+            GLES20.glUniform1f(locTwist, mainActivity.controlsMap["TWIST"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locFlux, mainActivity.controlsMap["FLUX"]?.computedValue ?: 0f)
 
             // Fog
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogD"), mainActivity.controlsMap["T_FOG"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogH"), mainActivity.controlsMap["T_FOG_H"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogS"), mainActivity.controlsMap["T_FOG_S"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogV"), mainActivity.controlsMap["T_FOG_V"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(locFogD, mainActivity.controlsMap["T_FOG"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locFogH, mainActivity.controlsMap["T_FOG_H"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locFogS, mainActivity.controlsMap["T_FOG_S"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locFogV, mainActivity.controlsMap["T_FOG_V"]?.computedValue ?: 1f)
 
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -3771,6 +3799,9 @@ class MainActivity : AppCompatActivity() {
         private var prog = 0
         private var scrollAccum = 0.0f
         private var swayAccum = 0.0f
+        private var locTex = -1; private var locRatio = -1; private var locStr = -1; private var locWide = -1
+        private var locScroll = -1; private var locSwayTime = -1; private var locFogD = -1; private var locFogF = -1
+        private var locFogH = -1; private var locFogS = -1; private var locFogV = -1
 
         init {
             addControl(PropertyControl("UTWIRL", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
@@ -3893,25 +3924,31 @@ class MainActivity : AppCompatActivity() {
                 gl_FragColor = col;
             }"""
             prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+            locTex = GLES20.glGetUniformLocation(prog, "uTex"); locRatio = GLES20.glGetUniformLocation(prog, "uRatio")
+            locStr = GLES20.glGetUniformLocation(prog, "uStr"); locWide = GLES20.glGetUniformLocation(prog, "uWide")
+            locScroll = GLES20.glGetUniformLocation(prog, "uScroll"); locSwayTime = GLES20.glGetUniformLocation(prog, "uSwayTime")
+            locFogD = GLES20.glGetUniformLocation(prog, "uFogD"); locFogF = GLES20.glGetUniformLocation(prog, "uFogF")
+            locFogH = GLES20.glGetUniformLocation(prog, "uFogH"); locFogS = GLES20.glGetUniformLocation(prog, "uFogS")
+            locFogV = GLES20.glGetUniformLocation(prog, "uFogV")
         }
 
         override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
+            GLES20.glUniform1i(locTex, 0)
 
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRatio"), w.toFloat()/h.toFloat())
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uStr"), mainActivity.controlsMap["UTWIRL"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locRatio, w.toFloat()/h.toFloat())
+            GLES20.glUniform1f(locStr, mainActivity.controlsMap["UTWIRL"]?.computedValue ?: 0f)
 
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uWide"), mainActivity.controlsMap["S_WIDE"]?.computedValue ?: 1f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uScroll"), scrollAccum)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uSwayTime"), swayAccum)
+            GLES20.glUniform1f(locWide, mainActivity.controlsMap["S_WIDE"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(locScroll, scrollAccum)
+            GLES20.glUniform1f(locSwayTime, swayAccum)
 
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogD"), mainActivity.controlsMap["S_FOG"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogF"), mainActivity.controlsMap["S_FOG_FALLOFF"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogH"), mainActivity.controlsMap["S_FOG_H"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogS"), mainActivity.controlsMap["S_FOG_S"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uFogV"), mainActivity.controlsMap["S_FOG_V"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locFogD, mainActivity.controlsMap["S_FOG"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locFogF, mainActivity.controlsMap["S_FOG_FALLOFF"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locFogH, mainActivity.controlsMap["S_FOG_H"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locFogS, mainActivity.controlsMap["S_FOG_S"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locFogV, mainActivity.controlsMap["S_FOG_V"]?.computedValue ?: 0f)
 
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -3920,6 +3957,8 @@ class MainActivity : AppCompatActivity() {
 
     class ColorEffect(activity: MainActivity) : MainActivity.ShaderEffect("FX_COLOR", "COLOR", activity) {
         private var prog = 0
+        private var locTex = -1; private var locBrit = -1; private var locHue = -1; private var locNeg = -1
+        private var locGlow = -1; private var locCon = -1; private var locVib = -1
         init {
             addControl(PropertyControl("BRIT", "BRIGHTNESS", defaultValue = 500, outMin=0f, outMax=2f))
             addControl(PropertyControl("HUE", "HUE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
@@ -3945,17 +3984,21 @@ class MainActivity : AppCompatActivity() {
                 gl_FragColor = vec4(c, 1.0);
             }"""
             prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+            locTex = GLES20.glGetUniformLocation(prog, "uTex"); locBrit = GLES20.glGetUniformLocation(prog, "uBrit")
+            locHue = GLES20.glGetUniformLocation(prog, "uHue"); locNeg = GLES20.glGetUniformLocation(prog, "uNeg")
+            locGlow = GLES20.glGetUniformLocation(prog, "uGlow"); locCon = GLES20.glGetUniformLocation(prog, "uCon")
+            locVib = GLES20.glGetUniformLocation(prog, "uVib")
         }
         override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTex"), 0)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uBrit"), mainActivity.controlsMap["BRIT"]?.computedValue ?: 1f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uHue"), mainActivity.controlsMap["HUE"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uNeg"), mainActivity.controlsMap["NEG"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uGlow"), mainActivity.controlsMap["GLOW"]?.computedValue ?: 0f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uCon"), mainActivity.controlsMap["CONTRAST"]?.computedValue ?: 1f)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uVib"), mainActivity.controlsMap["VIBRANCE"]?.computedValue ?: 1f)
+            GLES20.glUniform1i(locTex, 0)
+            GLES20.glUniform1f(locBrit, mainActivity.controlsMap["BRIT"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(locHue, mainActivity.controlsMap["HUE"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locNeg, mainActivity.controlsMap["NEG"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locGlow, mainActivity.controlsMap["GLOW"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locCon, mainActivity.controlsMap["CONTRAST"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(locVib, mainActivity.controlsMap["VIBRANCE"]?.computedValue ?: 1f)
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
         override fun release() { GLES20.glDeleteProgram(prog) }
