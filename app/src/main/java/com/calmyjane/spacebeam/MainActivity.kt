@@ -7490,10 +7490,15 @@ class MediaSourceControl(
     init {
         mainActivity.runOnUiThread {
             playerA = createPlayer()
-            playerB = createPlayer()
+            // playerB is created lazily in requirePlayerB() — only when a second layer is actually needed
             forceResync()
             mainHandler.post(playbackChecker)
         }
+    }
+
+    // Only call from UI thread. Creates playerB on first use (multi-item playlist or crossfading single item).
+    private fun requirePlayerB(): ExoPlayer {
+        return playerB ?: createPlayer().also { playerB = it }
     }
 
     private fun createPlayer(): ExoPlayer {
@@ -7568,7 +7573,7 @@ class MediaSourceControl(
             val item = playlist[index]
             val ch = mainActivity.getRendererSource(sourceId) ?: return
             val layer = if (targetLayer == 0) ch.layerA else ch.layerB
-            val player = if (targetLayer == 0) playerA else playerB
+            val player = if (targetLayer == 0) playerA else requirePlayerB()
 
             layer.isVideo = item.isVideo
             if (item.isVideo) {
