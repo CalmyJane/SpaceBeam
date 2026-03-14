@@ -6113,11 +6113,9 @@ class MainActivity : AppCompatActivity() {
     private fun applyPreset(idx: Int) {
         val p = presets[idx] ?: return
 
-        // 1. Cancel previous UI animations
         presetAnimators.values.forEach { it.cancel() }
         presetAnimators.clear()
 
-        // Reset all buttons
         presetDrawables.forEach { (id, drawable) ->
             drawable.setProgress(0f)
             drawable.isActive = (id == idx)
@@ -6125,12 +6123,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         activePreset = idx
-        // Mark time for rotation persistence
         transitionStartTime = System.currentTimeMillis()
 
         val durationSec = transitionMs / 1000f
 
-        // 2. Animate the Button Fill
         val btnDrawable = presetDrawables[idx]
         if (btnDrawable != null) {
             val anim = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -6158,23 +6154,27 @@ class MainActivity : AppCompatActivity() {
 
             var snap = p.controlSnapshots[control.id]
 
-            // Legacy support: If loading an old preset where AXIS wasn't in the map
-            if (snap == null && control.id == "AXIS") {
-                snap = PropertyControl.Snapshot(
-                    value = p.axis, // Direct value (e.g. 6 remains 6)
-                    active = false,
-                    rate = 0, depth = 0, shape = "SINE", smoothing = 0
-                )
+            if (snap == null) {
+                if (control.id == "AXIS") {
+                    snap = PropertyControl.Snapshot(
+                        value = p.axis,
+                        active = false,
+                        rate = 0, depth = 0, shape = "SINE", smoothing = 0
+                    )
+                } else {
+                    snap = PropertyControl.Snapshot(
+                        value = control.defaultValue,
+                        active = false,
+                        rate = 200, depth = 0, shape = "SINE", smoothing = 500,
+                        isSynced = false, syncIndex = 3
+                    )
+                }
             }
 
-            if (snap != null) {
-                // The 'restore' function handles the "isLocked" check internally
-                control.restore(snap, durationSec)
-            }
+            control.restore(snap, durationSec)
         }
         updateSidebarVisuals()
 
-        // 4. Schedule next Auto-Play
         if (isAutoPlaying) {
             handler.removeCallbacks(autoPlayRunnable)
             handler.postDelayed(autoPlayRunnable, transitionMs + autoPlayDurationMs)
