@@ -96,6 +96,11 @@ class MediaPickerDialog(
     private val activityContext: MainActivity,
     private val onMediaSelected: (List<android.net.Uri>) -> Unit
 ) {
+    companion object {
+        private val thumbnailCache = LruCache<String, Bitmap>(200)
+        private val executor = Executors.newFixedThreadPool(4)
+    }
+
     private var dialog: android.app.Dialog? = null
     private var gridView: GridView? = null
     private var confirmBtn: Button? = null
@@ -112,12 +117,9 @@ class MediaPickerDialog(
     private val rootDir = VDir("Device", "", null)
     private var currentDir: VDir = rootDir
 
-    private var displayItems = mutableListOf<Any>() // Can contain VDir, MediaEntry, or String ("UP")
-    private var filterMode = 0 // 0 = All, 1 = Images, 2 = Videos
+    private var displayItems = mutableListOf<Any>()
+    private var filterMode = 0
     private val selectedUris = mutableSetOf<android.net.Uri>()
-
-    private val thumbnailCache = LruCache<String, Bitmap>(200)
-    private val executor = Executors.newFixedThreadPool(4)
 
     private class MediaViewHolder(
         val container: FrameLayout,
@@ -144,7 +146,6 @@ class MediaPickerDialog(
             layoutParams = FrameLayout.LayoutParams(-1, -1)
         }
 
-        // --- HEADER ---
         val header = LinearLayout(activityContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -192,7 +193,6 @@ class MediaPickerDialog(
         header.addView(filtersContainer)
         mainLayout.addView(header)
 
-        // --- PATH BREADCRUMBS ---
         pathTextView = TextView(activityContext).apply {
             text = "Device > ..."
             textSize = 12f
@@ -203,7 +203,6 @@ class MediaPickerDialog(
         }
         mainLayout.addView(pathTextView)
 
-        // --- GRID ---
         val gridContainer = FrameLayout(activityContext).apply {
             layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
         }
@@ -218,7 +217,7 @@ class MediaPickerDialog(
             adapter = MediaAdapter()
             setOnItemClickListener { _, _, position, _ ->
                 when (val item = displayItems[position]) {
-                    is String -> { // "UP" button
+                    is String -> {
                         currentDir = currentDir.parent ?: rootDir
                         refreshGrid()
                     }
@@ -242,7 +241,6 @@ class MediaPickerDialog(
         gridContainer.addView(loadingSpinner)
         mainLayout.addView(gridContainer)
 
-        // --- FOOTER ---
         val footer = LinearLayout(activityContext).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(-1, 140).apply { topMargin = 20 }
@@ -274,7 +272,6 @@ class MediaPickerDialog(
         rootLayout.addView(mainLayout)
         dialog?.setContentView(rootLayout)
         dialog?.setOnDismissListener {
-            executor.shutdownNow()
             activityContext.hideSystemUI()
         }
         dialog?.show()
@@ -308,11 +305,9 @@ class MediaPickerDialog(
             fun query(coll: android.net.Uri, isVid: Boolean) {
                 val projList = mutableListOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATE_ADDED)
                 if (isQ) {
-                    // Modern Android 10+ uses Relative Path (e.g. "DCIM/Camera/")
                     projList.add(MediaStore.MediaColumns.RELATIVE_PATH)
                     projList.add(MediaStore.MediaColumns.DISPLAY_NAME)
                 } else {
-                    // Legacy Android uses raw data (e.g. "/storage/emulated/0/DCIM/Camera/img.jpg")
                     projList.add(MediaStore.MediaColumns.DATA)
                 }
                 if (isVid) projList.add(MediaStore.Video.Media.DURATION)
@@ -354,16 +349,14 @@ class MediaPickerDialog(
             query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, false)
             query(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true)
 
-            // Build Tree
             rootDir.subDirs.clear()
             rootDir.files.clear()
 
             for (entry in allMedia) {
-                // Clean up paths to ensure reliable splitting
                 val cleanPath = entry.path.replace("//", "/")
                 val parts = cleanPath.split("/").filter { it.isNotEmpty() }
                 if (parts.isEmpty()) continue
-                val folderParts = parts.dropLast(1) // Everything except the filename itself
+                val folderParts = parts.dropLast(1)
 
                 var curr = rootDir
                 var curPath = ""
@@ -374,7 +367,6 @@ class MediaPickerDialog(
                 curr.files.add(entry)
             }
 
-            // Auto-navigate past empty structural root folders (like /storage/emulated/0/)
             var start = rootDir
             while (start.subDirs.size == 1 && start.files.isEmpty()) {
                 start = start.subDirs.values.first()
@@ -391,20 +383,16 @@ class MediaPickerDialog(
     private fun refreshGrid() {
         displayItems.clear()
 
-        // Build Breadcrumbs
         var bc = currentDir.path.replace("/", " > ")
         if (bc.startsWith(" > ")) bc = bc.substring(3)
         pathTextView?.text = if (bc.isEmpty()) "Device" else "Device > $bc"
 
-        // Add "UP" button if not at root
         if (currentDir.parent != null) {
             displayItems.add("UP")
         }
 
-        // Add Subdirectories
         displayItems.addAll(currentDir.subDirs.values.sortedBy { it.name.lowercase() })
 
-        // Add Files (Filtered)
         val filteredFiles = currentDir.files.filter { entry ->
             when (filterMode) {
                 1 -> !entry.isVideo
@@ -462,7 +450,6 @@ class MediaPickerDialog(
                 }
                 container.addView(chk)
 
-                // Folder UI Overlay
                 val folderLayout = LinearLayout(activityContext).apply {
                     orientation = LinearLayout.VERTICAL
                     gravity = Gravity.CENTER
@@ -488,7 +475,6 @@ class MediaPickerDialog(
 
             val item = displayItems[position]
 
-            // Reset Visibilities
             holder.img.visibility = View.GONE
             holder.dur.visibility = View.GONE
             holder.sel.visibility = View.GONE
@@ -496,19 +482,19 @@ class MediaPickerDialog(
             holder.folderLayout.visibility = View.GONE
 
             when (item) {
-                is String -> { // UP Button
+                is String -> {
                     holder.folderLayout.visibility = View.VISIBLE
                     holder.folderLayout.background = GradientDrawable().apply { setColor(Color.parseColor("#333333")); cornerRadius = 15f }
                     holder.folderIcon.text = "🔙"
                     holder.folderName.text = "Back"
                 }
-                is VDir -> { // Folder
+                is VDir -> {
                     holder.folderLayout.visibility = View.VISIBLE
                     holder.folderLayout.background = GradientDrawable().apply { setColor(Color.parseColor("#2A2A2A")); cornerRadius = 15f }
                     holder.folderIcon.text = "📁"
                     holder.folderName.text = item.name
                 }
-                is MediaEntry -> { // File
+                is MediaEntry -> {
                     holder.img.visibility = View.VISIBLE
                     if (item.isVideo) {
                         holder.dur.visibility = View.VISIBLE
@@ -3135,17 +3121,25 @@ class MainActivity : AppCompatActivity() {
     private var pendingMidiExportJson: String? = null
 
     private fun createOptimizedExoPlayer(): ExoPlayer {
+        // Force ExoPlayer to use a strict 64KB segment allocator
+        val allocator = androidx.media3.exoplayer.upstream.DefaultAllocator(true, 65536)
+
         val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+            .setAllocator(allocator)
             .setBufferDurationsMs(
-                10000, // Min buffer 10s
-                20000, // Max buffer 20s
-                1000,  // Buffer for playback 1s
-                1000   // Buffer for playback after rebuffer 1s
+                1500, // Min buffer 1.5s
+                3000, // Max buffer 3s
+                500,  // Buffer for playback 0.5s
+                500   // Buffer for playback after rebuffer 0.5s
             )
-            .setTargetBufferBytes(15 * 1024 * 1024) // Limit to 15 MB per player
+            .setTargetBufferBytes(4 * 1024 * 1024) // Strictly clamp to 4MB per player
+            .setPrioritizeTimeOverSizeThresholds(false) // CRITICAL: Obey byte limit even if time isn't met
             .build()
 
-        return ExoPlayer.Builder(this)
+        val renderersFactory = androidx.media3.exoplayer.DefaultRenderersFactory(this)
+            .setEnableDecoderFallback(true)
+
+        return ExoPlayer.Builder(this, renderersFactory)
             .setLoadControl(loadControl)
             .build()
     }
@@ -7544,7 +7538,10 @@ class MediaSourceControl(
 
     private fun createPlayer(): ExoPlayer {
         val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
-            .setBufferDurationsMs(10000, 20000, 1000, 1000).build()
+            .setBufferDurationsMs(1500, 3000, 500, 500)
+            .setTargetBufferBytes(4 * 1024 * 1024)
+            .setPrioritizeTimeOverSizeThresholds(false)
+            .build()
         return ExoPlayer.Builder(mainActivity).setLoadControl(loadControl).build().apply {
             volume = 0f
             repeatMode = Player.REPEAT_MODE_OFF
