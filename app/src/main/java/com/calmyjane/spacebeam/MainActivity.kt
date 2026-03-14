@@ -3453,7 +3453,7 @@ class MainActivity : AppCompatActivity() {
         private var prog = 0
         private var locTex = -1; private var locRatio = -1; private var locZ = -1; private var locR = -1
         private var locTx = -1; private var locTy = -1; private var locTiX = -1; private var locTiY = -1
-        private var locWarp = -1; private var locRGB = -1
+        private var locWarp = -1; private var locRGB = -1; private var locBend = -1; private var locWobble = -1
         private val pZoom = "${idPrefix}_ZOOM"
         private val pAngle = "${idPrefix}_ANGLE"
         private val pTx = "${idPrefix}_TX"
@@ -3461,6 +3461,8 @@ class MainActivity : AppCompatActivity() {
         private val pTiltX = "${idPrefix}_TILTX"
         private val pTiltY = "${idPrefix}_TILTY"
         private val pRgb = "${idPrefix}_RGB"
+        private val pBend = "${idPrefix}_BEND"
+        private val pWobble = "${idPrefix}_WOBBLE"
 
         init {
             addControl(PropertyControl(pAngle, "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
@@ -3469,6 +3471,8 @@ class MainActivity : AppCompatActivity() {
             addControl(PropertyControl(pTy, "MOVE Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
             addControl(PropertyControl(pTiltX, "TILT X", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
             addControl(PropertyControl(pTiltY, "TILT Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
+            addControl(PropertyControl(pBend, "BEND", defaultValue = 500, outMin=-3.0f, outMax=3.0f, hasModulation = true))
+            addControl(PropertyControl(pWobble, "WOBBLE", defaultValue = 0, outMin=0f, outMax=1.0f, hasModulation = true))
             if(idPrefix == "C") addControl(PropertyControl("WARP", "DISTORT", defaultValue = 0, outMin=0f, outMax=1f))
             addControl(PropertyControl(pRgb, "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.1f, hasModulation = true))
         }
@@ -3476,19 +3480,44 @@ class MainActivity : AppCompatActivity() {
         override fun init() {
             val fSrc = """
             precision highp float; varying vec2 v; uniform sampler2D uTex;
-            uniform float uZ, uA, uR, uTx, uTy, uTiX, uTiY, uWarp, uRGB, uRatio;
+            uniform float uZ, uA, uR, uTx, uTy, uTiX, uTiY, uWarp, uRGB, uRatio, uBend, uWobble;
+
+            float hash(vec2 p) {
+                return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+            }
+            
+            float noise(vec2 p) {
+                vec2 i = floor(p); vec2 f = fract(p);
+                f = f * f * (3.0 - 2.0 * f);
+                return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+                           mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+            }
+
             vec2 transformUV(vec2 uv, float xOff) {
-                float z = 1.0 + (uv.x * uTiX) + (uv.y * uTiY);
-                uv /= max(z, 0.1);
+                float r2 = dot(uv, uv);
+                
+                float w = 0.0;
+                if (uWobble > 0.001) {
+                    vec2 nUV = (uv * 4.0) - vec2(uTx, uTy) * 2.5;
+                    mat2 m = mat2(0.8, -0.6, 0.6, 0.8);
+                    float n = noise(nUV) + 0.5 * noise(m * nUV * 2.0);
+                    w = (n - 0.75) * uWobble;
+                }
+                
+                float z = 1.0 + (uv.x * uTiX) + (uv.y * uTiY) - (uBend * r2) - w;
+                uv /= max(z, 0.05);
                 uv /= uZ;
+                
                 float af = mix(uRatio, 1.0, uWarp);
                 uv.x *= af;
                 float c = cos(uR); float s = sin(uR);
                 uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
                 uv.x /= af;
                 uv += vec2(uTx + xOff, uTy);
+                
                 return abs(mod(uv + 0.5, 2.0) - 1.0);
             }
+            
             void main() {
                 vec2 base = v - 0.5;
                 if (uRGB < 0.001) {
@@ -3506,6 +3535,7 @@ class MainActivity : AppCompatActivity() {
             locTx = GLES20.glGetUniformLocation(prog, "uTx"); locTy = GLES20.glGetUniformLocation(prog, "uTy")
             locTiX = GLES20.glGetUniformLocation(prog, "uTiX"); locTiY = GLES20.glGetUniformLocation(prog, "uTiY")
             locWarp = GLES20.glGetUniformLocation(prog, "uWarp"); locRGB = GLES20.glGetUniformLocation(prog, "uRGB")
+            locBend = GLES20.glGetUniformLocation(prog, "uBend"); locWobble = GLES20.glGetUniformLocation(prog, "uWobble")
         }
 
         override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
@@ -3514,11 +3544,6 @@ class MainActivity : AppCompatActivity() {
 
             val rotAccum = if (id.startsWith("M")) mainActivity.getRendererMRot() else mainActivity.getRendererCRot()
             val angle = (mainActivity.controlsMap[pAngle]?.computedValue ?: 0f) * 360f + rotAccum
-
-            // --- SCALE CORRECTION ---
-            // User requested that slider 320 behaves like 231 (1.0).
-            // Value at 320 is ~1.348. Value at 231 is ~1.00.
-            // Correction factor = 1.0 / 1.348 = ~0.7418
             val rawZoom = mainActivity.controlsMap[pZoom]?.computedValue ?: 1f
             val correctedZoom = rawZoom * 0.7067f
 
@@ -3532,6 +3557,8 @@ class MainActivity : AppCompatActivity() {
             GLES20.glUniform1f(locTiY, (mainActivity.controlsMap[pTiltY]?.computedValue ?: 0f) * 1.5f)
             GLES20.glUniform1f(locWarp, mainActivity.controlsMap["WARP"]?.computedValue ?: 0f)
             GLES20.glUniform1f(locRGB, mainActivity.controlsMap[pRgb]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locBend, mainActivity.controlsMap[pBend]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locWobble, mainActivity.controlsMap[pWobble]?.computedValue ?: 0f)
 
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
