@@ -3287,6 +3287,7 @@ class MainActivity : AppCompatActivity() {
         var tBuf: FloatBuffer = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
             put(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)).position(0)
         }
+        private val attribCache = HashMap<Int, Pair<Int, Int>>()
 
         fun compile(type: Int, src: String): Int {
             val shader = GLES20.glCreateShader(type)
@@ -3319,10 +3320,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         fun bindQuad(prog: Int) {
-            val pL = GLES20.glGetAttribLocation(prog, "p"); val tL = GLES20.glGetAttribLocation(prog, "t")
+            val (pL, tL) = attribCache.getOrPut(prog) {
+                Pair(GLES20.glGetAttribLocation(prog, "p"), GLES20.glGetAttribLocation(prog, "t"))
+            }
             GLES20.glEnableVertexAttribArray(pL); GLES20.glVertexAttribPointer(pL, 2, GLES20.GL_FLOAT, false, 0, pBuf)
             GLES20.glEnableVertexAttribArray(tL); GLES20.glVertexAttribPointer(tL, 2, GLES20.GL_FLOAT, false, 0, tBuf)
         }
+
+        fun clearAttribCache() { attribCache.clear() }
     }
 
     class EffectChain {
@@ -3472,41 +3477,28 @@ class MainActivity : AppCompatActivity() {
             val fSrc = """
             precision highp float; varying vec2 v; uniform sampler2D uTex;
             uniform float uZ, uA, uR, uTx, uTy, uTiX, uTiY, uWarp, uRGB, uRatio;
+            vec2 transformUV(vec2 uv, float xOff) {
+                float z = 1.0 + (uv.x * uTiX) + (uv.y * uTiY);
+                uv /= max(z, 0.1);
+                uv /= uZ;
+                float af = mix(uRatio, 1.0, uWarp);
+                uv.x *= af;
+                float c = cos(uR); float s = sin(uR);
+                uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+                uv.x /= af;
+                uv += vec2(uTx + xOff, uTy);
+                return abs(mod(uv + 0.5, 2.0) - 1.0);
+            }
             void main() {
-                vec3 col = vec3(0.0);
-                for(int i=0; i<3; i++) {
-                    float off = (i==0) ? uRGB : (i==2) ? -uRGB : 0.0;
-                    vec2 uv = v - 0.5;
-                    
-                    // 1. Tilt (Perspective)
-                    float z = 1.0 + (uv.x * uTiX) + (uv.y * uTiY); 
-                    uv /= max(z, 0.1);
-                    
-                    // 2. Zoom 
-                    // We divide by uZ so that Higher Values = Zoom IN, Lower = Zoom OUT
-                    uv /= uZ;
-                    
-                    // 3. Distort
-                    float af = mix(uRatio, 1.0, uWarp); 
-                    uv.x *= af;
-                    
-                    // 4. Rotation
-                    float c = cos(uR); float s = sin(uR);
-                    uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
-                    
-                    uv.x /= af; 
-                    
-                    // 5. Move
-                    uv += vec2(uTx, uTy);
-                    uv.x += off;
-                    
-                    // 6. Wrap/Mirror
-                    vec2 f = abs(mod(uv + 0.5, 2.0) - 1.0);
-                    
-                    vec4 sC = texture2D(uTex, f);
-                    if(i==0) col.r = sC.r; else if(i==1) col.g = sC.g; else col.b = sC.b;
+                vec2 base = v - 0.5;
+                if (uRGB < 0.001) {
+                    gl_FragColor = texture2D(uTex, transformUV(base, 0.0));
+                } else {
+                    float r = texture2D(uTex, transformUV(base,  uRGB)).r;
+                    float g = texture2D(uTex, transformUV(base,  0.0 )).g;
+                    float b = texture2D(uTex, transformUV(base, -uRGB)).b;
+                    gl_FragColor = vec4(r, g, b, 1.0);
                 }
-                gl_FragColor = vec4(col, 1.0);
             }"""
             prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
             locTex = GLES20.glGetUniformLocation(prog, "uTex"); locRatio = GLES20.glGetUniformLocation(prog, "uRatio")
@@ -6395,6 +6387,12 @@ class MainActivity : AppCompatActivity() {
         private var simpleProgram = 0
         private var copyOesProgram = 0
         private var copy2dProgram = 0
+        // Cached uniform locations for built-in programs
+        private var locSimpleTex = -1; private var locSimpleMVP = -1
+        private var locOesTex = -1; private var locOesAlpha = -1; private var locOesRot = -1
+        private var locOesFlip = -1; private var locOesScale = -1; private var locOesST = -1
+        private var loc2dTex = -1; private var loc2dAlpha = -1; private var loc2dRot = -1
+        private var loc2dFlip = -1; private var loc2dScale = -1
         val stMatrix = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
 
         @Volatile private var isSurfaceReady = false
@@ -6410,7 +6408,6 @@ class MainActivity : AppCompatActivity() {
         var flipY = -1.0f
         var rot180 = false
 
-        // Standard 1080p Resolution
         private val FIXED_WIDTH = 1920
         private val FIXED_HEIGHT = 1080
         private var viewWidth = 1
@@ -6638,14 +6635,19 @@ class MainActivity : AppCompatActivity() {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 GLES20.glBindTexture(target, if(layer.isVideo) layer.oesTexId else layer.tex2dId)
 
-                GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uTex"), 0)
-                GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uAlpha"), alpha)
+                val locTex   = if (layer.isVideo) locOesTex   else loc2dTex
+                val locAlpha = if (layer.isVideo) locOesAlpha else loc2dAlpha
+                val locRot   = if (layer.isVideo) locOesRot   else loc2dRot
+                val locFlip  = if (layer.isVideo) locOesFlip  else loc2dFlip
+                val locScale = if (layer.isVideo) locOesScale else loc2dScale
+                GLES20.glUniform1i(locTex, 0)
+                GLES20.glUniform1f(locAlpha, alpha)
 
                 val extraRot = if (userRot180) 180f else 0f
                 val finalRot = rotation + layer.rotation + extraRot
                 val rad = Math.toRadians(-finalRot.toDouble()).toFloat()
-                GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uRotation"), rad)
-                GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uFlip"), userFlipX, userFlipY)
+                GLES20.glUniform1f(locRot, rad)
+                GLES20.glUniform2f(locFlip, userFlipX, userFlipY)
 
                 val isSideways = (kotlin.math.abs(rotation + layer.rotation) % 180f) > 45f
                 val effectiveW = if (isSideways) layer.height.toFloat() else layer.width.toFloat()
@@ -6657,11 +6659,10 @@ class MainActivity : AppCompatActivity() {
                 if (fboAspect > srcAspect) { sy = srcAspect / fboAspect } else { sx = fboAspect / srcAspect }
                 if (isSideways) { val temp = sx; sx = sy; sy = temp }
 
-                GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uScale"), sx, sy)
+                GLES20.glUniform2f(locScale, sx, sy)
 
-                if (program == copyOesProgram) {
-                    val stLoc = GLES20.glGetUniformLocation(program, "uSTMatrix")
-                    GLES20.glUniformMatrix4fv(stLoc, 1, false, layer.stMatrix, 0)
+                if (layer.isVideo) {
+                    GLES20.glUniformMatrix4fv(locOesST, 1, false, layer.stMatrix, 0)
                 }
 
                 ShaderHelper.bindQuad(program)
@@ -6784,6 +6785,7 @@ class MainActivity : AppCompatActivity() {
 
         override fun onSurfaceCreated(gl: GL10?, config: GL10EGLConfig?) {
             setupEGL()
+            ShaderHelper.clearAttribCache()
             GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
 
             val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
@@ -6810,6 +6812,12 @@ class MainActivity : AppCompatActivity() {
                 gl_FragColor = vec4(texture2D(uTex, stUV).rgb, uAlpha);
             }""".trimIndent()
             copyOesProgram = ShaderHelper.createProgram(vSrc, fSrcCopyOes)
+            locOesTex = GLES20.glGetUniformLocation(copyOesProgram, "uTex")
+            locOesAlpha = GLES20.glGetUniformLocation(copyOesProgram, "uAlpha")
+            locOesRot = GLES20.glGetUniformLocation(copyOesProgram, "uRotation")
+            locOesFlip = GLES20.glGetUniformLocation(copyOesProgram, "uFlip")
+            locOesScale = GLES20.glGetUniformLocation(copyOesProgram, "uScale")
+            locOesST = GLES20.glGetUniformLocation(copyOesProgram, "uSTMatrix")
 
             val fSrcCopy2d = """
             precision mediump float; varying vec2 v; 
@@ -6831,10 +6839,16 @@ class MainActivity : AppCompatActivity() {
                 gl_FragColor = vec4(texture2D(uTex, uv).rgb, uAlpha);
             }""".trimIndent()
             copy2dProgram = ShaderHelper.createProgram(vSrc, fSrcCopy2d)
-
+            loc2dTex = GLES20.glGetUniformLocation(copy2dProgram, "uTex")
+            loc2dAlpha = GLES20.glGetUniformLocation(copy2dProgram, "uAlpha")
+            loc2dRot = GLES20.glGetUniformLocation(copy2dProgram, "uRotation")
+            loc2dFlip = GLES20.glGetUniformLocation(copy2dProgram, "uFlip")
+            loc2dScale = GLES20.glGetUniformLocation(copy2dProgram, "uScale")
 
             val fSimple = "precision mediump float; varying vec2 v; uniform sampler2D uTex; void main() { gl_FragColor = texture2D(uTex, v); }"
             simpleProgram = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; uniform mat4 uMVPMatrix; void main() { gl_Position = uMVPMatrix * p; v = t; }", fSimple)
+            locSimpleTex = GLES20.glGetUniformLocation(simpleProgram, "uTex")
+            locSimpleMVP = GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix")
 
             initMainFBO(FIXED_WIDTH, FIXED_HEIGHT)
             ctx.effectChain.init(FIXED_WIDTH, FIXED_HEIGHT)
@@ -6910,8 +6924,8 @@ class MainActivity : AppCompatActivity() {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, finalTex)
 
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(simpleProgram, "uTex"), 0)
-            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix"), 1, false, identityMatrix, 0)
+            GLES20.glUniform1i(locSimpleTex, 0)
+            GLES20.glUniformMatrix4fv(locSimpleMVP, 1, false, identityMatrix, 0)
 
             ShaderHelper.bindQuad(simpleProgram)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -6958,8 +6972,8 @@ class MainActivity : AppCompatActivity() {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
 
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(simpleProgram, "uTex") ?: -1, 0)
-            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix") ?: -1, 1, false, mvpMatrix, 0)
+            GLES20.glUniform1i(locSimpleTex, 0)
+            GLES20.glUniformMatrix4fv(locSimpleMVP, 1, false, mvpMatrix, 0)
 
             ShaderHelper.bindQuad(simpleProgram)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -7005,8 +7019,8 @@ class MainActivity : AppCompatActivity() {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
 
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(simpleProgram, "uTex") ?: -1, 0)
-            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix") ?: -1, 1, false, identityMatrix, 0)
+            GLES20.glUniform1i(locSimpleTex, 0)
+            GLES20.glUniformMatrix4fv(locSimpleMVP, 1, false, identityMatrix, 0)
 
             ShaderHelper.bindQuad(simpleProgram)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
