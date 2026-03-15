@@ -623,6 +623,8 @@ class MidiHelper(private val activity: MainActivity) {
 
     var mappingName: String = "Default"
         private set
+    var isModified: Boolean = false
+        private set
 
     data class MidiBinding(val target: String, val mode: String, val scale: Float = 1.0f)
 
@@ -689,11 +691,16 @@ class MidiHelper(private val activity: MainActivity) {
                 val s = obj.optDouble("s", 1.0).toFloat()
                 addBinding(cc, t, m, s, updateReverse = true)
             }
+            isModified = false
             true
         } catch (e: Exception) {
             Log.e("MIDI", "Import failed", e)
             false
         }
+    }
+
+    fun loadDefault() {
+        importConfig(DEFAULT_MAPPING_JSON)
     }
 
 
@@ -702,10 +709,10 @@ class MidiHelper(private val activity: MainActivity) {
             bindingMap[cc] = java.util.concurrent.CopyOnWriteArrayList()
         }
         bindingMap[cc]?.add(MidiBinding(target, mode, scale))
-
         if (updateReverse && mode == "VAL") {
             reverseMap[target] = cc
         }
+        isModified = true
     }
 
     fun getBindingsForTarget(targetId: String): List<Pair<Int, MidiBinding>> {
@@ -732,6 +739,7 @@ class MidiHelper(private val activity: MainActivity) {
                 reverseMap[targetId] = other.first
             }
         }
+        isModified = true
     }
 
     fun getAllBindings(): List<Triple<Int, String, MidiBinding>> {
@@ -745,6 +753,7 @@ class MidiHelper(private val activity: MainActivity) {
     fun clearAllBindings() {
         bindingMap.clear()
         reverseMap.clear()
+        isModified = true
     }
 
     fun getMappedCC(controlId: String): Int? {
@@ -1136,9 +1145,10 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             })
 
             contentLayout.addView(TextView(activity).apply {
-                text = "CURRENT: \"${activity.midiHelper.mappingName}\""
+                val displayName = if (activity.midiHelper.isModified) "Custom" else activity.midiHelper.mappingName
+                text = "CURRENT: \"$displayName\""
                 textSize = 12f
-                setTextColor(Color.GREEN)
+                setTextColor(Color.LTGRAY)
                 gravity = Gravity.CENTER
                 setPadding(0, 0, 0, 20)
             })
@@ -1317,6 +1327,12 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 
     private fun showLoadOptions() {
         showCustomDialog("LOAD MAPPING", "Select source:") { container ->
+            container.addView(createStyledButton("factory default") {
+                activity.midiHelper.loadDefault()
+                dismissConfirmation()
+                dismiss()
+            })
+
             container.addView(createStyledButton("load from file") {
                 activity.loadMappingLauncher.launch(arrayOf("application/json"))
                 dismissConfirmation()
