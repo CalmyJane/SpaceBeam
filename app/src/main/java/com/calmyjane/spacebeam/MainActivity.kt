@@ -636,6 +636,7 @@ class MidiHelper(private val activity: MainActivity) {
     // Supports "TARGET_ID" or "TARGET_ID|MODE" (e.g. M_ZOOM|RATE)
     var learningTargetId: String? = null
     var onLearningComplete: (() -> Unit)? = null
+    var onCCReceived: ((cc: Int) -> Unit)? = null
 
     init {
         importConfig(DEFAULT_MAPPING_JSON)
@@ -731,6 +732,19 @@ class MidiHelper(private val activity: MainActivity) {
                 reverseMap[targetId] = other.first
             }
         }
+    }
+
+    fun getAllBindings(): List<Triple<Int, String, MidiBinding>> {
+        val result = mutableListOf<Triple<Int, String, MidiBinding>>()
+        bindingMap.forEach { (cc, list) ->
+            list.forEach { binding -> result.add(Triple(cc, binding.target, binding)) }
+        }
+        return result.sortedWith(compareBy({ it.second }, { it.first }))
+    }
+
+    fun clearAllBindings() {
+        bindingMap.clear()
+        reverseMap.clear()
     }
 
     fun getMappedCC(controlId: String): Int? {
@@ -892,6 +906,7 @@ class MidiHelper(private val activity: MainActivity) {
             }
 
             // 2. Execution Mode
+            onCCReceived?.invoke(cc)
             val bindings = bindingMap[cc] ?: return@runOnUiThread
 
             bindings.forEach { binding ->
@@ -1161,6 +1176,11 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             mapRow.addView(btnLoad)
             mapRow.addView(btnSave)
             contentLayout.addView(mapRow)
+
+            contentLayout.addView(createStyledButton("clear midi mappings...") {
+                activity.showMidiClearOverlay()
+                dismiss()
+            })
         }
 
         contentLayout.addView(createStyledDivider())
@@ -4891,6 +4911,256 @@ class MainActivity : AppCompatActivity() {
             // or you can call refreshMappings() here if you prefer it to stay open.
             (frame.parent as? ViewGroup)?.removeView(frame)
         }
+    }
+
+    fun showMidiClearOverlay() {
+        val frame = FrameLayout(this).apply {
+            setBackgroundColor(Color.argb(220, 0, 0, 0))
+            isClickable = true
+            elevation = 1000f
+            setOnClickListener { /* block passthrough */ }
+        }
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(900, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#222222"))
+                setStroke(2, Color.parseColor("#880000"))
+                cornerRadius = 30f
+            }
+            setPadding(40, 40, 40, 40)
+            isClickable = true
+            setOnClickListener { }
+        }
+
+        content.addView(TextView(this).apply {
+            text = "CLEAR MIDI MAPPINGS"
+            textSize = 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+        })
+
+        val hintText = TextView(this).apply {
+            text = "Move a knob/slider on your MIDI controller to filter"
+            textSize = 14f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 16, 0, 16)
+        }
+        content.addView(hintText)
+
+        // Filter label
+        val filterLabel = TextView(this).apply {
+            text = ""
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.GRAY)
+            gravity = Gravity.START
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10 }
+        }
+        content.addView(filterLabel)
+
+        val listContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            minimumHeight = 50
+        }
+
+        // null = show nothing, -1 = show all, >= 0 = filter to that CC
+        var currentCc: Int? = null
+
+        fun refreshList() {
+            listContainer.removeAllViews()
+            if (currentCc == null) return
+            val allBindings = midiHelper.getAllBindings()
+            val visible = if (currentCc == -1) allBindings else allBindings.filter { it.first == currentCc }
+
+            if (visible.isEmpty()) {
+                listContainer.addView(TextView(this).apply {
+                    text = "No mappings."
+                    textSize = 14f
+                    setTextColor(Color.DKGRAY)
+                    gravity = Gravity.CENTER
+                    setPadding(0, 20, 0, 20)
+                })
+            } else {
+                visible.forEach { (cc, targetId, binding) ->
+                    val row = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8 }
+                        background = GradientDrawable().apply {
+                            setColor(Color.parseColor("#333333"))
+                            cornerRadius = 10f
+                        }
+                        setPadding(20, 12, 10, 12)
+                    }
+
+                    row.addView(TextView(this).apply {
+                        text = "CC $cc  →  $targetId  (${binding.mode})"
+                        textSize = 14f
+                        setTextColor(Color.WHITE)
+                        layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+                    })
+
+                    val delBtn = Button(this).apply {
+                        text = "🗑"
+                        textSize = 14f
+                        setTextColor(Color.WHITE)
+                        gravity = Gravity.CENTER
+                        includeFontPadding = false
+                        setPadding(0, 0, 0, 0)
+                        background = GradientDrawable().apply {
+                            setColor(Color.parseColor("#880000"))
+                            cornerRadius = 40f
+                        }
+                        layoutParams = LinearLayout.LayoutParams(80, 80).apply { leftMargin = 15 }
+                        setOnClickListener {
+                            midiHelper.removeBinding(cc, targetId)
+                            refreshList()
+                        }
+                    }
+                    row.addView(delBtn)
+                    listContainer.addView(row)
+                }
+            }
+        }
+
+        // Listen for incoming MIDI CC to filter
+        midiHelper.onCCReceived = { cc ->
+            currentCc = cc
+            filterLabel.text = "SHOWING: CC $cc"
+            hintText.text = "Move a different knob/slider to switch filter"
+            refreshList()
+        }
+
+        val scrollView = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(-1, 400)
+            addView(listContainer)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#1A1A1A"))
+                cornerRadius = 15f
+            }
+            setPadding(10, 10, 10, 10)
+        }
+        content.addView(scrollView)
+
+        // Button row: SHOW ALL | DELETE VISIBLE
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(-1, 120).apply { topMargin = 20 }
+        }
+
+        val showAllBtn = Button(this).apply {
+            text = "SHOW ALL"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#333333"))
+                cornerRadius = 15f
+            }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { rightMargin = 10 }
+            setOnClickListener {
+                currentCc = -1
+                filterLabel.text = "SHOWING: ALL"
+                hintText.text = "Move a knob/slider on your MIDI controller to filter"
+                refreshList()
+            }
+        }
+
+        val deleteVisibleBtn = Button(this).apply {
+            text = "DELETE VISIBLE"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#880000"))
+                cornerRadius = 15f
+            }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { leftMargin = 10 }
+            setOnClickListener {
+                // Confirmation step
+                val confirmFrame = FrameLayout(this@MainActivity).apply {
+                    setBackgroundColor(Color.argb(200, 0, 0, 0))
+                    elevation = 1100f
+                }
+                val confirmBox = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER
+                    layoutParams = FrameLayout.LayoutParams(700, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#222222"))
+                        setStroke(2, Color.parseColor("#880000"))
+                        cornerRadius = 20f
+                    }
+                    setPadding(40, 40, 40, 40)
+                }
+                confirmBox.addView(TextView(this@MainActivity).apply {
+                    text = "Delete Mappings?"
+                    textSize = 16f
+                    setTextColor(Color.WHITE)
+                    gravity = Gravity.CENTER
+                    setPadding(0, 0, 0, 30)
+                })
+                val confirmRow = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(-1, 110)
+                }
+                confirmRow.addView(Button(this@MainActivity).apply {
+                    text = "CANCEL"
+                    textSize = 13f
+                    setTextColor(Color.WHITE)
+                    background = GradientDrawable().apply { setColor(Color.parseColor("#333333")); cornerRadius = 15f }
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { rightMargin = 10 }
+                    setOnClickListener { (confirmFrame.parent as ViewGroup).removeView(confirmFrame) }
+                })
+                confirmRow.addView(Button(this@MainActivity).apply {
+                    text = "DELETE"
+                    textSize = 13f
+                    setTextColor(Color.WHITE)
+                    setTypeface(null, Typeface.BOLD)
+                    background = GradientDrawable().apply { setColor(Color.parseColor("#880000")); cornerRadius = 15f }
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { leftMargin = 10 }
+                    setOnClickListener {
+                        val toDelete = if (currentCc == -1) midiHelper.getAllBindings()
+                                       else midiHelper.getAllBindings().filter { it.first == currentCc }
+                        toDelete.forEach { (cc, targetId, _) -> midiHelper.removeBinding(cc, targetId) }
+                        (confirmFrame.parent as ViewGroup).removeView(confirmFrame)
+                        refreshList()
+                    }
+                })
+                confirmBox.addView(confirmRow)
+                confirmFrame.addView(confirmBox)
+                overlayHUD.addView(confirmFrame)
+            }
+        }
+
+        btnRow.addView(showAllBtn)
+        btnRow.addView(deleteVisibleBtn)
+        content.addView(btnRow)
+
+        // Close button
+        content.addView(Button(this).apply {
+            text = "CLOSE"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            background = null
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120).apply { topMargin = 10 }
+            setOnClickListener {
+                midiHelper.onCCReceived = null
+                (frame.parent as ViewGroup).removeView(frame)
+            }
+        })
+
+        frame.addView(content)
+        overlayHUD.addView(frame)
     }
 
     // Add this inside MainActivity class
