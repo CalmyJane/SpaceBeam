@@ -4432,8 +4432,8 @@ class MainActivity : AppCompatActivity() {
                 val dx = (focusX - lastFingerFocusX) / glView.width.toFloat() * 2.0f
                 val dy = (focusY - lastFingerFocusY) / glView.height.toFloat() * 2.0f
 
-                controlsMap[pTxId]?.let { it.setProgress((it.value + (dx * 500).toInt()).coerceIn(0, 1000)) }
-                controlsMap[pTyId]?.let { it.setProgress((it.value - (dy * 500).toInt()).coerceIn(0, 1000)) }
+                controlsMap[pTxId]?.let { it.setProgress((it.value - (dx * 500).toInt()).coerceIn(0, 1000)) }
+                controlsMap[pTyId]?.let { it.setProgress((it.value + (dy * 500).toInt()).coerceIn(0, 1000)) }
 
                 val scaleFactor = dist / lastFingerDist
                 if (scaleFactor > 0 && lastFingerDist > 0) {
