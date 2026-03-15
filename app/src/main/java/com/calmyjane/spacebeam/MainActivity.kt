@@ -3821,7 +3821,7 @@ class MainActivity : AppCompatActivity() {
 
             addControl(PropertyControl("S_WIDE", "WIDENESS", defaultValue = 500, outMin=0.0f, outMax=2.0f, hasModulation = true))
             addControl(PropertyControl("S_ACTIVITY", "ACTIVITY", defaultValue = 200, outMin=0.0f, outMax=2.0f, hasModulation = true))
-            addControl(PropertyControl("SWIRL_SPEED", "SPEED", defaultValue = 500, outMin=-4.0f, outMax=4.0f, hasModulation = true))
+            addControl(PropertyControl("SWIRL_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
 
             addControl(PropertyControl("S_FOG", "FOG DIST", defaultValue = 100, outMin=0.0f, outMax=1.0f, hasModulation = true))
             addControl(PropertyControl("S_FOG_FALLOFF", "FOG SOFT", defaultValue = 150, outMin=0.0f, outMax=80.0f))
@@ -4014,6 +4014,76 @@ class MainActivity : AppCompatActivity() {
             GLES20.glUniform1f(locVib, mainActivity.controlsMap["VIBRANCE"]?.computedValue ?: 1f)
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
+        override fun release() { GLES20.glDeleteProgram(prog) }
+    }
+
+    class EdgeEffect(activity: MainActivity) : MainActivity.ShaderEffect("FX_EDGE", "EDGE DETECT", activity) {
+        private var prog = 0
+        private var locTex = -1; private var locAmt = -1; private var locThresh = -1
+        private var locHue = -1; private var locSat = -1; private var locBrit = -1; private var locRes = -1
+
+        init {
+            addControl(PropertyControl("E_AMT", "AMOUNT", defaultValue = 0, outMin = 0f, outMax = 1f, hasModulation = true))
+            addControl(PropertyControl("E_THRESH", "THRESHOLD", defaultValue = 300, outMin = -0.05f, outMax = 0.2f))
+            addControl(PropertyControl("E_HUE", "HUE", defaultValue = 0, outMin = 0f, outMax = 1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+            addControl(PropertyControl("E_SAT", "SATURATION", defaultValue = 1000, outMin = 0f, outMax = 1f))
+            addControl(PropertyControl("E_BRIT", "BRIGHTNESS", defaultValue = 500, outMin = 0f, outMax = 2f))
+        }
+
+        override fun init() {
+            val fSrc = """
+            precision mediump float; varying vec2 v; uniform sampler2D uTex;
+            uniform float uAmt, uThresh, uHue, uSat, uBrit;
+            uniform vec2 uRes;
+
+            vec3 hsb2rgb(vec3 c) {
+                vec3 rgb = clamp(abs(mod(c.x*6.0+vec3(0.0,4.0,2.0), 6.0)-3.0)-1.0, 0.0, 1.0);
+                return c.z * mix(vec3(1.0), rgb, c.y);
+            }
+
+            float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+            void main() {
+                vec2 px = uRes;
+                vec3 video = texture2D(uTex, v).rgb;
+
+                float l  = luma(texture2D(uTex, v).rgb);
+                float lR = luma(texture2D(uTex, v + vec2(px.x, 0.0)).rgb);
+                float lL = luma(texture2D(uTex, v - vec2(px.x, 0.0)).rgb);
+                float lU = luma(texture2D(uTex, v + vec2(0.0, px.y)).rgb);
+                float lD = luma(texture2D(uTex, v - vec2(0.0, px.y)).rgb);
+
+                float gx = lR - lL;
+                float gy = lU - lD;
+                float edge = sqrt(gx*gx + gy*gy);
+                edge = smoothstep(uThresh, uThresh + 0.08, edge);
+
+                vec3 edgeColor = hsb2rgb(vec3(uHue, uSat, uBrit)) * edge;
+                gl_FragColor = vec4(mix(video, edgeColor, uAmt), 1.0);
+            }"""
+            prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+            locTex    = GLES20.glGetUniformLocation(prog, "uTex")
+            locAmt    = GLES20.glGetUniformLocation(prog, "uAmt")
+            locThresh = GLES20.glGetUniformLocation(prog, "uThresh")
+            locHue    = GLES20.glGetUniformLocation(prog, "uHue")
+            locSat    = GLES20.glGetUniformLocation(prog, "uSat")
+            locBrit   = GLES20.glGetUniformLocation(prog, "uBrit")
+            locRes    = GLES20.glGetUniformLocation(prog, "uRes")
+        }
+
+        override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
+            GLES20.glUniform1i(locTex, 0)
+            GLES20.glUniform1f(locAmt,    mainActivity.controlsMap["E_AMT"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locThresh, mainActivity.controlsMap["E_THRESH"]?.computedValue ?: 0.2f)
+            GLES20.glUniform1f(locHue,    mainActivity.controlsMap["E_HUE"]?.computedValue ?: 0f)
+            GLES20.glUniform1f(locSat,    mainActivity.controlsMap["E_SAT"]?.computedValue ?: 1f)
+            GLES20.glUniform1f(locBrit,   mainActivity.controlsMap["E_BRIT"]?.computedValue ?: 1f)
+            GLES20.glUniform2f(locRes, 1f / w.toFloat(), 1f / h.toFloat())
+            ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+
         override fun release() { GLES20.glDeleteProgram(prog) }
     }
 
@@ -4288,6 +4358,7 @@ class MainActivity : AppCompatActivity() {
         effectChain.effects.add(TunnelEffect(this))
         effectChain.effects.add(SwirlEffect(this))
         effectChain.effects.add(ColorEffect(this))
+        effectChain.effects.add(EdgeEffect(this))
 
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
