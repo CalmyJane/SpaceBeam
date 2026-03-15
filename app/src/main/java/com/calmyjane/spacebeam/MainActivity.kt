@@ -2784,7 +2784,35 @@ class MainActivity : AppCompatActivity() {
 
     private var fpsTextView: TextView? = null
     fun updateFpsUI(fps: Int) {
-        fpsTextView?.text = "FPS: $fps"
+        val batteryIntent = registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+        val tempC = (batteryIntent?.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10
+
+        val thermalStr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val tm = getSystemService("thermal")
+                val status = tm?.javaClass?.getMethod("getCurrentThermalStatus")?.invoke(tm) as? Int
+                when (status) {
+                    0 -> ""
+                    1 -> " WARM"
+                    2 -> " HOT"
+                    3 -> " SEVERE"
+                    4 -> " CRITICAL"
+                    5 -> " EMERGENCY"
+                    else -> ""
+                }
+            } catch (e: Exception) { "" }
+        } else ""
+
+        val headroomStr = try {
+            val pm = getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+            val headroom = pm?.javaClass?.getMethod("getThermalHeadroom", Int::class.javaPrimitiveType)?.invoke(pm, 0) as? Float
+            if (headroom != null) {
+                val pct = (headroom * 100).toInt()
+                if (pct >= 100) "  T:>100%" else "  T:${pct}%"
+            } else ""
+        } catch (e: Exception) { "" }
+
+        fpsTextView?.text = "FPS: $fps  ${tempC}°C$thermalStr$headroomStr"
     }
 
     private var activeShaderInput: EditText? = null
