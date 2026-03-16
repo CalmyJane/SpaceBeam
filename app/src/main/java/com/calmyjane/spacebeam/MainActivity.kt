@@ -87,6 +87,10 @@ import android.annotation.SuppressLint
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.util.Range
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.content.ContentUris
 import android.util.LruCache
 import java.util.concurrent.Executors
@@ -956,6 +960,87 @@ class MidiHelper(private val activity: MainActivity) {
     }
 }
 
+class SensorHelper(private val activity: MainActivity) : SensorEventListener {
+    private val sensorManager = activity.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    private val linearAccelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+    private val rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+
+    @Volatile var accelX: Float = 0f
+    @Volatile var accelY: Float = 0f
+    @Volatile var accelZ: Float = 0f
+    @Volatile var pitch: Float = 0f
+    @Volatile var roll: Float = 0f
+    @Volatile var yaw: Float = 0f
+
+    // Global rotation smoothing: 0 = none, 1000 = maximum (10% default = 100)
+    var pitchSmoothing: Int = 100
+    var rollSmoothing:  Int = 100
+    var yawSmoothing:   Int = 100
+    private var smoothedPitch: Float = 0f
+    private var smoothedRoll:  Float = 0f
+    private var smoothedYaw:   Float = 0f
+
+    fun start() {
+        linearAccelSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        rotationVectorSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+    }
+
+    fun stop() {
+        sensorManager.unregisterListener(this)
+    }
+
+    override fun onSensorChanged(event: SensorEvent) {
+        when (event.sensor.type) {
+            Sensor.TYPE_LINEAR_ACCELERATION -> {
+                // Normalize ±10 m/s² → ±1.0
+                accelX = (event.values[0] / 10f).coerceIn(-1f, 1f)
+                accelY = (event.values[1] / 10f).coerceIn(-1f, 1f)
+                accelZ = (event.values[2] / 10f).coerceIn(-1f, 1f)
+            }
+            Sensor.TYPE_GAME_ROTATION_VECTOR -> {
+                val rotMatrix = FloatArray(9)
+                SensorManager.getRotationMatrixFromVector(rotMatrix, event.values)
+                val adjustedRotMatrix = FloatArray(9)
+                val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    activity.display?.rotation ?: Surface.ROTATION_0
+                } else {
+                    @Suppress("DEPRECATION")
+                    activity.windowManager.defaultDisplay.rotation
+                }
+                // Remap coordinate system to match current screen orientation
+                when (rotation) {
+                    Surface.ROTATION_90  -> SensorManager.remapCoordinateSystem(rotMatrix, SensorManager.AXIS_Y, SensorManager.AXIS_MINUS_X, adjustedRotMatrix)
+                    Surface.ROTATION_270 -> SensorManager.remapCoordinateSystem(rotMatrix, SensorManager.AXIS_MINUS_Y, SensorManager.AXIS_X, adjustedRotMatrix)
+                    Surface.ROTATION_180 -> SensorManager.remapCoordinateSystem(rotMatrix, SensorManager.AXIS_MINUS_X, SensorManager.AXIS_MINUS_Y, adjustedRotMatrix)
+                    else -> rotMatrix.copyInto(adjustedRotMatrix)
+                }
+                val orientation = FloatArray(3)
+                SensorManager.getOrientation(adjustedRotMatrix, orientation)
+                // orientation[0]=azimuth/yaw (±π), [1]=pitch (±π/2), [2]=roll (±π/2)
+                val halfPi = (Math.PI / 2).toFloat()
+                // R[8] = screen normal's vertical (world-Z) component:
+                //   0 when phone is upright (screen faces horizontally)
+                //   +1 when screen faces up, -1 when screen faces down
+                val rawPitch = adjustedRotMatrix[8].coerceIn(-1f, 1f)
+                val rawRoll  = (orientation[2] / halfPi).coerceIn(-1f, 1f)
+                val rawYaw   = (orientation[0] / Math.PI.toFloat()).coerceIn(-1f, 1f)
+                // Apply per-axis EMA smoothing
+                val pa = 1f - (pitchSmoothing / 1000f) * 0.97f
+                val ra = 1f - (rollSmoothing  / 1000f) * 0.97f
+                val ya = 1f - (yawSmoothing   / 1000f) * 0.97f
+                smoothedPitch += (rawPitch - smoothedPitch) * pa
+                smoothedRoll  += (rawRoll  - smoothedRoll)  * ra
+                smoothedYaw   += (rawYaw   - smoothedYaw)   * ya
+                pitch = smoothedPitch
+                roll  = smoothedRoll
+                yaw   = smoothedYaw
+            }
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+}
+
 class SettingsMenu(private val activity: MainActivity, private val parentView: ViewGroup) {
     private var overlay: FrameLayout? = null
     private var confirmationOverlay: FrameLayout? = null
@@ -1278,6 +1363,45 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 
         autoPlayDurationControl?.popupElevation = 600f
         autoPlayDurationControl?.attachTo(activity, contentLayout)
+
+        contentLayout.addView(createStyledDivider())
+
+        // --- SENSOR SMOOTHING ---
+        contentLayout.addView(TextView(activity).apply {
+            text = "SENSOR SMOOTHING"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 10, 0, 20)
+        })
+
+        fun addSmoothRow(name: String, getVal: () -> Int, setVal: (Int) -> Unit) {
+            val row = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 12 }
+            }
+            row.addView(TextView(activity).apply {
+                text = name; textSize = 14f; setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(130, -2)
+            })
+            row.addView(SeekBar(activity).apply {
+                max = 1000; progress = getVal()
+                thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
+                thumbOffset = 0
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) setVal(p) }
+                    override fun onStartTrackingTouch(s: SeekBar?) {}
+                    override fun onStopTrackingTouch(s: SeekBar?) {}
+                })
+            })
+            contentLayout.addView(row)
+        }
+        addSmoothRow("Pitch", { activity.sensorHelper.pitchSmoothing }) { activity.sensorHelper.pitchSmoothing = it }
+        addSmoothRow("Roll",  { activity.sensorHelper.rollSmoothing  }) { activity.sensorHelper.rollSmoothing  = it }
+        addSmoothRow("Yaw",   { activity.sensorHelper.yawSmoothing   }) { activity.sensorHelper.yawSmoothing   = it }
 
         contentLayout.addView(createStyledDivider())
 
@@ -1900,6 +2024,14 @@ open class PropertyControl(
     var modDepth: Int = 0
     var modShape: WaveShape = if (modMode == ModMode.WRAP) WaveShape.RAMP else WaveShape.SINE
 
+    // Sensor modulation: 500 = no effect, 0 = full negative, 1000 = full positive
+    var sensorAccelX: Int = 500
+    var sensorAccelY: Int = 500
+    var sensorAccelZ: Int = 500
+    var sensorPitch: Int = 500
+    var sensorRoll: Int = 500
+    var sensorYaw: Int = 500
+
     var preciseModRate: Float = 200f
     var preciseModDepth: Float = 0f
     var lfoPhase: Double = 0.0
@@ -1952,9 +2084,12 @@ open class PropertyControl(
             return outMin + (modulatedNormalized * (outMax - outMin))
         }
 
-    data class Snapshot(val value: Int, val active: Boolean, val rate: Int, val depth: Int, val shape: String, val smoothing: Int, val isSynced: Boolean = false, val syncIndex: Int = 3)
+    data class Snapshot(val value: Int, val active: Boolean, val rate: Int, val depth: Int, val shape: String, val smoothing: Int, val isSynced: Boolean = false, val syncIndex: Int = 3,
+                        val sensorAccelX: Int = 500, val sensorAccelY: Int = 500, val sensorAccelZ: Int = 500,
+                        val sensorPitch: Int = 500, val sensorRoll: Int = 500, val sensorYaw: Int = 500)
 
-    fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name, smoothing, isBeatSynced, beatMultiplierIndex)
+    fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name, smoothing, isBeatSynced, beatMultiplierIndex,
+        sensorAccelX, sensorAccelY, sensorAccelZ, sensorPitch, sensorRoll, sensorYaw)
 
     fun restore(s: Snapshot, durationSec: Float) {
         if (isLocked) return
@@ -1966,6 +2101,12 @@ open class PropertyControl(
         this.smoothing = s.smoothing
         this.isBeatSynced = s.isSynced
         this.beatMultiplierIndex = s.syncIndex
+        this.sensorAccelX = s.sensorAccelX
+        this.sensorAccelY = s.sensorAccelY
+        this.sensorAccelZ = s.sensorAccelZ
+        this.sensorPitch  = s.sensorPitch
+        this.sensorRoll   = s.sensorRoll
+        this.sensorYaw    = s.sensorYaw
     }
 
     fun animateTo(target: Float, durationSec: Float, newShape: String? = null) {
@@ -2120,6 +2261,26 @@ open class PropertyControl(
                 currentCalculatedOutput = ((raw % 1.0f) + 1.0f) % 1.0f
             } else {
                 currentCalculatedOutput = (smoothedNormalized * (1.0f - depthNorm)) + (rawWave.toFloat() * depthNorm)
+            }
+        }
+
+        val sh = (currentContext as? MainActivity)?.sensorHelper
+        if (sh != null && (sensorAccelX != 500 || sensorAccelY != 500 || sensorAccelZ != 500 ||
+                           sensorPitch != 500 || sensorRoll != 500 || sensorYaw != 500)) {
+            // t*|t| applies a quadratic curve while preserving sign:
+            // small slider deviations from center → very small effect, full deflection → full effect
+            fun sensorScale(v: Int): Float { val t = (v - 500) / 500f; return t * abs(t) }
+            var sensorOffset = 0f
+            sensorOffset += sensorScale(sensorAccelX) * sh.accelX
+            sensorOffset += sensorScale(sensorAccelY) * sh.accelY
+            sensorOffset += sensorScale(sensorAccelZ) * sh.accelZ
+            sensorOffset += sensorScale(sensorPitch)  * sh.pitch
+            sensorOffset += sensorScale(sensorRoll)   * sh.roll
+            sensorOffset += sensorScale(sensorYaw)    * sh.yaw
+            currentCalculatedOutput = if (modMode == ModMode.WRAP) {
+                ((currentCalculatedOutput + sensorOffset) % 1.0f + 1.0f) % 1.0f
+            } else {
+                (currentCalculatedOutput + sensorOffset).coerceIn(0f, 1f)
             }
         }
 
@@ -2565,6 +2726,27 @@ open class PropertyControl(
             contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 20) })
         }
 
+        // Sensor modulation section
+        contentLayout.addView(View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(-1, 2).apply { topMargin = 10; bottomMargin = 20 }
+            setBackgroundColor(Color.DKGRAY)
+        })
+        contentLayout.addView(TextView(context).apply {
+            text = "ROTATION"
+            textSize = 10f; setTextColor(Color.GRAY); setPadding(0, 0, 0, 5)
+        })
+        addSensorAxisSlider(context, contentLayout, "Pitch", sensorPitch) { sensorPitch = it }
+        addSensorAxisSlider(context, contentLayout, "Roll",  sensorRoll)  { sensorRoll  = it }
+        addSensorAxisSlider(context, contentLayout, "Yaw",   sensorYaw)   { sensorYaw   = it }
+        contentLayout.addView(TextView(context).apply {
+            text = "ACCELERATION"
+            textSize = 10f; setTextColor(Color.GRAY); setPadding(0, 10, 0, 5)
+        })
+        addSensorAxisSlider(context, contentLayout, "X", sensorAccelX) { sensorAccelX = it }
+        addSensorAxisSlider(context, contentLayout, "Y", sensorAccelY) { sensorAccelY = it }
+        addSensorAxisSlider(context, contentLayout, "Z", sensorAccelZ) { sensorAccelZ = it }
+        contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 20) })
+
         contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
         val resetBtn = Button(context).apply {
             text = "RESET"; textSize = 14f; setTextColor(Color.LTGRAY); includeFontPadding = false; setPadding(0, 0, 0, 0); gravity = Gravity.CENTER
@@ -2631,6 +2813,41 @@ open class PropertyControl(
         row.addView(sb)
         parent.addView(row)
         return sb
+    }
+
+    private fun addSensorAxisSlider(ctx: Context, parent: ViewGroup, name: String, current: Int, onChange: (Int) -> Unit) {
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 5, 0, 5)
+        }
+        var seekBarRef: SeekBar? = null
+        val labelView = TextView(ctx).apply {
+            text = name
+            textSize = 10f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(130, ViewGroup.LayoutParams.MATCH_PARENT)
+            isClickable = true
+            setOnClickListener { onChange(500); seekBarRef?.progress = 500 }
+        }
+        val sb = SeekBar(ctx).apply {
+            max = 1000
+            progress = current
+            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
+            setPadding(0, 0, 0, 0)
+            thumbOffset = 0
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) onChange(p) }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+        seekBarRef = sb
+        row.addView(labelView)
+        row.addView(sb)
+        parent.addView(row)
     }
 
     private fun updateLockButtonVisuals() {
@@ -2783,6 +3000,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private var fpsTextView: TextView? = null
+    private var sensorDebugTextView: TextView? = null
     fun updateFpsUI(fps: Int) {
         val batteryIntent = registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
         val tempC = (batteryIntent?.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10
@@ -2813,6 +3031,8 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { "" }
 
         fpsTextView?.text = "FPS: $fps  ${tempC}°C$thermalStr$headroomStr"
+        val sh = sensorHelper
+        sensorDebugTextView?.text = "P:${"%.2f".format(sh.pitch)}  R:${"%.2f".format(sh.roll)}  Y:${"%.2f".format(sh.yaw)}"
     }
 
     private var activeShaderInput: EditText? = null
@@ -3170,6 +3390,7 @@ class MainActivity : AppCompatActivity() {
     lateinit var overlayHUD: FrameLayout
     private lateinit var displayHelper: ExternalDisplayHelper
     lateinit var midiHelper: MidiHelper
+    lateinit var sensorHelper: SensorHelper
     var autoPlayFilter = mutableSetOf(1, 2, 3, 4, 5, 6, 7, 8, 9)
     val controls = java.util.concurrent.CopyOnWriteArrayList<PropertyControl>()
     val controlsMap = java.util.concurrent.ConcurrentHashMap<String, PropertyControl>()
@@ -4409,6 +4630,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         midiHelper = MidiHelper(this)
+        sensorHelper = SensorHelper(this)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         hideSystemUI()
 
@@ -4511,6 +4733,16 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    override fun onResume() {
+        super.onResume()
+        sensorHelper.start()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        sensorHelper.stop()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -5328,9 +5560,18 @@ class MainActivity : AppCompatActivity() {
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
-            setPadding(15, 0, 15, 20)
+            setPadding(15, 0, 15, 4)
         }
         menuLayout.addView(fpsTextView)
+
+        sensorDebugTextView = TextView(this).apply {
+            text = "P:0.00  R:0.00  Y:0.00"
+            textSize = 11f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            setPadding(15, 0, 15, 20)
+        }
+        menuLayout.addView(sensorDebugTextView)
 
         parameterPanel.addView(menuLayout)
 
@@ -6586,6 +6827,12 @@ class MainActivity : AppCompatActivity() {
                 snapObj.put("s", snap.smoothing)
                 snapObj.put("synced", snap.isSynced)
                 snapObj.put("syncIdx", snap.syncIndex)
+                snapObj.put("sax", snap.sensorAccelX)
+                snapObj.put("say", snap.sensorAccelY)
+                snapObj.put("saz", snap.sensorAccelZ)
+                snapObj.put("sp",  snap.sensorPitch)
+                snapObj.put("sro", snap.sensorRoll)
+                snapObj.put("sy",  snap.sensorYaw)
                 controlsObj.put(key, snapObj)
             }
             rootObj.put("controls", controlsObj)
@@ -6734,7 +6981,13 @@ class MainActivity : AppCompatActivity() {
                             s.optString("shape", "SINE"),
                             s.optInt("s", 500),
                             s.optBoolean("synced", false),
-                            s.optInt("syncIdx", 3)
+                            s.optInt("syncIdx", 3),
+                            s.optInt("sax", 500),
+                            s.optInt("say", 500),
+                            s.optInt("saz", 500),
+                            s.optInt("sp",  500),
+                            s.optInt("sro", 500),
+                            s.optInt("sy",  500)
                         )
                     }
                     presets[idx] = Preset(snapshots, fx, fy, r180, ax)
