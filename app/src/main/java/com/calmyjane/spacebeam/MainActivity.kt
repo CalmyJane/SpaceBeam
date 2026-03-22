@@ -3001,36 +3001,29 @@ class MainActivity : AppCompatActivity() {
 
     private var fpsTextView: TextView? = null
     private var sensorDebugTextView: TextView? = null
+    private var cachedTempC = 0
+    private var cachedHeadroomStr = ""
+    private var lastThermalPollMs = 0L
     fun updateFpsUI(fps: Int) {
-        val batteryIntent = registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
-        val tempC = (batteryIntent?.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10
+        val now = System.currentTimeMillis()
+        if (now - lastThermalPollMs > 5000L) {
+            lastThermalPollMs = now
+            val batteryIntent = registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+            cachedTempC = (batteryIntent?.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10
 
-        val thermalStr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try {
-                val tm = getSystemService("thermal")
-                val status = tm?.javaClass?.getMethod("getCurrentThermalStatus")?.invoke(tm) as? Int
-                when (status) {
-                    0 -> ""
-                    1 -> " WARM"
-                    2 -> " HOT"
-                    3 -> " SEVERE"
-                    4 -> " CRITICAL"
-                    5 -> " EMERGENCY"
-                    else -> ""
-                }
-            } catch (e: Exception) { "" }
-        } else ""
-
-        val headroomStr = try {
             val pm = getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
-            val headroom = pm?.javaClass?.getMethod("getThermalHeadroom", Int::class.javaPrimitiveType)?.invoke(pm, 0) as? Float
-            if (headroom != null) {
-                val pct = (headroom * 100).toInt()
-                if (pct >= 100) "  T:>100%" else "  T:${pct}%"
+            cachedHeadroomStr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val headroom = pm?.getThermalHeadroom(0)
+                    if (headroom != null) {
+                        val pct = (headroom * 100).toInt()
+                        if (pct >= 100) "  T:>100%" else "  T:${pct}%"
+                    } else ""
+                } catch (e: Exception) { Log.w("SpaceBeam", "getThermalHeadroom failed", e); "" }
             } else ""
-        } catch (e: Exception) { "" }
+        }
 
-        fpsTextView?.text = "FPS: $fps  ${tempC}°C$thermalStr$headroomStr"
+        fpsTextView?.text = "FPS: $fps  ${cachedTempC}°C$cachedHeadroomStr"
         val sh = sensorHelper
         sensorDebugTextView?.text = "P:${"%.2f".format(sh.pitch)}  R:${"%.2f".format(sh.roll)}  Y:${"%.2f".format(sh.yaw)}"
     }
@@ -7117,6 +7110,8 @@ class MainActivity : AppCompatActivity() {
 
             var customShaderCode: String? = null
             var customProgram: Int = 0
+            private var customLocITime = -1; private var customLocUTime = -1
+            private var customLocIResolution = -1; private var customLocUFlip = -1; private var customLocURotation = -1
 
             // Playlist & Crossfade specifics
             @Volatile var baseLayerIndex = 0
@@ -7201,6 +7196,11 @@ class MainActivity : AppCompatActivity() {
                     """.trimIndent()
                     val fSrc = ctx.wrapShaderCode(customShaderCode ?: "void main(){ gl_FragColor=vec4(0.0); }")
                     customProgram = ShaderHelper.createProgram(vSrc, fSrc)
+                    customLocITime = GLES20.glGetUniformLocation(customProgram, "iTime")
+                    customLocUTime = GLES20.glGetUniformLocation(customProgram, "uTime")
+                    customLocIResolution = GLES20.glGetUniformLocation(customProgram, "iResolution")
+                    customLocUFlip = GLES20.glGetUniformLocation(customProgram, "uFlip")
+                    customLocURotation = GLES20.glGetUniformLocation(customProgram, "uRotation")
                     isReady = true
                     return
                 }
@@ -7229,7 +7229,10 @@ class MainActivity : AppCompatActivity() {
 
             fun release() {
                 isReady = false
-                if (customProgram != 0) { GLES20.glDeleteProgram(customProgram); customProgram = 0 }
+                if (customProgram != 0) {
+                    GLES20.glDeleteProgram(customProgram); customProgram = 0
+                    customLocITime = -1; customLocUTime = -1; customLocIResolution = -1; customLocUFlip = -1; customLocURotation = -1
+                }
                 layerA.release(); layerB.release()
                 if (fboId != 0) { val f = IntArray(1){fboId}; GLES20.glDeleteFramebuffers(1, f, 0); fboId = 0 }
                 if (fboTexId != 0) { val t = IntArray(1){fboTexId}; GLES20.glDeleteTextures(1, t, 0); fboTexId = 0 }
@@ -7339,11 +7342,11 @@ class MainActivity : AppCompatActivity() {
                 if (type == SourceType.SHADER) {
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                     GLES20.glUseProgram(customProgram)
-                    GLES20.glUniform1f(GLES20.glGetUniformLocation(customProgram, "iTime"), globalTime)
-                    GLES20.glUniform1f(GLES20.glGetUniformLocation(customProgram, "uTime"), globalTime)
-                    GLES20.glUniform2f(GLES20.glGetUniformLocation(customProgram, "iResolution"), FIXED_WIDTH.toFloat(), FIXED_HEIGHT.toFloat())
-                    GLES20.glUniform2f(GLES20.glGetUniformLocation(customProgram, "uFlip"), userFlipX, userFlipY)
-                    GLES20.glUniform1f(GLES20.glGetUniformLocation(customProgram, "uRotation"), Math.toRadians((rotation + if(userRot180) 180f else 0f).toDouble()).toFloat())
+                    GLES20.glUniform1f(customLocITime, globalTime)
+                    GLES20.glUniform1f(customLocUTime, globalTime)
+                    GLES20.glUniform2f(customLocIResolution, FIXED_WIDTH.toFloat(), FIXED_HEIGHT.toFloat())
+                    GLES20.glUniform2f(customLocUFlip, userFlipX, userFlipY)
+                    GLES20.glUniform1f(customLocURotation, Math.toRadians((rotation + if(userRot180) 180f else 0f).toDouble()).toFloat())
                     ShaderHelper.bindQuad(customProgram)
                     GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
                 } else if (type == SourceType.PLAYLIST) {
@@ -7849,7 +7852,7 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
 
     fun drain(endOfStream: Boolean) {
         if (endOfStream) {
-            try { videoEncoder.signalEndOfInputStream() } catch (e: Exception) { }
+            try { videoEncoder.signalEndOfInputStream() } catch (e: Exception) { Log.w("SpaceBeam", "signalEndOfInputStream failed", e) }
         }
         // Use 0 timeout for video to ensure we don't block the GL thread
         drainEncoder(videoEncoder, isVideo = true, timeoutUs = 0L)
@@ -7873,16 +7876,19 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
                         audioEncoder!!.queueInputBuffer(inputBufferIndex, 0, readBytes, pts, 0)
                     }
                     drainEncoder(audioEncoder!!, isVideo = false, timeoutUs = 10000L)
-                } catch (e: Exception) { }
+                } catch (e: Exception) { Log.w("SpaceBeam", "Audio encode error", e) }
             }
         }
     }
 
+    private val videoBufferInfo = MediaCodec.BufferInfo()
+    private val audioBufferInfo = MediaCodec.BufferInfo()
+
     private fun drainEncoder(encoder: MediaCodec, isVideo: Boolean, timeoutUs: Long) {
-        val bufferInfo = MediaCodec.BufferInfo()
+        val bufferInfo = if (isVideo) videoBufferInfo else audioBufferInfo
 
         while (true) {
-            val idx = try { encoder.dequeueOutputBuffer(bufferInfo, timeoutUs) } catch (e: Exception) { -1 }
+            val idx = try { encoder.dequeueOutputBuffer(bufferInfo, timeoutUs) } catch (e: Exception) { Log.w("SpaceBeam", "dequeueOutputBuffer failed", e); -1 }
             if (idx == MediaCodec.INFO_TRY_AGAIN_LATER) {
                 break
             } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
@@ -7938,7 +7944,7 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
             audioEncoder?.release()
             audioRecord?.stop()
             audioRecord?.release()
-        } catch (e: Exception) { }
+        } catch (e: Exception) { Log.w("SpaceBeam", "VideoRecorder release error", e) }
     }
 }
 
