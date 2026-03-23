@@ -2035,6 +2035,9 @@ open class PropertyControl(
     var preciseModRate: Float = 200f
     var preciseModDepth: Float = 0f
     var lfoPhase: Double = 0.0
+    private var rampAccum: Double = 0.0
+    private var rampAccumStart: Double = 0.0
+    private var rampAccumTarget: Double? = null
     private var noiseValA: Float = Math.random().toFloat()
     private var noiseValB: Float = Math.random().toFloat()
 
@@ -2097,6 +2100,10 @@ open class PropertyControl(
         animateTo(s.value.toFloat(), durationSec, s.shape)
         if (hasModulation) {
             animateModulation(s.rate.toFloat(), s.depth.toFloat(), durationSec)
+        }
+        if (modMode == ModMode.WRAP) {
+            rampAccumStart = rampAccum
+            rampAccumTarget = Math.round(rampAccum).toDouble()
         }
         this.smoothing = s.smoothing
         this.isBeatSynced = s.isSynced
@@ -2213,6 +2220,20 @@ open class PropertyControl(
 
         var currentCalculatedOutput = smoothedNormalized
 
+        // Animate rampAccum toward nearest full revolution during preset transitions
+        if (rampAccumTarget != null && modMode == ModMode.WRAP) {
+            if (isAnimating && animDuration > 0) {
+                val at = (animTime / animDuration).coerceIn(0f, 1f)
+                val ae = at * at * (3f - 2f * at)
+                rampAccum = rampAccumStart + (rampAccumTarget!! - rampAccumStart) * ae
+            }
+            if (!isAnimating) {
+                rampAccum = rampAccumTarget!!
+                rampAccumTarget = null
+                rampAccum -= Math.floor(rampAccum) // normalize to [0, 1)
+            }
+        }
+
         if (hasModulation && (smoothedModRate > 1f || smoothedModDepth > 1f || isBeatSynced)) {
             val baseSpeed: Float
             if (isBeatSynced && currentContext is MainActivity) {
@@ -2246,10 +2267,18 @@ open class PropertyControl(
                 }
             }
 
-            var rawWave = getWaveValue(modShape, lfoPhase)
+            var rawWave = if (modShape == WaveShape.RAMP && modMode == ModMode.WRAP) {
+                ((rampAccum % 1.0) + 1.0) % 1.0
+            } else {
+                getWaveValue(modShape, lfoPhase)
+            }
 
             if (oldModShape != null && shapeFadeProgress < 1f) {
-                val oldWave = getWaveValue(oldModShape!!, lfoPhase)
+                val oldWave = if (oldModShape == WaveShape.RAMP && modMode == ModMode.WRAP) {
+                    ((rampAccum % 1.0) + 1.0) % 1.0
+                } else {
+                    getWaveValue(oldModShape!!, lfoPhase)
+                }
                 val fadeEased = shapeFadeProgress * shapeFadeProgress * (3.0f - 2.0f * shapeFadeProgress)
                 rawWave = oldWave + (rawWave - oldWave) * fadeEased
             }
@@ -2257,8 +2286,15 @@ open class PropertyControl(
             val depthNorm = (smoothedModDepth / 1000f).toDouble().pow(2.0).toFloat()
 
             if (modMode == ModMode.WRAP) {
-                val raw = smoothedNormalized + (rawWave.toFloat() * depthNorm)
-                currentCalculatedOutput = ((raw % 1.0f) + 1.0f) % 1.0f
+                if (modShape == WaveShape.RAMP && oldModShape == null && rampAccumTarget == null) {
+                    // Pure RAMP+WRAP steady state: depth controls accumulation speed, not amplitude
+                    rampAccum += baseSpeed * depthNorm * deltaTime.toDouble()
+                    currentCalculatedOutput = ((smoothedNormalized + rampAccum.toFloat()) % 1.0f + 1.0f) % 1.0f
+                } else {
+                    // During transitions/crossfade: use waveform*depth model with rampAccum fraction
+                    val raw = smoothedNormalized + (rawWave.toFloat() * depthNorm)
+                    currentCalculatedOutput = ((raw % 1.0f) + 1.0f) % 1.0f
+                }
             } else {
                 currentCalculatedOutput = (smoothedNormalized * (1.0f - depthNorm)) + (rawWave.toFloat() * depthNorm)
             }
@@ -2428,7 +2464,10 @@ open class PropertyControl(
     fun stopAnimation() {
         isAnimating = false; animTarget = null; modRateTarget = null; modDepthTarget = null
         oldModShape = null; shapeFadeProgress = 1f
+        rampAccumTarget = null
     }
+
+    fun resetRampAccum() { rampAccum = 0.0; rampAccumTarget = null }
 
     fun detach() {
         sliderView = null; modIndicator = null; mainRowLayout = null
@@ -7428,7 +7467,7 @@ class MainActivity : AppCompatActivity() {
             rotAnimDuration = duration; rotAnimTime = 0f; isRotAnimating = true
         }
         fun stopRotationAnim() { isRotAnimating = false }
-        fun resetPhases() { ctx.controls.forEach { it.lfoPhase = 0.0 }; mRotAccum = 0.0; cRotAccum = 0.0; lRotAccum = 0.0 }
+        fun resetPhases() { ctx.controls.forEach { it.lfoPhase = 0.0; it.resetRampAccum() }; mRotAccum = 0.0; cRotAccum = 0.0; lRotAccum = 0.0 }
         fun capturePhoto() { captureRequested = true }
         fun stopRecording(callback: (File?) -> Unit) { onStopCallback = callback; isStopRequested = true }
         fun startRecording(file: File) { pendingRecordFile = file; recordStartTimeNs = 0 }
