@@ -1,12 +1,16 @@
-    SpaceBeam transforms your camera feed into psychedelic, real-time geometry pattern generator. It transmtis the image as a "second screen"
+    SpaceBeam transforms your camera feed into apsychedelic, real-time geometry pattern generator. It transmits the image as a second screen
     to be shared over miracast or hdmi.
     
     Features:
     * kaleidoscope effects
     * Front/Back Camera as Input source
     * RTSP as input-source
-    * Image/Video as input-source
-    * 9 presets
+    * Image/Video (playlists) as input-source
+    * Generative Shaders as input-source
+    * Accelerometer as modulation for parameters
+    * Bluetooth MIDI controller as modulation source
+    * BPM tap and beat synced LFOs
+    * 9 presets slots with smooth transitions between presets
     * Auto-Play mode
 
     Recommended Setup:
@@ -16,6 +20,7 @@
     On main phone, host a wifi hotspot, or bring both phones into the same external wifi.
     Select the rtsp input in the app and enter the address "rtsp://192.168.30.40:8080/h264_ulaw.sdp" (the IP adress is shown on the remote cam phone when the server is running).
     You should get a remote image from the second phone through quite some distance.
+    Alternatively to using IP Camera, you can use "Screen Stream" App to share another phones screen and make visuals out of any app (recommended apps: Fluid, Frakls ..)
 
     This way you can very easily create stunning visual art setups all just with a phone and not tons of cabling and heavy computers with expensive software.
 

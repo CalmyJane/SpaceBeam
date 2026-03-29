@@ -1,1 +1,1 @@
-Kaleidoscope Camera Fun with Shaders!
+Kaleidoscope Camera Fun with Shaders for live visual performances!

@@ -1,0 +1,5 @@
+-Added Generative Shaders
+-Changed Rendering Pipeline to modular extensible concept
+-Added Video Playlists
+-Added Accelerometer as modulation-source
+-Added BPM tap and beat-synced LFOs
