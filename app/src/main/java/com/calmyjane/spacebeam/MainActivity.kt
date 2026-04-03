@@ -5587,6 +5587,29 @@ class MainActivity : AppCompatActivity() {
             layoutDirection = View.LAYOUT_DIRECTION_LTR
         }
 
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 0)
+        }
+
+        val logoView = ImageView(this).apply {
+            setImageResource(R.drawable.logo)
+            setColorFilter(Color.WHITE, android.graphics.PorterDuff.Mode.SRC_IN)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(15, 0, 0, 0)
+        }
+        val logoSize = (36 * resources.displayMetrics.density).toInt()
+        val logoParams = LinearLayout.LayoutParams(logoSize, logoSize).apply {
+            bottomMargin = (3 * resources.displayMetrics.density).toInt()
+            rightMargin = (6 * resources.displayMetrics.density).toInt()
+        }
+        headerRow.addView(logoView, logoParams)
+
+        val textColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
         fpsTextView = TextView(this).apply {
             text = "FPS: --"
             textSize = 12f
@@ -5594,7 +5617,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             setPadding(15, 0, 15, 4)
         }
-        menuLayout.addView(fpsTextView)
+        textColumn.addView(fpsTextView)
 
         sensorDebugTextView = TextView(this).apply {
             text = "P:0.00  R:0.00  Y:0.00"
@@ -5603,7 +5626,10 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             setPadding(15, 0, 15, 20)
         }
-        menuLayout.addView(sensorDebugTextView)
+        textColumn.addView(sensorDebugTextView)
+
+        headerRow.addView(textColumn)
+        menuLayout.addView(headerRow)
 
         parameterPanel.addView(menuLayout)
 
