@@ -1,4 +1,4 @@
-    SpaceBeam transforms your camera feed into apsychedelic, real-time geometry pattern generator. It transmits the image as a second screen
+    SpaceBeam transforms your camera feed into a psychedelic, real-time geometry pattern generator. It transmits the image as a second screen
     to be shared over miracast or hdmi.
     
     Features:
@@ -27,3 +27,6 @@
     Hope you enjoy this, if you do, send me a mail :)
     info@calmyjane.com
     www.calmyjane.com
+
+Privacy Note:
+Network Usage is needed for streaming Videos from other devices into the app. The app does not communicate with the internet. If your OS allows, you can block Network Usage for the app, this will cause error message when trying to add RTSP sources, but otherwise won't affect the apps performance.
