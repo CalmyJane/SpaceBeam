@@ -1415,6 +1415,51 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             setOnClickListener { dismiss() }
         })
 
+        // --- FOOTER ---
+        contentLayout.addView(createStyledDivider())
+
+        val footerLogoSize = (48 * activity.resources.displayMetrics.density).toInt()
+        contentLayout.addView(ImageView(activity).apply {
+            setImageResource(R.drawable.logo)
+            setColorFilter(Color.LTGRAY, android.graphics.PorterDuff.Mode.SRC_IN)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams(footerLogoSize, footerLogoSize).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = 20
+            }
+        })
+
+        contentLayout.addView(TextView(activity).apply {
+            text = "Created by Calmy Jane"
+            textSize = 14f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 16, 0, 8)
+        })
+
+        contentLayout.addView(TextView(activity).apply {
+            text = "info@calmyjane.com"
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 4, 0, 4)
+            setOnClickListener {
+                val clip = android.content.ClipData.newPlainText("email", "info@calmyjane.com")
+                (activity.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(clip)
+            }
+        })
+
+        contentLayout.addView(TextView(activity).apply {
+            text = "www.calmyjane.com"
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 4, 0, 0)
+            setOnClickListener {
+                activity.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.calmyjane.com")))
+            }
+        })
+
         scrollContainer!!.addView(contentLayout)
         overlay!!.addView(scrollContainer)
         parentView.addView(overlay, ViewGroup.LayoutParams(-1, -1))
