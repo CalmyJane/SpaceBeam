@@ -1367,48 +1367,49 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         contentLayout.addView(createStyledDivider())
 
         // --- UNDO HISTORY ---
-        contentLayout.addView(TextView(activity).apply {
-            text = "UNDO HISTORY"
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.LTGRAY)
-            gravity = Gravity.CENTER
-            setPadding(0, 10, 0, 20)
-        })
-
         val undoRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 12 }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2).apply { bottomMargin = 10 }
         }
+
         undoRow.addView(TextView(activity).apply {
-            text = "STEPS"; textSize = 14f; setTextColor(Color.WHITE)
-            layoutParams = LinearLayout.LayoutParams(130, -2)
-        })
-        val undoLabel = TextView(activity).apply {
-            text = "${activity.undoHistorySize}"
-            textSize = 14f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(80, -2)
-        }
-        undoRow.addView(SeekBar(activity).apply {
-            max = 100; progress = activity.undoHistorySize
-            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
-            thumbOffset = 0
+            text = "UNDO STEPS"
+            textSize = 14f
+            setTextColor(Color.WHITE)
             layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
-                    if (f) {
-                        val clamped = p.coerceAtLeast(1)
+        })
+
+        undoRow.addView(EditText(activity).apply {
+            setText(activity.undoHistorySize.toString())
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#222222"))
+                setStroke(2, Color.DKGRAY)
+                cornerRadius = 10f
+            }
+            setPadding(20, 10, 20, 10)
+            layoutParams = LinearLayout.LayoutParams(150, -2)
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setOnEditorActionListener { v, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_DONE) {
+                    val newVal = v.text.toString().toIntOrNull()
+                    if (newVal != null && newVal > 0) {
+                        val clamped = newVal.coerceIn(1, 999)
                         activity.undoHistorySize = clamped
                         activity.undoManager.maxHistory = clamped
-                        undoLabel.text = "$clamped"
+                        v.text = clamped.toString()
                     }
-                }
-                override fun onStartTrackingTouch(s: SeekBar?) {}
-                override fun onStopTrackingTouch(s: SeekBar?) {}
-            })
+                    val imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    imm.hideSoftInputFromWindow(v.windowToken, 0)
+                    v.clearFocus()
+                    true
+                } else false
+            }
         })
-        undoRow.addView(undoLabel)
         contentLayout.addView(undoRow)
 
         contentLayout.addView(createStyledDivider())
