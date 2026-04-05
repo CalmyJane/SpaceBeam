@@ -1366,6 +1366,53 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 
         contentLayout.addView(createStyledDivider())
 
+        // --- UNDO HISTORY ---
+        contentLayout.addView(TextView(activity).apply {
+            text = "UNDO HISTORY"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 10, 0, 20)
+        })
+
+        val undoRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 12 }
+        }
+        undoRow.addView(TextView(activity).apply {
+            text = "STEPS"; textSize = 14f; setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(130, -2)
+        })
+        val undoLabel = TextView(activity).apply {
+            text = "${activity.undoHistorySize}"
+            textSize = 14f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(80, -2)
+        }
+        undoRow.addView(SeekBar(activity).apply {
+            max = 100; progress = activity.undoHistorySize
+            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
+            thumbOffset = 0
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
+                    if (f) {
+                        val clamped = p.coerceAtLeast(1)
+                        activity.undoHistorySize = clamped
+                        activity.undoManager.maxHistory = clamped
+                        undoLabel.text = "$clamped"
+                    }
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        })
+        undoRow.addView(undoLabel)
+        contentLayout.addView(undoRow)
+
+        contentLayout.addView(createStyledDivider())
+
         // --- SENSOR SMOOTHING ---
         contentLayout.addView(TextView(activity).apply {
             text = "SENSOR SMOOTHING"
@@ -2006,6 +2053,95 @@ class ExternalDisplayHelper(
 }
 
 
+class UndoManager(var maxHistory: Int = 20) {
+    data class UndoState(
+        val controlSnapshots: Map<String, PropertyControl.Snapshot>,
+        val activePreset: Int = -1
+    )
+
+    private val undoStack = ArrayDeque<UndoState>()
+    private val redoStack = ArrayDeque<UndoState>()
+    private var pendingState: UndoState? = null
+
+    // The state we are currently transitioning towards (or have settled at).
+    // This is the "logical current state" even if animations haven't finished.
+    var targetState: UndoState? = null
+
+    val canUndo get() = undoStack.isNotEmpty()
+    val canRedo get() = redoStack.isNotEmpty()
+
+    var onStateChanged: (() -> Unit)? = null
+
+    fun clear() {
+        undoStack.clear()
+        redoStack.clear()
+        pendingState = null
+        onStateChanged?.invoke()
+    }
+
+    fun captureBeforeChange(controls: List<PropertyControl>, activePreset: Int) {
+        // Use targetState if mid-transition, otherwise capture live
+        pendingState = targetState ?: captureCurrentState(controls, activePreset)
+    }
+
+    fun commitChange(controls: List<PropertyControl>, activePreset: Int) {
+        val before = pendingState ?: return
+        pendingState = null
+        val current = captureCurrentState(controls, activePreset)
+        if (before.controlSnapshots == current.controlSnapshots) return
+        undoStack.addLast(before)
+        while (undoStack.size > maxHistory) undoStack.removeFirst()
+        redoStack.clear()
+        targetState = current
+        onStateChanged?.invoke()
+    }
+
+    fun pushStateDirectly(controls: List<PropertyControl>, activePreset: Int) {
+        // Push the logical current state (target if mid-transition)
+        val state = targetState ?: captureCurrentState(controls, activePreset)
+        undoStack.addLast(state)
+        while (undoStack.size > maxHistory) undoStack.removeFirst()
+        redoStack.clear()
+        onStateChanged?.invoke()
+    }
+
+    fun undo(controls: List<PropertyControl>, durationSec: Float): UndoState? {
+        if (!canUndo) return null
+        // Push the logical current target to redo (not mid-animation values)
+        val current = targetState ?: return null
+        redoStack.addLast(current)
+        val target = undoStack.removeLast()
+        targetState = target
+        applyState(target, controls, durationSec)
+        onStateChanged?.invoke()
+        return target
+    }
+
+    fun redo(controls: List<PropertyControl>, durationSec: Float): UndoState? {
+        if (!canRedo) return null
+        val current = targetState ?: return null
+        undoStack.addLast(current)
+        val target = redoStack.removeLast()
+        targetState = target
+        applyState(target, controls, durationSec)
+        onStateChanged?.invoke()
+        return target
+    }
+
+    private fun captureCurrentState(controls: List<PropertyControl>, activePreset: Int): UndoState {
+        val snapshots = controls.filter { it.includeInPreset }.associate { it.id to it.getSnapshot() }
+        return UndoState(snapshots, activePreset)
+    }
+
+    private fun applyState(state: UndoState, controls: List<PropertyControl>, durationSec: Float) {
+        controls.forEach { control ->
+            if (!control.includeInPreset) return@forEach
+            val snap = state.controlSnapshots[control.id] ?: return@forEach
+            control.restoreForUndo(snap, durationSec)
+        }
+    }
+}
+
 open class PropertyControl(
     val id: String,
     val label: String,
@@ -2050,6 +2186,8 @@ open class PropertyControl(
 
     var isLocked: Boolean = defaultLocked
     var subtitle: String? = null
+    var onTouchDown: (() -> Unit)? = null
+    var onTouchUp: (() -> Unit)? = null
     private var lockButton: Button? = null
 
     var smoothing: Int = 500
@@ -2141,7 +2279,14 @@ open class PropertyControl(
 
     fun restore(s: Snapshot, durationSec: Float) {
         if (isLocked) return
+        applySnapshot(s, durationSec)
+    }
 
+    fun restoreForUndo(s: Snapshot, durationSec: Float) {
+        applySnapshot(s, durationSec)
+    }
+
+    private fun applySnapshot(s: Snapshot, durationSec: Float) {
         animateTo(s.value.toFloat(), durationSec, s.shape)
         if (hasModulation) {
             animateModulation(s.rate.toFloat(), s.depth.toFloat(), durationSec)
@@ -2792,15 +2937,15 @@ open class PropertyControl(
 
             modPanelSpeedSeekBar = addSliderToPanel(context, contentLayout, "SPEED", modRate) { updateModRate(it) }
             modPanelSpeedSeekBar?.setOnTouchListener { v, event ->
-                if(event.action == MotionEvent.ACTION_DOWN) isRateDragging = true
-                if(event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) isRateDragging = false
+                if(event.action == MotionEvent.ACTION_DOWN) { isRateDragging = true; onTouchDown?.invoke() }
+                if(event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) { isRateDragging = false; onTouchUp?.invoke() }
                 v.onTouchEvent(event); true
             }
 
             modPanelDepthSeekBar = addSliderToPanel(context, contentLayout, "DEPTH", modDepth) { updateModDepth(it) }
             modPanelDepthSeekBar?.setOnTouchListener { v, event ->
-                if(event.action == MotionEvent.ACTION_DOWN) isDepthDragging = true
-                if(event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) isDepthDragging = false
+                if(event.action == MotionEvent.ACTION_DOWN) { isDepthDragging = true; onTouchDown?.invoke() }
+                if(event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) { isDepthDragging = false; onTouchUp?.invoke() }
                 v.onTouchEvent(event); true
             }
 
@@ -2989,6 +3134,7 @@ open class PropertyControl(
                 MotionEvent.ACTION_DOWN -> {
                     stopAnimation()
                     if (activeControl != null && activeControl != this@PropertyControl) closeActiveMenu()
+                    onTouchDown?.invoke()
                     updateFromTouch(event.x)
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -2996,6 +3142,7 @@ open class PropertyControl(
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     parent.requestDisallowInterceptTouchEvent(false)
+                    onTouchUp?.invoke()
                 }
             }
             return true
@@ -3630,6 +3777,15 @@ class MainActivity : AppCompatActivity() {
     var autoPlayDurationMs = 3000L // 3 seconds hold time by default
     private val autoPlayRunnable = Runnable { triggerNextAutoPlay() }
     private lateinit var playBtn: ImageButton
+
+    val undoManager = UndoManager()
+    var undoHistorySize: Int = 20
+    private lateinit var undoBtn: ImageButton
+    private lateinit var redoBtn: ImageButton
+    private lateinit var undoRedoPanel: LinearLayout
+    private var undoRedoAnimator: ValueAnimator? = null
+    private lateinit var undoDrawable: ProgressUndoRedoDrawable
+    private lateinit var redoDrawable: ProgressUndoRedoDrawable
 
     // For filling the button visual
     private var presetAnimators = mutableMapOf<Int, ValueAnimator>()
@@ -4595,6 +4751,8 @@ class MainActivity : AppCompatActivity() {
                     renderer.rot180 = !renderer.rot180
                     updateSidebarVisuals()
                 }
+                "CMD_UNDO" -> performUndo()
+                "CMD_REDO" -> performRedo()
             }
         }
     }
@@ -4748,6 +4906,8 @@ class MainActivity : AppCompatActivity() {
         initDefaultPresets()
         val prefs = getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
         autoPlayRandom = prefs.getBoolean("AP_RANDOM", false)
+        undoHistorySize = prefs.getInt("UNDO_HISTORY", 20)
+        undoManager.maxHistory = undoHistorySize
         val filterStr = prefs.getString("AP_FILTER", null)
         if (filterStr != null) {
             autoPlayFilter.clear()
@@ -4758,6 +4918,8 @@ class MainActivity : AppCompatActivity() {
         glView.post {
             globalReset()
             applyPreset(1)
+            // Clear undo history from initial setup - user starts fresh
+            undoManager.clear()
             applyReadabilityStyle()
         }
         displayHelper = ExternalDisplayHelper(this, renderer)
@@ -4970,7 +5132,20 @@ class MainActivity : AppCompatActivity() {
         setupParameterMenu()
         val cameraPanel = createCameraSettingsPanel()
         val recordPanel = createRecordControls()
+        val undoRedoPanel = createUndoRedoPanel()
         val presetPanel = createPresetPanel()
+
+        // Wire undo capture to all property controls
+        undoManager.onStateChanged = { runOnUiThread { updateUndoRedoButtons() } }
+        controls.forEach { control ->
+            if (control.includeInPreset) {
+                control.onTouchDown = { undoManager.captureBeforeChange(controls, activePreset) }
+                control.onTouchUp = {
+                    undoManager.commitChange(controls, -1)
+                    setActivePresetVisual(-1)
+                }
+            }
+        }
 
         val tapBtn = Button(this).apply {
             text = "TAP"
@@ -5027,11 +5202,22 @@ class MainActivity : AppCompatActivity() {
                 recordPanel.orientation = LinearLayout.VERTICAL; gravity = Gravity.BOTTOM or Gravity.START; bottomMargin = 450; leftMargin = 30
                 (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 40; leftMargin = 0 }
             } else {
-                recordPanel.orientation = LinearLayout.HORIZONTAL; gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30; leftMargin = 250;
+                recordPanel.orientation = LinearLayout.HORIZONTAL; gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30; leftMargin = 130;
                 (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 30 }
             }
         }
         overlayHUD.addView(recordPanel, recordParams)
+
+        // Undo/Redo panel: same style alignment as record panel
+        val undoRedoParams = FrameLayout.LayoutParams(-2, -2)
+        if (isPortrait) {
+            undoRedoPanel.orientation = LinearLayout.VERTICAL
+            (redoBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 40; leftMargin = 0 }
+        } else {
+            undoRedoPanel.orientation = LinearLayout.HORIZONTAL
+            (redoBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 30 }
+        }
+        overlayHUD.addView(undoRedoPanel, undoRedoParams)
 
         val presetParams = FrameLayout.LayoutParams(-2, -2).apply {
             if (isPortrait) {
@@ -5063,16 +5249,43 @@ class MainActivity : AppCompatActivity() {
                 val recX = recLoc[0] - hudLoc[0]
                 val recY = recLoc[1] - hudLoc[1]
 
-                val tapSize = 150
-
-                tapBtn.layoutParams = FrameLayout.LayoutParams(tapSize, tapSize).apply {
-                    gravity = Gravity.TOP or Gravity.START
-                    if (isPortrait) {
-                        leftMargin = recX + (recW / 2) - (tapSize / 2)
-                        topMargin = recY - tapSize - 20
-                    } else {
+                // Position undo/redo panel between record controls and tap button
+                if (isPortrait) {
+                    // Portrait: above record panel, same left alignment
+                    val urH = undoRedoPanel.measuredHeight.let { if (it > 0) it else 340 }
+                    undoRedoPanel.layoutParams = FrameLayout.LayoutParams(-2, -2).apply {
+                        gravity = Gravity.TOP or Gravity.START
+                        leftMargin = recX + (recW / 2) - 75
+                        topMargin = recY - urH - 20
+                    }
+                } else {
+                    // Landscape: to the right of record panel, same top alignment
+                    undoRedoPanel.layoutParams = FrameLayout.LayoutParams(-2, -2).apply {
+                        gravity = Gravity.TOP or Gravity.START
                         leftMargin = recX + recW + 20
-                        topMargin = recY + (recH / 2) - (tapSize / 2)
+                        topMargin = recY + (recH / 2) - 75
+                    }
+                }
+
+                // Position tap button after undo/redo panel
+                val tapSize = 150
+                undoRedoPanel.post {
+                    val urLoc = IntArray(2)
+                    undoRedoPanel.getLocationOnScreen(urLoc)
+                    val urX = urLoc[0] - hudLoc[0]
+                    val urY = urLoc[1] - hudLoc[1]
+                    val urW = undoRedoPanel.width
+                    val urH = undoRedoPanel.height
+
+                    tapBtn.layoutParams = FrameLayout.LayoutParams(tapSize, tapSize).apply {
+                        gravity = Gravity.TOP or Gravity.START
+                        if (isPortrait) {
+                            leftMargin = recX + (recW / 2) - (tapSize / 2)
+                            topMargin = urY - tapSize - 20
+                        } else {
+                            leftMargin = urX + urW + 20
+                            topMargin = recY + (recH / 2) - (tapSize / 2)
+                        }
                     }
                 }
             }
@@ -5089,6 +5302,32 @@ class MainActivity : AppCompatActivity() {
 
         updateSidebarVisuals()
         applyReadabilityStyle()
+        updateUndoRedoButtons()
+
+        // Restore ongoing transition animations after orientation change
+        restoreUndoRedoAnimation()
+        restorePresetTransitionAnimation()
+    }
+
+    /** Restart preset fill animation after orientation change if one was in progress */
+    private fun restorePresetTransitionAnimation() {
+        if (activePreset == -1) return
+        val elapsed = System.currentTimeMillis() - transitionStartTime
+        val remaining = transitionMs - elapsed
+        if (remaining <= 0) return
+        val btnDrawable = presetDrawables[activePreset] ?: return
+        val startProgress = elapsed.toFloat() / transitionMs.toFloat()
+        btnDrawable.isActive = true
+        val anim = ValueAnimator.ofFloat(startProgress, 1f).apply {
+            duration = remaining
+            interpolator = android.view.animation.LinearInterpolator()
+            addUpdateListener { va ->
+                btnDrawable.setProgress(va.animatedValue as Float)
+                btnDrawable.invalidateSelf()
+            }
+            start()
+        }
+        presetAnimators[activePreset] = anim
     }
 
 
@@ -6068,6 +6307,218 @@ class MainActivity : AppCompatActivity() {
         return recordControls
     }
 
+    inner class ProgressUndoRedoDrawable(private val symbol: String) : android.graphics.drawable.Drawable() {
+        private var progress = 0f
+        var enabled = false
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = 140f
+            typeface = Typeface.DEFAULT_BOLD
+            textAlign = Paint.Align.CENTER
+        }
+
+        fun setProgress(p: Float) {
+            progress = p.coerceIn(0f, 1f)
+        }
+
+        override fun getIntrinsicWidth(): Int = 150
+        override fun getIntrinsicHeight(): Int = 150
+
+        override fun draw(canvas: Canvas) {
+            val w = bounds.width().toFloat().let { if (it > 0) it else 150f }
+            val h = bounds.height().toFloat().let { if (it > 0) it else 150f }
+
+            // Fill from bottom (transition progress)
+            if (progress > 0f && progress < 1f) {
+                paint.style = Paint.Style.FILL
+                paint.color = Color.argb(80, 255, 255, 255)
+                val fillHeight = h * progress
+                canvas.drawRect(0f, h - fillHeight, w, h, paint)
+            }
+
+            // Symbol
+            textPaint.color = if (enabled) Color.WHITE else Color.GRAY
+            val xPos = w / 2
+            val yPos = (h / 2) - ((textPaint.descent() + textPaint.ascent()) / 2)
+            canvas.drawText(symbol, xPos, yPos, textPaint)
+        }
+
+        override fun setAlpha(alpha: Int) { paint.alpha = alpha; textPaint.alpha = alpha }
+        override fun setColorFilter(colorFilter: ColorFilter?) { paint.colorFilter = colorFilter }
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+    }
+
+    fun updateUndoRedoButtons() {
+        if (::undoDrawable.isInitialized) {
+            undoDrawable.enabled = undoManager.canUndo
+            undoDrawable.invalidateSelf()
+        }
+        if (::redoDrawable.isInitialized) {
+            redoDrawable.enabled = undoManager.canRedo
+            redoDrawable.invalidateSelf()
+        }
+    }
+
+    // Track which button is currently animating: true=undo, false=redo, null=none
+    private var activeUndoRedoIsUndo: Boolean? = null
+    private var undoRedoTransitionStart: Long = 0L
+
+    private val activeUndoRedoDrawable: ProgressUndoRedoDrawable?
+        get() = when (activeUndoRedoIsUndo) {
+            true -> if (::undoDrawable.isInitialized) undoDrawable else null
+            false -> if (::redoDrawable.isInitialized) redoDrawable else null
+            null -> null
+        }
+
+    private fun animateUndoRedoButton(isUndo: Boolean) {
+        undoRedoAnimator?.cancel()
+        // Reset previous drawable if switching between undo/redo
+        if (activeUndoRedoIsUndo != null && activeUndoRedoIsUndo != isUndo) {
+            activeUndoRedoDrawable?.setProgress(0f)
+            activeUndoRedoDrawable?.invalidateSelf()
+        }
+        activeUndoRedoIsUndo = isUndo
+        undoRedoTransitionStart = System.currentTimeMillis()
+        val drawable = activeUndoRedoDrawable ?: return
+        drawable.setProgress(0f)
+        drawable.invalidateSelf()
+        undoRedoAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = transitionMs
+            interpolator = android.view.animation.LinearInterpolator()
+            addUpdateListener { va ->
+                drawable.setProgress(va.animatedValue as Float)
+                drawable.invalidateSelf()
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    drawable.setProgress(0f)
+                    drawable.invalidateSelf()
+                    activeUndoRedoIsUndo = null
+                }
+            })
+            start()
+        }
+    }
+
+    /** Restart undo/redo fill animation after orientation change if one was in progress */
+    private fun restoreUndoRedoAnimation() {
+        if (activeUndoRedoIsUndo == null) return
+        val elapsed = System.currentTimeMillis() - undoRedoTransitionStart
+        val remaining = transitionMs - elapsed
+        val drawable = activeUndoRedoDrawable
+        if (remaining <= 0 || drawable == null) {
+            drawable?.setProgress(0f)
+            drawable?.invalidateSelf()
+            activeUndoRedoIsUndo = null
+            return
+        }
+        val startProgress = elapsed.toFloat() / transitionMs.toFloat()
+        undoRedoAnimator?.cancel()
+        undoRedoAnimator = ValueAnimator.ofFloat(startProgress, 1f).apply {
+            duration = remaining
+            interpolator = android.view.animation.LinearInterpolator()
+            addUpdateListener { va ->
+                drawable.setProgress(va.animatedValue as Float)
+                drawable.invalidateSelf()
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    drawable.setProgress(0f)
+                    drawable.invalidateSelf()
+                    activeUndoRedoIsUndo = null
+                }
+            })
+            start()
+        }
+    }
+
+    private fun performUndo() {
+        val durationSec = transitionMs / 1000f
+        val result = undoManager.undo(controls, durationSec) ?: return
+        setActivePresetVisual(result.activePreset, animate = true)
+        animateUndoRedoButton(true)
+    }
+
+    private fun performRedo() {
+        val durationSec = transitionMs / 1000f
+        val result = undoManager.redo(controls, durationSec) ?: return
+        setActivePresetVisual(result.activePreset, animate = true)
+        animateUndoRedoButton(false)
+    }
+
+    private fun setActivePresetVisual(presetIdx: Int, animate: Boolean = false) {
+        presetAnimators.values.forEach { it.cancel() }
+        presetAnimators.clear()
+
+        activePreset = presetIdx
+
+        presetDrawables.forEach { (id, drawable) ->
+            drawable.setProgress(0f)
+            drawable.isActive = (id == presetIdx)
+            drawable.invalidateSelf()
+        }
+
+        if (animate && presetIdx != -1) {
+            val btnDrawable = presetDrawables[presetIdx]
+            if (btnDrawable != null) {
+                val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = transitionMs
+                    interpolator = android.view.animation.LinearInterpolator()
+                    addUpdateListener { va ->
+                        btnDrawable.setProgress(va.animatedValue as Float)
+                        btnDrawable.invalidateSelf()
+                    }
+                    start()
+                }
+                presetAnimators[presetIdx] = anim
+            }
+        }
+
+        updatePresetHighlights()
+    }
+
+    private fun createUndoRedoPanel(): LinearLayout {
+        undoRedoPanel = LinearLayout(this).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 0)
+        }
+
+        undoDrawable = ProgressUndoRedoDrawable("\u21B6")
+        redoDrawable = ProgressUndoRedoDrawable("\u21B7")
+
+        undoBtn = ImageButton(this).apply {
+            setImageDrawable(undoDrawable)
+            background = null
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams(150, 150)
+            setOnClickListener { performUndo() }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_UNDO", "UNDO")
+                    true
+                } else false
+            }
+        }
+
+        redoBtn = ImageButton(this).apply {
+            setImageDrawable(redoDrawable)
+            background = null
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams(150, 150)
+            setOnClickListener { performRedo() }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_REDO", "REDO")
+                    true
+                } else false
+            }
+        }
+
+        undoRedoPanel.addView(undoBtn)
+        undoRedoPanel.addView(redoBtn)
+        return undoRedoPanel
+    }
+
     private fun createPresetPanel(): LinearLayout {
         presetPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -6261,6 +6712,7 @@ class MainActivity : AppCompatActivity() {
         prefs.edit()
             .putBoolean("AP_RANDOM", autoPlayRandom)
             .putString("AP_FILTER", filterStr)
+            .putInt("UNDO_HISTORY", undoHistorySize)
             .apply()
     }
 
@@ -6704,7 +7156,7 @@ class MainActivity : AppCompatActivity() {
         } }
         val getCircleBg = { alpha: Int -> getBg(alpha).apply { shape = GradientDrawable.OVAL } }
 
-        val panels = listOf(cameraSettingsPanel, presetPanel, recordControls)
+        val panels = listOf(cameraSettingsPanel, presetPanel, recordControls, undoRedoPanel)
         val utils = listOf(menuBtn, orientationBtn, settingsBtn)
 
         // Reset clip
@@ -6836,6 +7288,8 @@ class MainActivity : AppCompatActivity() {
     private fun applyPreset(idx: Int) {
         val p = presets[idx] ?: return
 
+        undoManager.pushStateDirectly(controls, activePreset)
+
         presetAnimators.values.forEach { it.cancel() }
         presetAnimators.clear()
 
@@ -6872,8 +7326,15 @@ class MainActivity : AppCompatActivity() {
 
         renderer.animateRotationTo(targetMRot, targetCRot, durationSec)
 
+        val targetSnapshots = mutableMapOf<String, PropertyControl.Snapshot>()
         controls.forEach { control ->
             if (!control.includeInPreset) return@forEach
+
+            if (control.isLocked) {
+                // Locked controls are not changed by presets — record their current state
+                targetSnapshots[control.id] = control.getSnapshot()
+                return@forEach
+            }
 
             var snap = p.controlSnapshots[control.id]
 
@@ -6895,7 +7356,10 @@ class MainActivity : AppCompatActivity() {
             }
 
             control.restore(snap, durationSec)
+            targetSnapshots[control.id] = snap
         }
+        // Record what we're transitioning towards so undo/redo stays consistent
+        undoManager.targetState = UndoManager.UndoState(targetSnapshots, idx)
         updateSidebarVisuals()
 
         if (isAutoPlaying) {
