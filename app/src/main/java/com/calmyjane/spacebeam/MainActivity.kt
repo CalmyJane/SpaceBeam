@@ -1124,15 +1124,6 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         })
 
         // --- GENERAL ITEMS ---
-        contentLayout.addView(createStyledButton("toggle background") {
-            activity.toggleReadability()
-        })
-
-        contentLayout.addView(createStyledButton("reset view") {
-            activity.globalReset()
-            dismiss()
-        })
-
         contentLayout.addView(createStyledButton("reset presets") {
             showConfirmation(
                 "RESET ALL PRESETS?",
@@ -1148,17 +1139,60 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             activity.showMaskEditor()
         })
 
-        contentLayout.addView(createStyledDivider())
+        val screenOnBtn = createStyledButton(
+            if (activity.forceScreenOn) "force screen on: ON" else "force screen on: OFF"
+        ) {}
+        screenOnBtn.setOnClickListener {
+            if (!activity.forceScreenOn) {
+                if (android.provider.Settings.System.canWrite(activity)) {
+                    activity.forceScreenOn = true
+                    screenOnBtn.text = "force screen on: ON"
+                    activity.applyForceScreenOn()
+                    activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+                        .edit().putBoolean("FORCE_SCREEN_ON", true).apply()
+                } else {
+                    showCustomDialog(
+                        "FORCE SCREEN ON",
+                        "Some devices (e.g. Samsung) ignore the standard Android keep-screen-on flag. " +
+                        "This option overrides the system screen timeout to prevent the display from turning off during a performance.\n\n" +
+                        "The original timeout is restored when you leave the app."
+                    ) { panel ->
+                        val allowBtn = Button(activity).apply {
+                            text = "OPEN SETTINGS"
+                            setTextColor(Color.WHITE)
+                            setTypeface(null, Typeface.BOLD)
+                            background = GradientDrawable().apply {
+                                setColor(Color.argb(255, 45, 45, 50))
+                                cornerRadius = 15f
+                                setStroke(2, Color.parseColor("#555555"))
+                            }
+                            setOnClickListener {
+                                dismissConfirmation()
+                                activity.forceScreenOn = true
+                                screenOnBtn.text = "force screen on: ON"
+                                activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+                                    .edit().putBoolean("FORCE_SCREEN_ON", true).apply()
+                                activity.requestForceScreenOnPermission()
+                            }
+                        }
+                        panel.addView(allowBtn)
+                    }
+                }
+            } else {
+                activity.forceScreenOn = false
+                activity.restoreScreenTimeout()
+                screenOnBtn.text = "force screen on: OFF"
+                activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+                    .edit().putBoolean("FORCE_SCREEN_ON", false).apply()
+            }
+        }
+        contentLayout.addView(screenOnBtn)
 
-        // --- TEMPO SECTION ---
-        contentLayout.addView(TextView(activity).apply {
-            text = "TEMPO"
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.LTGRAY)
-            gravity = Gravity.CENTER
-            setPadding(0, 10, 0, 20)
+        contentLayout.addView(createStyledButton("connect bluetooth midi") {
+            showMidiScanner()
         })
+
+        contentLayout.addView(createStyledDivider())
 
         val bpmRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1206,26 +1240,53 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         bpmRow.addView(bpmInput)
         contentLayout.addView(bpmRow)
 
-        contentLayout.addView(createStyledDivider())
-
-        // --- MIDI CONTROLLER CONNECTION ---
-        contentLayout.addView(TextView(activity).apply {
-            text = "MIDI CONTROLLER"
+        val undoRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2).apply { bottomMargin = 10 }
+        }
+        undoRow.addView(TextView(activity).apply {
+            text = "UNDO STEPS"
             textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.LTGRAY)
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        })
+        undoRow.addView(EditText(activity).apply {
+            setText(activity.undoHistorySize.toString())
+            textSize = 16f
+            setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            setPadding(0, 10, 0, 20)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#222222"))
+                setStroke(2, Color.DKGRAY)
+                cornerRadius = 10f
+            }
+            setPadding(20, 10, 20, 10)
+            layoutParams = LinearLayout.LayoutParams(150, -2)
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setOnEditorActionListener { v, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_DONE) {
+                    val newVal = v.text.toString().toIntOrNull()
+                    if (newVal != null && newVal > 0) {
+                        val clamped = newVal.coerceIn(1, 999)
+                        activity.undoHistorySize = clamped
+                        activity.undoManager.maxHistory = clamped
+                        v.text = clamped.toString()
+                    }
+                    val imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    imm.hideSoftInputFromWindow(v.windowToken, 0)
+                    v.clearFocus()
+                    true
+                } else false
+            }
         })
+        contentLayout.addView(undoRow)
 
-        contentLayout.addView(createStyledButton("connect bluetooth midi") {
-            showMidiScanner()
-        })
+        contentLayout.addView(createStyledDivider())
 
         // --- MIDI MAPPING SECTION (Visible only if connected) ---
         if (activity.midiHelper.isConnected) {
-            contentLayout.addView(createStyledDivider())
-
             contentLayout.addView(TextView(activity).apply {
                 text = "MIDI MAPPING"
                 textSize = 14f
@@ -1372,54 +1433,6 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 
         contentLayout.addView(createStyledDivider())
 
-        // --- UNDO HISTORY ---
-        val undoRow = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2).apply { bottomMargin = 10 }
-        }
-
-        undoRow.addView(TextView(activity).apply {
-            text = "UNDO STEPS"
-            textSize = 14f
-            setTextColor(Color.WHITE)
-            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-        })
-
-        undoRow.addView(EditText(activity).apply {
-            setText(activity.undoHistorySize.toString())
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#222222"))
-                setStroke(2, Color.DKGRAY)
-                cornerRadius = 10f
-            }
-            setPadding(20, 10, 20, 10)
-            layoutParams = LinearLayout.LayoutParams(150, -2)
-            imeOptions = EditorInfo.IME_ACTION_DONE
-            setOnEditorActionListener { v, actionId, _ ->
-                if (actionId == EditorInfo.IME_ACTION_DONE) {
-                    val newVal = v.text.toString().toIntOrNull()
-                    if (newVal != null && newVal > 0) {
-                        val clamped = newVal.coerceIn(1, 999)
-                        activity.undoHistorySize = clamped
-                        activity.undoManager.maxHistory = clamped
-                        v.text = clamped.toString()
-                    }
-                    val imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                    imm.hideSoftInputFromWindow(v.windowToken, 0)
-                    v.clearFocus()
-                    true
-                } else false
-            }
-        })
-        contentLayout.addView(undoRow)
-
-        contentLayout.addView(createStyledDivider())
-
         // --- SENSOR SMOOTHING ---
         contentLayout.addView(TextView(activity).apply {
             text = "SENSOR SMOOTHING"
@@ -1456,70 +1469,6 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         addSmoothRow("Pitch", { activity.sensorHelper.pitchSmoothing }) { activity.sensorHelper.pitchSmoothing = it }
         addSmoothRow("Roll",  { activity.sensorHelper.rollSmoothing  }) { activity.sensorHelper.rollSmoothing  = it }
         addSmoothRow("Yaw",   { activity.sensorHelper.yawSmoothing   }) { activity.sensorHelper.yawSmoothing   = it }
-
-        contentLayout.addView(createStyledDivider())
-
-        // --- FORCE SCREEN ON ---
-        contentLayout.addView(TextView(activity).apply {
-            text = "DISPLAY"
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.LTGRAY)
-            gravity = Gravity.CENTER
-            setPadding(0, 10, 0, 20)
-        })
-
-        val screenOnBtn = createStyledButton(
-            if (activity.forceScreenOn) "force screen on: ON" else "force screen on: OFF"
-        ) {}
-        screenOnBtn.setOnClickListener {
-            if (!activity.forceScreenOn) {
-                // Turning ON — check permission first
-                if (android.provider.Settings.System.canWrite(activity)) {
-                    activity.forceScreenOn = true
-                    screenOnBtn.text = "force screen on: ON"
-                    activity.applyForceScreenOn()
-                    activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
-                        .edit().putBoolean("FORCE_SCREEN_ON", true).apply()
-                } else {
-                    // Show explanation dialog, then open system settings
-                    showCustomDialog(
-                        "FORCE SCREEN ON",
-                        "Some devices (e.g. Samsung) ignore the standard Android keep-screen-on flag. " +
-                        "This option overrides the system screen timeout to prevent the display from turning off during a performance.\n\n" +
-                        "The original timeout is restored when you leave the app."
-                    ) { panel ->
-                        val allowBtn = Button(activity).apply {
-                            text = "OPEN SETTINGS"
-                            setTextColor(Color.WHITE)
-                            setTypeface(null, Typeface.BOLD)
-                            background = GradientDrawable().apply {
-                                setColor(Color.argb(255, 45, 45, 50))
-                                cornerRadius = 15f
-                                setStroke(2, Color.parseColor("#555555"))
-                            }
-                            setOnClickListener {
-                                dismissConfirmation()
-                                activity.forceScreenOn = true
-                                screenOnBtn.text = "force screen on: ON"
-                                activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
-                                    .edit().putBoolean("FORCE_SCREEN_ON", true).apply()
-                                activity.requestForceScreenOnPermission()
-                            }
-                        }
-                        panel.addView(allowBtn)
-                    }
-                }
-            } else {
-                // Turning OFF
-                activity.forceScreenOn = false
-                activity.restoreScreenTimeout()
-                screenOnBtn.text = "force screen on: OFF"
-                activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
-                    .edit().putBoolean("FORCE_SCREEN_ON", false).apply()
-            }
-        }
-        contentLayout.addView(screenOnBtn)
 
         contentLayout.addView(createStyledDivider())
 
