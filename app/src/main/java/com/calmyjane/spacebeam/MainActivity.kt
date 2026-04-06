@@ -1459,6 +1459,70 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 
         contentLayout.addView(createStyledDivider())
 
+        // --- FORCE SCREEN ON ---
+        contentLayout.addView(TextView(activity).apply {
+            text = "DISPLAY"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 10, 0, 20)
+        })
+
+        val screenOnBtn = createStyledButton(
+            if (activity.forceScreenOn) "force screen on: ON" else "force screen on: OFF"
+        ) {}
+        screenOnBtn.setOnClickListener {
+            if (!activity.forceScreenOn) {
+                // Turning ON — check permission first
+                if (android.provider.Settings.System.canWrite(activity)) {
+                    activity.forceScreenOn = true
+                    screenOnBtn.text = "force screen on: ON"
+                    activity.applyForceScreenOn()
+                    activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+                        .edit().putBoolean("FORCE_SCREEN_ON", true).apply()
+                } else {
+                    // Show explanation dialog, then open system settings
+                    showCustomDialog(
+                        "FORCE SCREEN ON",
+                        "Some devices (e.g. Samsung) ignore the standard Android keep-screen-on flag. " +
+                        "This option overrides the system screen timeout to prevent the display from turning off during a performance.\n\n" +
+                        "The original timeout is restored when you leave the app."
+                    ) { panel ->
+                        val allowBtn = Button(activity).apply {
+                            text = "OPEN SETTINGS"
+                            setTextColor(Color.WHITE)
+                            setTypeface(null, Typeface.BOLD)
+                            background = GradientDrawable().apply {
+                                setColor(Color.argb(255, 45, 45, 50))
+                                cornerRadius = 15f
+                                setStroke(2, Color.parseColor("#555555"))
+                            }
+                            setOnClickListener {
+                                dismissConfirmation()
+                                activity.forceScreenOn = true
+                                screenOnBtn.text = "force screen on: ON"
+                                activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+                                    .edit().putBoolean("FORCE_SCREEN_ON", true).apply()
+                                activity.requestForceScreenOnPermission()
+                            }
+                        }
+                        panel.addView(allowBtn)
+                    }
+                }
+            } else {
+                // Turning OFF
+                activity.forceScreenOn = false
+                activity.restoreScreenTimeout()
+                screenOnBtn.text = "force screen on: OFF"
+                activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+                    .edit().putBoolean("FORCE_SCREEN_ON", false).apply()
+            }
+        }
+        contentLayout.addView(screenOnBtn)
+
+        contentLayout.addView(createStyledDivider())
+
         // --- CLOSE ---
         contentLayout.addView(Button(activity).apply {
             text = "close"
@@ -3209,6 +3273,8 @@ open class PropertyControl(
 
 // --- MAIN ACTIVITY ---
 class MainActivity : AppCompatActivity() {
+    private var originalScreenTimeout = -1
+    var forceScreenOn = false
     private var pendingShaderSaveCode: String? = null
     val bpmManager = BpmManager()
     var activePlaylistEditor: MediaSourceControl? = null
@@ -5161,28 +5227,28 @@ class MainActivity : AppCompatActivity() {
             setEGLConfigChooser(8, 8, 8, 8, 0, 0)
             setPreserveEGLContextOnPause(true)
             setRenderer(renderer)
-            // CHANGE THIS FROM RENDERMODE_CONTINUOUSLY to RENDERMODE_WHEN_DIRTY
             renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         }
         renderer.startContinuousRendering()
         glView.setOnTouchListener { _, event ->
-            // Clear save confirmation if user touches anywhere
             if (event.action == MotionEvent.ACTION_DOWN && saveConfirmBtn.visibility == View.VISIBLE) {
                 saveConfirmBtn.visibility = View.GONE
                 pendingSaveIndex = null
             }
 
-            // Pass the event to our unified interaction handler
             handleInteraction(event)
             true
         }
         setContentView(glView)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        glView.keepScreenOn = true
         setupOverlayHUD()
         initDefaultPresets()
         val prefs = getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
         autoPlayRandom = prefs.getBoolean("AP_RANDOM", false)
         undoHistorySize = prefs.getInt("UNDO_HISTORY", 20)
         undoManager.maxHistory = undoHistorySize
+        forceScreenOn = prefs.getBoolean("FORCE_SCREEN_ON", false)
         maskManager.loadFromPrefs(prefs)
         val filterStr = prefs.getString("AP_FILTER", null)
         if (filterStr != null) {
@@ -5194,7 +5260,6 @@ class MainActivity : AppCompatActivity() {
         glView.post {
             globalReset()
             applyPreset(1)
-            // Clear undo history from initial setup - user starts fresh
             undoManager.clear()
             applyReadabilityStyle()
         }
@@ -5253,11 +5318,14 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         sensorHelper.start()
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        applyForceScreenOn()
     }
 
     override fun onPause() {
         super.onPause()
         sensorHelper.stop()
+        restoreScreenTimeout()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -5269,6 +5337,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        restoreScreenTimeout()
         midiHelper.close()
         // Detach all UI from controls to prevent context leaks
         controls.forEach { it.detach() }
@@ -7410,6 +7479,7 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("AP_RANDOM", autoPlayRandom)
             .putString("AP_FILTER", filterStr)
             .putInt("UNDO_HISTORY", undoHistorySize)
+            .putBoolean("FORCE_SCREEN_ON", forceScreenOn)
             .apply()
         maskManager.saveToPrefs(prefs)
     }
@@ -7969,6 +8039,36 @@ class MainActivity : AppCompatActivity() {
     private fun updateSidebarVisuals() {
         // Global Flip/Rot buttons are removed.
         // This function is kept empty to prevent calls in onConfigurationChanged from crashing.
+    }
+
+    fun applyForceScreenOn() {
+        if (!forceScreenOn) return
+        if (android.provider.Settings.System.canWrite(this)) {
+            if (originalScreenTimeout == -1) {
+                originalScreenTimeout = android.provider.Settings.System.getInt(
+                    contentResolver, android.provider.Settings.System.SCREEN_OFF_TIMEOUT, 30000
+                )
+            }
+            android.provider.Settings.System.putInt(
+                contentResolver, android.provider.Settings.System.SCREEN_OFF_TIMEOUT, Int.MAX_VALUE
+            )
+        }
+    }
+
+    fun restoreScreenTimeout() {
+        if (android.provider.Settings.System.canWrite(this) && originalScreenTimeout > 0) {
+            android.provider.Settings.System.putInt(
+                contentResolver, android.provider.Settings.System.SCREEN_OFF_TIMEOUT, originalScreenTimeout
+            )
+            originalScreenTimeout = -1
+        }
+    }
+
+    fun requestForceScreenOnPermission() {
+        val intent = Intent(android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+            data = android.net.Uri.parse("package:$packageName")
+        }
+        startActivity(intent)
     }
 
     fun hideSystemUI() {
