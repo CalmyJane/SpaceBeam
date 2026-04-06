@@ -43,6 +43,7 @@ import androidx.camera.core.SurfaceRequest
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import android.opengl.GLUtils
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -1140,6 +1141,11 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
                 activity.resetPresetsToDefault()
                 dismiss()
             }
+        })
+
+        contentLayout.addView(createStyledButton("edit mask") {
+            dismiss()
+            activity.showMaskEditor()
         })
 
         contentLayout.addView(createStyledDivider())
@@ -3733,6 +3739,7 @@ class MainActivity : AppCompatActivity() {
         saveMappingLauncher.launch(filename)
     }
 
+    val maskManager = MaskManager()
     private var settingsMenu: SettingsMenu? = null
     private lateinit var photoBtn: ImageButton
     private lateinit var recordBtn: ImageButton
@@ -3841,6 +3848,263 @@ class MainActivity : AppCompatActivity() {
         }
 
         fun clearAttribCache() { attribCache.clear() }
+    }
+
+    class MaskManager {
+        data class Node(var x: Float, var y: Float)  // Normalized 0..1
+
+        var nodes = mutableListOf<Node>()
+        var smoothness: Float = 0.005f  // Fraction of image width for edge softness
+        var enabled: Boolean = false
+        var maskTexId: Int = 0
+        private var maskProgram: Int = 0
+        private var locMaskTex: Int = -1
+        private var locMaskMask: Int = -1
+        private var locMaskMVP: Int = -1
+
+        fun initDefaults() {
+            nodes.clear()
+            nodes.add(Node(0f, 0f))       // top-left
+            nodes.add(Node(0.5f, 0f))     // top-center
+            nodes.add(Node(1f, 0f))       // top-right
+            nodes.add(Node(1f, 0.5f))     // right-center
+            nodes.add(Node(1f, 1f))       // bottom-right
+            nodes.add(Node(0.5f, 1f))     // bottom-center
+            nodes.add(Node(0f, 1f))       // bottom-left
+            nodes.add(Node(0f, 0.5f))     // left-center
+        }
+
+        fun initShader() {
+            if (maskProgram != 0) return
+            val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; uniform mat4 uMVPMatrix; void main() { gl_Position = uMVPMatrix * p; v = t; }"
+            val fSrc = """
+                precision mediump float;
+                varying vec2 v;
+                uniform sampler2D uTex;
+                uniform sampler2D uMask;
+                void main() {
+                    vec4 col = texture2D(uTex, v);
+                    float m = texture2D(uMask, v).r;
+                    gl_FragColor = col * m;
+                }
+            """.trimIndent()
+            maskProgram = ShaderHelper.createProgram(vSrc, fSrc)
+            locMaskTex = GLES20.glGetUniformLocation(maskProgram, "uTex")
+            locMaskMask = GLES20.glGetUniformLocation(maskProgram, "uMask")
+            locMaskMVP = GLES20.glGetUniformLocation(maskProgram, "uMVPMatrix")
+        }
+
+        /** Fast preview regeneration (low-res, for live dragging) */
+        fun requestRegenerate(w: Int, h: Int) {
+            val myGen = ++genCounter
+            val curSmooth = smoothness
+            val n = nodes.size
+            val nxArr = FloatArray(n) { nodes[it].x }
+            val nyArr = FloatArray(n) { nodes[it].y }
+            maskExecutor.execute {
+                val bmp = computeMaskBitmap(w, h, curSmooth, nxArr, nyArr, n, myGen, 120)
+                if (bmp != null) {
+                    pendingMaskBitmap?.recycle()
+                    pendingMaskBitmap = bmp
+                }
+            }
+        }
+
+        /** High-quality regeneration (hi-res, called on release/settle) */
+        fun requestHiResRegenerate(w: Int, h: Int) {
+            val myGen = ++genCounter
+            val curSmooth = smoothness
+            val n = nodes.size
+            val nxArr = FloatArray(n) { nodes[it].x }
+            val nyArr = FloatArray(n) { nodes[it].y }
+            maskExecutor.execute {
+                val bmp = computeMaskBitmap(w, h, curSmooth, nxArr, nyArr, n, myGen, 480)
+                if (bmp != null) {
+                    pendingMaskBitmap?.recycle()
+                    pendingMaskBitmap = bmp
+                }
+            }
+        }
+
+        /** CPU bitmap generation — runs on background thread */
+        private fun computeMaskBitmap(w: Int, h: Int, smooth: Float,
+                                      nx: FloatArray, ny: FloatArray, n: Int, gen: Int,
+                                      targetRes: Int): Bitmap? {
+            if (n < 3) return null
+
+            val fadePixels = (smooth * w).coerceIn(0f, w * 0.5f)
+
+            if (fadePixels < 1f) {
+                // No smoothing — sharp polygon, fast path
+                val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                bitmap.eraseColor(Color.BLACK)
+                val path = Path()
+                path.moveTo(nx[0] * w, (1f - ny[0]) * h)
+                for (i in 1 until n) path.lineTo(nx[i] * w, (1f - ny[i]) * h)
+                path.close()
+                Canvas(bitmap).drawPath(path, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.WHITE; style = Paint.Style.FILL
+                })
+                return bitmap
+            }
+
+            // Distance-field at target resolution
+            val scale = max(1, w / targetRes)
+            val sw = w / scale
+            val sh = h / scale
+            val scaledFade = fadePixels / scale
+            val fadeSq = scaledFade * scaledFade
+
+            // Pre-compute edge data in scaled coords
+            val ex1 = FloatArray(n); val ey1 = FloatArray(n)
+            val edx = FloatArray(n); val edy = FloatArray(n); val elenSq = FloatArray(n)
+            for (i in 0 until n) {
+                val j = (i + 1) % n
+                ex1[i] = nx[i] * sw; ey1[i] = (1f - ny[i]) * sh
+                val x2 = nx[j] * sw; val y2 = (1f - ny[j]) * sh
+                edx[i] = x2 - ex1[i]; edy[i] = y2 - ey1[i]
+                elenSq[i] = edx[i] * edx[i] + edy[i] * edy[i]
+            }
+
+            // Pre-compute edge Y data for ray-casting point-in-polygon test
+            val ey2 = FloatArray(n)
+            val ex2 = FloatArray(n)
+            for (i in 0 until n) {
+                val j = (i + 1) % n
+                ex2[i] = nx[j] * sw; ey2[i] = (1f - ny[j]) * sh
+            }
+
+            val resultPx = IntArray(sw * sh)
+            val black = Color.BLACK
+            for (py in 0 until sh) {
+                if (gen != genCounter) return null
+                val fpy = py + 0.5f
+                for (px in 0 until sw) {
+                    val fpx = px + 0.5f
+
+                    // Ray-casting point-in-polygon (no bitmap needed)
+                    var inside = false
+                    for (i in 0 until n) {
+                        val yi = ey1[i]; val yj = ey2[i]
+                        if ((yi > fpy) != (yj > fpy)) {
+                            val xi = ex1[i]; val xj = ex2[i]
+                            if (fpx < xi + (fpy - yi) / (yj - yi) * (xj - xi)) {
+                                inside = !inside
+                            }
+                        }
+                    }
+
+                    if (!inside) {
+                        resultPx[py * sw + px] = black
+                    } else {
+                        // Squared distance to nearest edge (no sqrt until final value)
+                        var minDSq = fadeSq // clamp: anything >= fadeSq maps to 1.0
+                        for (e in 0 until n) {
+                            val rpx = fpx - ex1[e]; val rpy = fpy - ey1[e]
+                            val len2 = elenSq[e]
+                            val dSq: Float
+                            if (len2 == 0f) {
+                                dSq = rpx * rpx + rpy * rpy
+                            } else {
+                                val t = ((rpx * edx[e] + rpy * edy[e]) / len2).coerceIn(0f, 1f)
+                                val cx = rpx - t * edx[e]; val cy = rpy - t * edy[e]
+                                dSq = cx * cx + cy * cy
+                            }
+                            if (dSq < minDSq) minDSq = dSq
+                        }
+                        // Only one sqrt for the winning distance
+                        val v = (sqrt(minDSq) / scaledFade).coerceIn(0f, 1f)
+                        val b = (v * 255f).toInt()
+                        resultPx[py * sw + px] = (0xFF shl 24) or (b shl 16) or (b shl 8) or b
+                    }
+                }
+            }
+
+            val maskBmp = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888)
+            maskBmp.setPixels(resultPx, 0, sw, 0, 0, sw, sh)
+            // Scale up to full size with bilinear filtering
+            val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            bitmap.eraseColor(Color.BLACK)
+            Canvas(bitmap).drawBitmap(maskBmp, null, Rect(0, 0, w, h), Paint(Paint.FILTER_BITMAP_FLAG))
+            maskBmp.recycle()
+            return bitmap
+        }
+
+        /** Upload pending bitmap to GL texture — call on GL thread */
+        fun uploadPendingMask() {
+            val bmp = pendingMaskBitmap ?: return
+            pendingMaskBitmap = null
+
+            if (maskTexId == 0) {
+                val tex = IntArray(1)
+                GLES20.glGenTextures(1, tex, 0)
+                maskTexId = tex[0]
+            }
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTexId)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+            bmp.recycle()
+        }
+
+        /** Draw the final texture with mask applied */
+        fun drawMasked(inputTex: Int, mvpMatrix: FloatArray) {
+            if (maskProgram == 0) return
+            GLES20.glUseProgram(maskProgram)
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTex)
+            GLES20.glUniform1i(locMaskTex, 0)
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTexId)
+            GLES20.glUniform1i(locMaskMask, 1)
+
+            GLES20.glUniformMatrix4fv(locMaskMVP, 1, false, mvpMatrix, 0)
+
+            ShaderHelper.bindQuad(maskProgram)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+            // Reset active texture to 0
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        }
+
+        @Volatile var needsRegenerate = false
+        @Volatile var needsHiResRegenerate = false
+        @Volatile var pendingMaskBitmap: Bitmap? = null
+        private val maskExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        private var genCounter = 0
+
+        fun saveToPrefs(prefs: android.content.SharedPreferences) {
+            val nodesStr = nodes.joinToString(";") { "${it.x},${it.y}" }
+            prefs.edit()
+                .putString("MASK_NODES", nodesStr)
+                .putFloat("MASK_SMOOTH", smoothness)
+                .putBoolean("MASK_ENABLED", enabled)
+                .apply()
+        }
+
+        fun loadFromPrefs(prefs: android.content.SharedPreferences) {
+            val nodesStr = prefs.getString("MASK_NODES", null)
+            if (nodesStr != null && nodesStr.isNotEmpty()) {
+                nodes.clear()
+                nodesStr.split(";").forEach { pair ->
+                    val parts = pair.split(",")
+                    if (parts.size == 2) {
+                        val x = parts[0].toFloatOrNull() ?: return@forEach
+                        val y = parts[1].toFloatOrNull() ?: return@forEach
+                        nodes.add(Node(x, y))
+                    }
+                }
+            } else {
+                initDefaults()
+            }
+            smoothness = prefs.getFloat("MASK_SMOOTH", 0.005f)
+            enabled = prefs.getBoolean("MASK_ENABLED", false)
+            if (enabled) { needsRegenerate = true; needsHiResRegenerate = true }
+        }
     }
 
     class EffectChain {
@@ -4632,6 +4896,13 @@ class MainActivity : AppCompatActivity() {
         super.onConfigurationChanged(newConfig)
         isRebuildingHUD = true
 
+        // 0. Handle mask editor — rebuild overlay without touching backup/node data
+        val wasMaskEditorOpen = maskEditorOverlay != null
+        if (wasMaskEditorOpen) {
+            maskEditorOverlay?.let { (it.parent as? ViewGroup)?.removeView(it) }
+            maskEditorOverlay = null
+        }
+
         // 1. Close active UI menus
         PropertyControl.closeActiveMenu()
 
@@ -4667,6 +4938,9 @@ class MainActivity : AppCompatActivity() {
                 settingsMenu = SettingsMenu(this, overlayHUD)
                 settingsMenu?.show()
                 settingsMenu?.restoreScrollY(savedScrollY)
+            }
+            if (wasMaskEditorOpen) {
+                buildMaskEditorOverlay()
             }
         }
 
@@ -4909,6 +5183,7 @@ class MainActivity : AppCompatActivity() {
         autoPlayRandom = prefs.getBoolean("AP_RANDOM", false)
         undoHistorySize = prefs.getInt("UNDO_HISTORY", 20)
         undoManager.maxHistory = undoHistorySize
+        maskManager.loadFromPrefs(prefs)
         val filterStr = prefs.getString("AP_FILTER", null)
         if (filterStr != null) {
             autoPlayFilter.clear()
@@ -6520,6 +6795,427 @@ class MainActivity : AppCompatActivity() {
         return undoRedoPanel
     }
 
+    // ==================== MASK EDITOR ====================
+
+    private var maskEditorOverlay: FrameLayout? = null
+    private var maskBackupNodes: List<MaskManager.Node>? = null
+    private var maskBackupSmoothness: Float = 0f
+    private var maskBackupEnabled: Boolean = false
+
+    @SuppressLint("ClickableViewAccessibility")
+    fun showMaskEditor() {
+        if (maskEditorOverlay != null) return
+
+        // Backup current state for cancel
+        maskBackupNodes = maskManager.nodes.map { MaskManager.Node(it.x, it.y) }
+        maskBackupSmoothness = maskManager.smoothness
+        maskBackupEnabled = maskManager.enabled
+
+        // Enable mask live preview
+        maskManager.enabled = true
+        maskManager.needsRegenerate = true
+
+        buildMaskEditorOverlay()
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun buildMaskEditorOverlay() {
+        // Hide HUD
+        overlayHUD.visibility = View.GONE
+
+        val editor = FrameLayout(this)
+        maskEditorOverlay = editor
+
+        // Semi-transparent overlay to see the mask shape
+        val dimOverlay = View(this).apply {
+            setBackgroundColor(Color.argb(40, 0, 0, 0))
+            isClickable = false
+            isFocusable = false
+        }
+        editor.addView(dimOverlay, FrameLayout.LayoutParams(-1, -1))
+
+        // The node canvas handles drawing lines and node handles
+        val nodeView = MaskNodeView(this)
+        editor.addView(nodeView, FrameLayout.LayoutParams(-1, -1))
+
+        // Controls panel (centered, draggable)
+        val controlPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(30, 20, 30, 20)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(180, 20, 20, 20))
+                cornerRadius = 25f
+                setStroke(2, Color.argb(120, 80, 80, 80))
+            }
+        }
+
+        // Make panel draggable
+        var dragStartX = 0f
+        var dragStartY = 0f
+        var panelStartX = 0f
+        var panelStartY = 0f
+        controlPanel.setOnTouchListener { v, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    dragStartX = event.rawX
+                    dragStartY = event.rawY
+                    panelStartX = v.x
+                    panelStartY = v.y
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    v.x = panelStartX + (event.rawX - dragStartX)
+                    v.y = panelStartY + (event.rawY - dragStartY)
+                    true
+                }
+                else -> false
+            }
+        }
+
+        // Buttons row
+        val buttonsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        // Enable/Disable toggle
+        val enableBtn = TextView(this).apply {
+            text = if (maskManager.enabled) "ENABLED" else "DISABLED"
+            textSize = 14f
+            setTextColor(if (maskManager.enabled) Color.WHITE else Color.GRAY)
+            gravity = Gravity.CENTER
+            setPadding(30, 20, 30, 20)
+            setOnClickListener {
+                maskManager.enabled = !maskManager.enabled
+                if (maskManager.enabled) {
+                    maskManager.needsRegenerate = true
+                }
+                text = if (maskManager.enabled) "ENABLED" else "DISABLED"
+                setTextColor(if (maskManager.enabled) Color.WHITE else Color.GRAY)
+            }
+        }
+        buttonsRow.addView(enableBtn)
+
+        // Reset button
+        buttonsRow.addView(TextView(this).apply {
+            text = "RESET"
+            textSize = 14f
+            setTextColor(Color.GRAY)
+            gravity = Gravity.CENTER
+            setPadding(30, 20, 30, 20)
+            setOnClickListener {
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle("RESET MASK?")
+                    .setMessage("This will reset the mask to default shape (full rectangle).")
+                    .setPositiveButton("Reset") { _, _ ->
+                        maskManager.initDefaults()
+                        maskManager.smoothness = 0.005f
+                        maskManager.needsRegenerate = true
+                        nodeView.invalidate()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        })
+
+        // Spacer
+        buttonsRow.addView(View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(40, 1)
+        })
+
+        // Cancel button (X)
+        buttonsRow.addView(ImageButton(this).apply {
+            setImageDrawable(ContextCompat.getDrawable(context, android.R.drawable.ic_menu_close_clear_cancel))
+            setColorFilter(Color.WHITE)
+            background = null
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams(120, 120).apply { rightMargin = 20 }
+            setOnClickListener { cancelMaskEditor() }
+        })
+
+        // Accept button (checkmark)
+        buttonsRow.addView(ImageButton(this).apply {
+            setImageDrawable(ContextCompat.getDrawable(context, android.R.drawable.ic_menu_save))
+            setColorFilter(Color.WHITE)
+            background = null
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams(120, 120)
+            setOnClickListener { acceptMaskEditor() }
+        })
+
+        controlPanel.addView(buttonsRow)
+
+        // Smoothness slider row (full width, below buttons)
+        val smoothRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(10, 15, 10, 0)
+        }
+
+        smoothRow.addView(TextView(this).apply {
+            text = "SMOOTH"
+            textSize = 12f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 20, 0)
+        })
+
+        smoothRow.addView(SeekBar(this).apply {
+            max = 1000
+            progress = (maskManager.smoothness * 5000f).toInt().coerceIn(0, 1000)
+            thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(40, 40); cornerRadius = 20f }
+            thumbOffset = 0
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
+                    if (f) {
+                        maskManager.smoothness = p / 5000f
+                        maskManager.needsRegenerate = true
+                    }
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {
+                    maskManager.needsHiResRegenerate = true
+                }
+            })
+        })
+
+        controlPanel.addView(smoothRow, LinearLayout.LayoutParams(-1, -2))
+
+        val dm = resources.displayMetrics
+        val panelWidth = (min(dm.widthPixels, dm.heightPixels) * 0.85f).toInt()
+        editor.addView(controlPanel, FrameLayout.LayoutParams(panelWidth, -2).apply {
+            gravity = Gravity.CENTER
+        })
+
+        addContentView(editor, ViewGroup.LayoutParams(-1, -1))
+    }
+
+    private fun acceptMaskEditor() {
+        // Save mask and keep it enabled
+        val prefs = getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+        maskManager.saveToPrefs(prefs)
+        maskBackupNodes = null
+        dismissMaskEditor()
+    }
+
+    private fun cancelMaskEditor() {
+        // Restore backup
+        maskBackupNodes?.let { backup ->
+            maskManager.nodes.clear()
+            maskManager.nodes.addAll(backup)
+        }
+        maskManager.smoothness = maskBackupSmoothness
+        maskManager.enabled = maskBackupEnabled
+        maskManager.needsRegenerate = true
+        maskBackupNodes = null
+        dismissMaskEditor()
+    }
+
+    private fun dismissMaskEditor() {
+        maskEditorOverlay?.let {
+            (it.parent as? ViewGroup)?.removeView(it)
+        }
+        maskEditorOverlay = null
+        overlayHUD.visibility = if (isHudVisible) View.VISIBLE else View.GONE
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    inner class MaskNodeView(context: Context) : View(context) {
+        private val nodePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.FILL
+        }
+        private val nodeStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+        }
+        private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(200, 255, 255, 255)
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+        }
+        private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(100, 255, 255, 255)
+            style = Paint.Style.STROKE
+            strokeWidth = 2f
+        }
+        private val nodeRadius = 30f
+        private val hitRadius = 80f
+        private var dragIndex = -1
+        private var longPressHandler = Handler(Looper.getMainLooper())
+        private var longPressRunnable: Runnable? = null
+        private var hasMoved = false
+        private var downX = 0f
+        private var downY = 0f
+
+        private fun isPortrait(): Boolean =
+            resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+
+        /** Calculate viewport rect with padding — 16:9 in landscape, 9:16 in portrait */
+        private fun getViewport(): RectF {
+            val padding = 0.06f
+            val availW = width * (1f - 2 * padding)
+            val availH = height * (1f - 2 * padding)
+            val aspect = if (isPortrait()) 9f / 16f else 16f / 9f
+            val fitW: Float
+            val fitH: Float
+            if (availW / availH > aspect) {
+                fitH = availH
+                fitW = fitH * aspect
+            } else {
+                fitW = availW
+                fitH = fitW / aspect
+            }
+            val left = (width - fitW) / 2f
+            val top = (height - fitH) / 2f
+            return RectF(left, top, left + fitW, top + fitH)
+        }
+
+        /** Convert node coords (0..1 in FBO landscape space) to screen pixel coords */
+        private fun nodeToScreen(node: MaskManager.Node): Pair<Float, Float> {
+            val vp = getViewport()
+            return if (isPortrait()) {
+                // After -90° rotation: FBO x→screen Y, FBO y→screen X (inverted)
+                Pair(vp.left + (1f - node.y) * vp.width(), vp.top + node.x * vp.height())
+            } else {
+                Pair(vp.left + node.x * vp.width(), vp.top + node.y * vp.height())
+            }
+        }
+
+        /** Convert screen pixel coords back to node coords (0..1 in FBO landscape space) */
+        private fun screenToNode(sx: Float, sy: Float): Pair<Float, Float> {
+            val vp = getViewport()
+            return if (isPortrait()) {
+                val nx = ((sy - vp.top) / vp.height()).coerceIn(0f, 1f)
+                val ny = (1f - (sx - vp.left) / vp.width()).coerceIn(0f, 1f)
+                Pair(nx, ny)
+            } else {
+                val nx = ((sx - vp.left) / vp.width()).coerceIn(0f, 1f)
+                val ny = ((sy - vp.top) / vp.height()).coerceIn(0f, 1f)
+                Pair(nx, ny)
+            }
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            // Draw 16:9 viewport border
+            val vp = getViewport()
+            canvas.drawRect(vp, borderPaint)
+
+            val nodes = maskManager.nodes
+            if (nodes.size < 2) return
+
+            // Draw lines
+            for (i in nodes.indices) {
+                val (x1, y1) = nodeToScreen(nodes[i])
+                val (x2, y2) = nodeToScreen(nodes[(i + 1) % nodes.size])
+                canvas.drawLine(x1, y1, x2, y2, linePaint)
+            }
+
+            // Draw nodes
+            for (node in nodes) {
+                val (sx, sy) = nodeToScreen(node)
+                canvas.drawCircle(sx, sy, nodeRadius, nodePaint)
+                canvas.drawCircle(sx, sy, nodeRadius, nodeStrokePaint)
+            }
+        }
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            val nodes = maskManager.nodes
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    downY = event.y
+                    hasMoved = false
+                    // Find closest node
+                    dragIndex = -1
+                    var minDist = hitRadius
+                    for (i in nodes.indices) {
+                        val (sx, sy) = nodeToScreen(nodes[i])
+                        val d = hypot(event.x - sx, event.y - sy)
+                        if (d < minDist) {
+                            minDist = d
+                            dragIndex = i
+                        }
+                    }
+
+                    // Set up long press detection
+                    longPressRunnable = Runnable {
+                        if (!hasMoved) {
+                            if (dragIndex >= 0 && nodes.size > 3) {
+                                // Long press on a node: delete it
+                                nodes.removeAt(dragIndex)
+                                dragIndex = -1
+                                maskManager.needsRegenerate = true
+                                invalidate()
+                            } else if (dragIndex < 0) {
+                                // Long press on empty area near a line: add node
+                                val (nx, ny) = screenToNode(event.x, event.y)
+                                val insertIdx = findClosestEdge(nx, ny)
+                                nodes.add(insertIdx + 1, MaskManager.Node(nx, ny))
+                                dragIndex = insertIdx + 1
+                                maskManager.needsRegenerate = true
+                                invalidate()
+                            }
+                        }
+                    }
+                    longPressHandler.postDelayed(longPressRunnable!!, 500)
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (hypot(event.x - downX, event.y - downY) > 20f) {
+                        hasMoved = true
+                        longPressRunnable?.let { longPressHandler.removeCallbacks(it) }
+                    }
+                    if (dragIndex >= 0 && hasMoved) {
+                        val (nx, ny) = screenToNode(event.x, event.y)
+                        nodes[dragIndex].x = nx
+                        nodes[dragIndex].y = ny
+                        maskManager.needsRegenerate = true
+                        invalidate()
+                    }
+                    return true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    longPressRunnable?.let { longPressHandler.removeCallbacks(it) }
+                    dragIndex = -1
+                    maskManager.needsHiResRegenerate = true
+                    return true
+                }
+            }
+            return super.onTouchEvent(event)
+        }
+
+        private fun findClosestEdge(nx: Float, ny: Float): Int {
+            val nodes = maskManager.nodes
+            var bestIdx = 0
+            var bestDist = Float.MAX_VALUE
+            for (i in nodes.indices) {
+                val j = (i + 1) % nodes.size
+                val dist = pointToSegmentDist(nx, ny, nodes[i].x, nodes[i].y, nodes[j].x, nodes[j].y)
+                if (dist < bestDist) {
+                    bestDist = dist
+                    bestIdx = i
+                }
+            }
+            return bestIdx
+        }
+
+        private fun pointToSegmentDist(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
+            val dx = bx - ax; val dy = by - ay
+            val lenSq = dx * dx + dy * dy
+            if (lenSq == 0f) return hypot(px - ax, py - ay)
+            val t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+            val ct = t.coerceIn(0f, 1f)
+            val cx = ax + ct * dx; val cy = ay + ct * dy
+            return hypot(px - cx, py - cy)
+        }
+    }
+
+    // ==================== END MASK EDITOR ====================
+
     private fun createPresetPanel(): LinearLayout {
         presetPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -6715,6 +7411,7 @@ class MainActivity : AppCompatActivity() {
             .putString("AP_FILTER", filterStr)
             .putInt("UNDO_HISTORY", undoHistorySize)
             .apply()
+        maskManager.saveToPrefs(prefs)
     }
 
     private fun triggerNextAutoPlay() {
@@ -8153,19 +8850,35 @@ class MainActivity : AppCompatActivity() {
 
             val finalTex = ctx.effectChain.process(this)
 
+            // Mask texture: kick off async generation, upload when ready
+            val mask = ctx.maskManager
+            if (mask.needsRegenerate) {
+                mask.needsRegenerate = false
+                mask.initShader()
+                mask.requestRegenerate(FIXED_WIDTH, FIXED_HEIGHT)
+            }
+            if (mask.needsHiResRegenerate) {
+                mask.needsHiResRegenerate = false
+                mask.initShader()
+                mask.requestHiResRegenerate(FIXED_WIDTH, FIXED_HEIGHT)
+            }
+            mask.uploadPendingMask()
+
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
             GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-            GLES20.glUseProgram(simpleProgram)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, finalTex)
-
-            GLES20.glUniform1i(locSimpleTex, 0)
-            GLES20.glUniformMatrix4fv(locSimpleMVP, 1, false, identityMatrix, 0)
-
-            ShaderHelper.bindQuad(simpleProgram)
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            if (mask.enabled && mask.maskTexId != 0) {
+                mask.drawMasked(finalTex, identityMatrix)
+            } else {
+                GLES20.glUseProgram(simpleProgram)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, finalTex)
+                GLES20.glUniform1i(locSimpleTex, 0)
+                GLES20.glUniformMatrix4fv(locSimpleMVP, 1, false, identityMatrix, 0)
+                ShaderHelper.bindQuad(simpleProgram)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            }
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
             renderToScreen()
