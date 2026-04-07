@@ -3785,9 +3785,10 @@ class MainActivity : AppCompatActivity() {
     private var recordTicker: Runnable? = null
     private var readabilityLevel = 2
     private lateinit var parameterPanel: ScrollView
-    private lateinit var cameraSettingsPanel: LinearLayout
+    private lateinit var controlBox: LinearLayout
     private lateinit var presetPanel: LinearLayout
     private lateinit var recordControls: LinearLayout
+    private lateinit var tapBtn: Button
     private lateinit var orientationBtn: ImageButton
     private lateinit var settingsBtn: ImageButton
     private var isOrientationLocked = false
@@ -5424,9 +5425,7 @@ class MainActivity : AppCompatActivity() {
         flashOverlay = createFlashView()
         val logoView = createLogoView()
         setupParameterMenu()
-        val cameraPanel = createCameraSettingsPanel()
-        val recordPanel = createRecordControls()
-        val undoRedoPanel = createUndoRedoPanel()
+        val controlBoxView = createControlBox(isPortrait)
         val presetPanel = createPresetPanel()
 
         // Wire undo capture to all property controls
@@ -5439,31 +5438,6 @@ class MainActivity : AppCompatActivity() {
                     setActivePresetVisual(-1)
                 }
             }
-        }
-
-        val tapBtn = Button(this).apply {
-            text = "TAP"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setTypeface(null, Typeface.BOLD)
-            background = GradientDrawable().apply {
-                setColor(Color.argb(180, 0x33, 0x33, 0x33))
-                cornerRadius = 15f
-                setStroke(1, Color.argb(150, 128, 128, 128))
-            }
-        }
-        val resetTapTextRunnable = Runnable { tapBtn.text = "TAP" }
-        tapBtn.setOnClickListener {
-            bpmManager.tap()
-            tapBtn.text = "${bpmManager.bpm.toInt()}"
-            handler.removeCallbacks(resetTapTextRunnable)
-            handler.postDelayed(resetTapTextRunnable, 2000)
-        }
-        tapBtn.setOnLongClickListener {
-            if (midiHelper.isConnected) {
-                showMidiLearnOverlay("CMD_TAP_TEMPO", "TAP TEMPO")
-                true
-            } else false
         }
 
         val orientationBtnView = createOrientationButton()
@@ -5491,27 +5465,18 @@ class MainActivity : AppCompatActivity() {
         overlayHUD.addView(logoView)
         overlayHUD.addView(leftHUDContainer)
 
-        val recordParams = FrameLayout.LayoutParams(-2, -2).apply {
+        val controlBoxParams = FrameLayout.LayoutParams(-2, -2).apply {
             if (isPortrait) {
-                recordPanel.orientation = LinearLayout.VERTICAL; gravity = Gravity.BOTTOM or Gravity.START; bottomMargin = 450; leftMargin = 30
-                (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 40; leftMargin = 0 }
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                leftMargin = 20
+                topMargin = 280
             } else {
-                recordPanel.orientation = LinearLayout.HORIZONTAL; gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = 30; leftMargin = 130;
-                (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 30 }
+                gravity = Gravity.TOP or Gravity.END
+                topMargin = 20
+                rightMargin = 220
             }
         }
-        overlayHUD.addView(recordPanel, recordParams)
-
-        // Undo/Redo panel: same style alignment as record panel
-        val undoRedoParams = FrameLayout.LayoutParams(-2, -2)
-        if (isPortrait) {
-            undoRedoPanel.orientation = LinearLayout.VERTICAL
-            (redoBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 40; leftMargin = 0 }
-        } else {
-            undoRedoPanel.orientation = LinearLayout.HORIZONTAL
-            (redoBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 30 }
-        }
-        overlayHUD.addView(undoRedoPanel, undoRedoParams)
+        overlayHUD.addView(controlBoxView, controlBoxParams)
 
         val presetParams = FrameLayout.LayoutParams(-2, -2).apply {
             if (isPortrait) {
@@ -5526,73 +5491,8 @@ class MainActivity : AppCompatActivity() {
         }
         overlayHUD.addView(presetPanel, presetParams)
 
-        overlayHUD.addView(tapBtn, FrameLayout.LayoutParams(0, 0))
-
-        recordPanel.viewTreeObserver.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
-            override fun onGlobalLayout() {
-                recordPanel.viewTreeObserver.removeOnGlobalLayoutListener(this)
-                val recW = recordPanel.width
-                val recH = recordPanel.height
-                if (recW == 0 || recH == 0) return
-
-                val recLoc = IntArray(2)
-                recordPanel.getLocationOnScreen(recLoc)
-                val hudLoc = IntArray(2)
-                overlayHUD.getLocationOnScreen(hudLoc)
-
-                val recX = recLoc[0] - hudLoc[0]
-                val recY = recLoc[1] - hudLoc[1]
-
-                // Position undo/redo panel between record controls and tap button
-                if (isPortrait) {
-                    // Portrait: above record panel, same left alignment
-                    val urH = undoRedoPanel.measuredHeight.let { if (it > 0) it else 340 }
-                    undoRedoPanel.layoutParams = FrameLayout.LayoutParams(-2, -2).apply {
-                        gravity = Gravity.TOP or Gravity.START
-                        leftMargin = recX + (recW / 2) - 75
-                        topMargin = recY - urH - 20
-                    }
-                } else {
-                    // Landscape: to the right of record panel, same top alignment
-                    undoRedoPanel.layoutParams = FrameLayout.LayoutParams(-2, -2).apply {
-                        gravity = Gravity.TOP or Gravity.START
-                        leftMargin = recX + recW + 20
-                        topMargin = recY + (recH / 2) - 75
-                    }
-                }
-
-                // Position tap button after undo/redo panel
-                val tapSize = 150
-                undoRedoPanel.post {
-                    val urLoc = IntArray(2)
-                    undoRedoPanel.getLocationOnScreen(urLoc)
-                    val urX = urLoc[0] - hudLoc[0]
-                    val urY = urLoc[1] - hudLoc[1]
-                    val urW = undoRedoPanel.width
-                    val urH = undoRedoPanel.height
-
-                    tapBtn.layoutParams = FrameLayout.LayoutParams(tapSize, tapSize).apply {
-                        gravity = Gravity.TOP or Gravity.START
-                        if (isPortrait) {
-                            leftMargin = recX + (recW / 2) - (tapSize / 2)
-                            topMargin = urY - tapSize - 20
-                        } else {
-                            leftMargin = urX + urW + 20
-                            topMargin = recY + (recH / 2) - (tapSize / 2)
-                        }
-                    }
-                }
-            }
-        })
-
         overlayHUD.addView(settingsBtn)
         overlayHUD.addView(orientationBtnView)
-
-        val cameraParams = FrameLayout.LayoutParams(-2, -2).apply {
-            if (isPortrait) { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = 500; rightMargin = 20 }
-            else { gravity = Gravity.TOP or Gravity.END; topMargin = 40; rightMargin = 40 }
-        }
-        overlayHUD.addView(cameraPanel, cameraParams)
 
         updateSidebarVisuals()
         applyReadabilityStyle()
@@ -6530,33 +6430,6 @@ class MainActivity : AppCompatActivity() {
         axisCtrl.attachTo(this, parent)
     }
 
-    private fun createCameraSettingsPanel(): LinearLayout {
-        cameraSettingsPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, 0, 0, 0)
-        }
-
-        val switchBtn = ImageButton(this).apply {
-            setImageDrawable(createSwitchCameraDrawable())
-            setColorFilter(Color.WHITE)
-            setBackgroundColor(Color.TRANSPARENT)
-            alpha = 0.9f
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            layoutParams = LinearLayout.LayoutParams(150, 150)
-            setOnClickListener { switchCamera(); updateSidebarVisuals() }
-            setOnLongClickListener {
-                if (midiHelper.isConnected) {
-                    showMidiLearnOverlay("CMD_CAM_SWITCH", "SWITCH CAMERA")
-                    true
-                } else false
-            }
-        }
-
-        cameraSettingsPanel.addView(switchBtn)
-        return cameraSettingsPanel
-    }
-
     fun switchCamera() {
         currentSelector = if (currentSelector == CameraSelector.DEFAULT_BACK_CAMERA) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
         startCamera()
@@ -6811,6 +6684,102 @@ class MainActivity : AppCompatActivity() {
         undoRedoPanel.addView(undoBtn)
         undoRedoPanel.addView(redoBtn)
         return undoRedoPanel
+    }
+
+    private fun createHudDivider(isVertical: Boolean): View {
+        return View(this).apply {
+            setBackgroundColor(Color.argb(100, 128, 128, 128))
+            layoutParams = if (isVertical) {
+                LinearLayout.LayoutParams(2, LinearLayout.LayoutParams.MATCH_PARENT).apply {
+                    topMargin = 15; bottomMargin = 15
+                }
+            } else {
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 2).apply {
+                    leftMargin = 15; rightMargin = 15
+                }
+            }
+        }
+    }
+
+    private fun createControlBox(isPortrait: Boolean): LinearLayout {
+        createRecordControls()
+        createUndoRedoPanel()
+
+        val switchBtn = ImageButton(this).apply {
+            setImageDrawable(createSwitchCameraDrawable())
+            setColorFilter(Color.WHITE)
+            setBackgroundColor(Color.TRANSPARENT)
+            alpha = 0.9f
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams(150, 150)
+            setOnClickListener { switchCamera(); updateSidebarVisuals() }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_CAM_SWITCH", "SWITCH CAMERA")
+                    true
+                } else false
+            }
+        }
+
+        tapBtn = Button(this).apply {
+            text = "TAP\nBPM"
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            setBackgroundColor(Color.TRANSPARENT)
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(150, 150)
+        }
+        val resetTapTextRunnable = Runnable { tapBtn.text = "TAP\nBPM" }
+        tapBtn.setOnClickListener {
+            bpmManager.tap()
+            tapBtn.text = "${bpmManager.bpm.toInt()}"
+            handler.removeCallbacks(resetTapTextRunnable)
+            handler.postDelayed(resetTapTextRunnable, 2000)
+        }
+        tapBtn.setOnLongClickListener {
+            if (midiHelper.isConnected) {
+                showMidiLearnOverlay("CMD_TAP_TEMPO", "TAP TEMPO")
+                true
+            } else false
+        }
+
+        controlBox = LinearLayout(this).apply {
+            gravity = Gravity.CENTER
+            setPadding(15, 5, 5, 5)
+        }
+
+        if (isPortrait) {
+            controlBox.orientation = LinearLayout.VERTICAL
+            recordControls.orientation = LinearLayout.VERTICAL
+            (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 0 }
+            undoRedoPanel.orientation = LinearLayout.VERTICAL
+            (redoBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 0 }
+
+            controlBox.addView(recordControls)
+            controlBox.addView(createHudDivider(false))
+            controlBox.addView(undoRedoPanel)
+            controlBox.addView(createHudDivider(false))
+            controlBox.addView(tapBtn)
+            controlBox.addView(createHudDivider(false))
+            controlBox.addView(switchBtn)
+        } else {
+            controlBox.orientation = LinearLayout.HORIZONTAL
+            recordControls.orientation = LinearLayout.HORIZONTAL
+            (recordBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 0 }
+            undoRedoPanel.orientation = LinearLayout.HORIZONTAL
+            (redoBtn.layoutParams as LinearLayout.LayoutParams).apply { topMargin = 0; leftMargin = 0 }
+
+            controlBox.addView(recordControls)
+            controlBox.addView(createHudDivider(true))
+            controlBox.addView(undoRedoPanel)
+            controlBox.addView(createHudDivider(true))
+            controlBox.addView(tapBtn)
+            controlBox.addView(createHudDivider(true))
+            controlBox.addView(switchBtn)
+        }
+
+        return controlBox
     }
 
     // ==================== MASK EDITOR ====================
@@ -7873,7 +7842,7 @@ class MainActivity : AppCompatActivity() {
         } }
         val getCircleBg = { alpha: Int -> getBg(alpha).apply { shape = GradientDrawable.OVAL } }
 
-        val panels = listOf(cameraSettingsPanel, presetPanel, recordControls, undoRedoPanel)
+        val panels = listOf(controlBox, presetPanel)
         val utils = listOf(menuBtn, orientationBtn, settingsBtn)
 
         // Reset clip
