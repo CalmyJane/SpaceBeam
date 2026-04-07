@@ -8964,12 +8964,12 @@ class MainActivity : AppCompatActivity() {
                 ShaderHelper.bindQuad(simpleProgram)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             }
+            handleCapture()
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
             renderToScreen()
             renderToExternal()
             renderToRecorder()
-            handleCapture()
         }
 
         private fun renderToScreen() {
