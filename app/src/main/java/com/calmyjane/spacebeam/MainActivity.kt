@@ -5013,7 +5013,7 @@ class MainActivity : AppCompatActivity() {
                 if (idx != null) {
                     if (isAutoPlaying) {
                         isAutoPlaying = false
-                        if (::playBtn.isInitialized) playBtn.setImageDrawable(createPlayIcon(false))
+                        if (::playBtn.isInitialized) updatePlayBtnBackground()
                     }
                     applyPreset(idx)
                 }
@@ -5480,13 +5480,13 @@ class MainActivity : AppCompatActivity() {
 
         val presetParams = FrameLayout.LayoutParams(-2, -2).apply {
             if (isPortrait) {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                gravity = Gravity.BOTTOM or Gravity.START
                 bottomMargin = 50
-                rightMargin = 44
+                leftMargin = 20
             } else {
                 gravity = Gravity.BOTTOM or Gravity.END
                 bottomMargin = 15
-                rightMargin = 400
+                rightMargin = 220
             }
         }
         overlayHUD.addView(presetPanel, presetParams)
@@ -7244,11 +7244,10 @@ class MainActivity : AppCompatActivity() {
         transContainer.addView(sliderWrapper)
 
         playBtn = ImageButton(this).apply {
-            setImageDrawable(createPlayIcon(isAutoPlaying))
-            background = null
+            setImageDrawable(createPlayIcon())
             scaleType = ImageView.ScaleType.FIT_CENTER
-            layoutParams = LinearLayout.LayoutParams(110, 110).apply { leftMargin = 0 }
-            setPadding(10, 10, 10, 10)
+            layoutParams = LinearLayout.LayoutParams(90, 80).apply { leftMargin = 12; topMargin = 5; bottomMargin = 5 }
+            setPadding(22, 22, 22, 22)
             setOnClickListener { toggleAutoPlay() }
             setOnLongClickListener {
                 if (midiHelper.isConnected) {
@@ -7258,6 +7257,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         updatePlayButtonState()
+        updatePlayBtnBackground()
 
         transContainer.addView(playBtn)
 
@@ -7345,7 +7345,7 @@ class MainActivity : AppCompatActivity() {
                 alpha = 1.0f
                 isClickable = true
                 isFocusable = true
-                layoutParams = LinearLayout.LayoutParams(83, 110).apply { setMargins(2, 0, 2, 0) }
+                layoutParams = LinearLayout.LayoutParams(90, 110).apply { setMargins(2, 0, 2, 0) }
                 setOnClickListener {
                     optionsContainer.visibility = View.GONE
                     stopAutoPlay()
@@ -7379,7 +7379,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             isAutoPlaying = true
-            playBtn.setImageDrawable(createPlayIcon(true)) // White
+            updatePlayBtnBackground()
             Toast.makeText(this, "Auto-Play Started", Toast.LENGTH_SHORT).show()
             triggerNextAutoPlay()
         }
@@ -7388,7 +7388,7 @@ class MainActivity : AppCompatActivity() {
     private fun stopAutoPlay() {
         isAutoPlaying = false
         handler.removeCallbacks(autoPlayRunnable)
-        if (::playBtn.isInitialized) playBtn.setImageDrawable(createPlayIcon(false)) // Grey
+        if (::playBtn.isInitialized) updatePlayBtnBackground() // Grey
 
         // Save Settings on stop
         val prefs = getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
@@ -7496,28 +7496,85 @@ class MainActivity : AppCompatActivity() {
         override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
     }
 
-    private fun createPlayIcon(playing: Boolean): BitmapDrawable {
-        // High resolution bitmap
+    private fun createPlayIcon(): BitmapDrawable {
         val size = 200
         val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val c = Canvas(b)
         val p = Paint().apply {
-            color = if (playing) Color.WHITE else Color.GRAY
+            color = Color.WHITE
             style = Paint.Style.FILL
             isAntiAlias = true
         }
-
-        // Draw Triangle logic scaled to new size
         val path = Path()
-        // Triangle coordinates: Left-Top, Left-Bottom, Right-Middle
         path.moveTo(50f, 40f)
         path.lineTo(50f, 160f)
         path.lineTo(160f, 100f)
         path.close()
-
         c.drawPath(path, p)
-
         return BitmapDrawable(resources, b)
+    }
+
+    private val playBtnDrawable = object : android.graphics.drawable.Drawable() {
+        var active = false
+        var progress = 0f
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+        override fun draw(canvas: Canvas) {
+            val w = bounds.width().toFloat()
+            val h = bounds.height().toFloat()
+            if (w == 0f || h == 0f) return
+            val r = 12f
+            val box = RectF(2f, 2f, w - 2f, h - 2f)
+
+            // Fill
+            if (progress > 0f) {
+                paint.style = Paint.Style.FILL
+                paint.color = Color.argb(100, 255, 255, 255)
+                canvas.save()
+                canvas.clipRect(0f, h - h * progress, w, h)
+                canvas.drawRoundRect(box, r, r, paint)
+                canvas.restore()
+            }
+
+            // Border
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 3f
+            paint.color = if (active) Color.WHITE else Color.parseColor("#505050")
+            canvas.drawRoundRect(box, r, r, paint)
+        }
+
+        override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+        override fun setColorFilter(colorFilter: ColorFilter?) { paint.colorFilter = colorFilter }
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+    }
+
+    private var playBtnAnimator: ValueAnimator? = null
+
+    private fun updatePlayBtnBackground() {
+        if (!::playBtn.isInitialized) return
+        playBtnDrawable.active = isAutoPlaying
+        if (!isAutoPlaying) {
+            playBtnAnimator?.cancel()
+            playBtnDrawable.progress = 0f
+        }
+        playBtn.background = playBtnDrawable
+        playBtnDrawable.invalidateSelf()
+    }
+
+    private fun startPlayBtnFill() {
+        if (!::playBtn.isInitialized || !isAutoPlaying) return
+        playBtnAnimator?.cancel()
+        playBtnDrawable.progress = 0f
+        playBtnDrawable.invalidateSelf()
+        playBtnAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = autoPlayDurationMs
+            interpolator = android.view.animation.LinearInterpolator()
+            addUpdateListener {
+                playBtnDrawable.progress = it.animatedValue as Float
+                playBtnDrawable.invalidateSelf()
+            }
+            start()
+        }
     }
 
     private fun createFlashView() = View(this).apply { setBackgroundColor(Color.WHITE)
@@ -8020,6 +8077,11 @@ class MainActivity : AppCompatActivity() {
 
         val durationSec = transitionMs / 1000f
 
+        // Clear play button fill at start of each transition
+        playBtnAnimator?.cancel()
+        playBtnDrawable.progress = 0f
+        playBtnDrawable.invalidateSelf()
+
         val btnDrawable = presetDrawables[idx]
         if (btnDrawable != null) {
             val anim = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -8030,6 +8092,11 @@ class MainActivity : AppCompatActivity() {
                     btnDrawable.setProgress(progress)
                     btnDrawable.invalidateSelf()
                 }
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        if (isAutoPlaying) startPlayBtnFill()
+                    }
+                })
                 start()
             }
             presetAnimators[idx] = anim
