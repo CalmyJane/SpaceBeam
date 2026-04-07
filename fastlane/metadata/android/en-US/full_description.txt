@@ -12,6 +12,7 @@
     * BPM tap and beat synced LFOs
     * 9 presets slots with smooth transitions between presets
     * Auto-Play mode
+    * Undo/Redo buttons
 
     Recommended Setup:
     Run this app on a Samsung Android device (e.g. Samsung S20 FE). Samsung is the only system still supporting miracast. Look for the option "Smart View".
@@ -28,5 +29,7 @@
     info@calmyjane.com
     www.calmyjane.com
 
-Privacy Note:
+Permission Notes:
 Network Usage is needed for streaming Videos from other devices into the app. The app does not communicate with the internet. If your OS allows, you can block Network Usage for the app, this will cause error message when trying to add RTSP sources, but otherwise won't affect the apps performance.
+
+Modifying System Settings is needed to force the screen timeout to infinite. The "keep screen on" flag doesnt work on all devices, if your screen turns black you can force it on in the settings menu. This needs permission to modify system settings. No other settings except screen timeout are touched by the app.

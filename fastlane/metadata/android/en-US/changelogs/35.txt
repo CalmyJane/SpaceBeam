@@ -1,0 +1,5 @@
+Added Undo/Redo Functionality
+Realigned HUD
+Cleaned up settings menu
+Added Force-Screen-On functionality (needs system settings permission)
+Fixed snapshot looking buggy in portrait mode
