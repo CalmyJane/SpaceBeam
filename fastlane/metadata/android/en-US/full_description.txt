@@ -7,6 +7,7 @@
     * RTSP as input-source
     * Image/Video (playlists) as input-source
     * Generative Shaders as input-source
+    * Feedback as input-source
     * Accelerometer as modulation for parameters
     * Bluetooth MIDI controller as modulation source
     * BPM tap and beat synced LFOs

@@ -1,0 +1,2 @@
+-made HDMI-connected screens be detected as projection screen.
+-Added Feedback Loops. Feedback can now be added as source-type and frame-delay can be adjusted and where in the effect chain to grab the feedback frame can be adjusted
