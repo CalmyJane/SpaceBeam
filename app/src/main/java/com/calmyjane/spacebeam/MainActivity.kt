@@ -4140,6 +4140,37 @@ class MainActivity : AppCompatActivity() {
         private var height = 0
         private var isReady = false
 
+        // Simple copy shader for feedback capture
+        private var copyProg = 0
+        private var copyLocTex = -1
+
+        // Special key for the final output (after all effects + mask)
+        var finalOutputTexId = 0
+
+        // Feedback ring buffer: stores N frames for configurable delay
+        private var feedbackFbo = 0
+        private var feedbackTextures = IntArray(0)
+        private var feedbackBufferSize = 0
+        private var feedbackWriteIndex = 0
+        var feedbackDelay = 1  // 1 = previous frame (minimum)
+        private var pendingBufferResize = 1
+        private var feedbackTapEffectId: String = "FINAL"  // default: end of chain
+
+        // Read the delayed feedback texture
+        val feedbackTexId: Int get() {
+            if (feedbackBufferSize == 0) return 0
+            val readIndex = ((feedbackWriteIndex - feedbackDelay) % feedbackBufferSize + feedbackBufferSize) % feedbackBufferSize
+            return feedbackTextures[readIndex]
+        }
+
+        fun setFeedbackTap(effectId: String) { feedbackTapEffectId = effectId }
+        fun getFeedbackTap(): String = feedbackTapEffectId
+
+        fun setFeedbackBufferSize(size: Int) {
+            val clamped = size.coerceIn(1, 60)
+            if (clamped != feedbackBufferSize) pendingBufferResize = clamped
+        }
+
         fun init(w: Int, h: Int) {
             if (isReady && width == w && height == h) return
             width = w; height = h
@@ -4161,6 +4192,23 @@ class MainActivity : AppCompatActivity() {
 
             val a = createFBO(); fboA = a.first; texA = a.second
             val b = createFBO(); fboB = b.first; texB = b.second
+
+            // Feedback: create FBO (reused) and initial ring buffer
+            val fbPair = createFBO(); feedbackFbo = fbPair.first
+            // The texture from createFBO becomes slot 0
+            feedbackTextures = IntArray(1) { fbPair.second }
+            feedbackBufferSize = 1
+            feedbackWriteIndex = 0
+            pendingBufferResize = feedbackDelay.coerceAtLeast(1)
+
+            // Simple copy shader for feedback capture
+            if (copyProg == 0) {
+                val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
+                val fSrc = "precision mediump float; varying vec2 v; uniform sampler2D uTex; void main() { gl_FragColor = texture2D(uTex, v); }"
+                copyProg = ShaderHelper.createProgram(vSrc, fSrc)
+                copyLocTex = GLES20.glGetUniformLocation(copyProg, "uTex")
+            }
+
             isReady = true
             effects.forEach { it.init() }
         }
@@ -4168,11 +4216,18 @@ class MainActivity : AppCompatActivity() {
         fun process(renderer: MainActivity.KaleidoscopeRenderer): Int {
             if (!isReady || effects.isEmpty()) return 0
 
+            val needsFeedbackCapture = feedbackTapEffectId != "FINAL"
+
             effects[0].render(0, fboA, width, height)
 
             var currentInput = texA
             var currentOutputFbo = fboB
             var currentOutputTex = texB
+
+            // Capture feedback immediately after the tapped effect, before ping-pong overwrites it
+            if (needsFeedbackCapture && feedbackTapEffectId == effects[0].id) {
+                copyToFeedback(currentInput)
+            }
 
             for (i in 1 until effects.size) {
                 val effect = effects[i]
@@ -4180,6 +4235,11 @@ class MainActivity : AppCompatActivity() {
                     effect.render(currentInput, currentOutputFbo, width, height)
 
                     currentInput = currentOutputTex
+
+                    // Capture feedback right after the tapped effect renders
+                    if (needsFeedbackCapture && feedbackTapEffectId == effect.id) {
+                        copyToFeedback(currentInput)
+                    }
 
                     // Swap Ping-Pong
                     if (currentOutputFbo == fboA) {
@@ -4192,9 +4252,80 @@ class MainActivity : AppCompatActivity() {
             return currentInput
         }
 
+        // Grow or shrink the ring buffer on the GL thread
+        private fun resizeFeedbackBufferIfNeeded() {
+            val target = pendingBufferResize
+            if (target == feedbackBufferSize || target < 1 || width == 0) return
+
+            if (target > feedbackBufferSize) {
+                // Grow: allocate new texture slots
+                val newTextures = IntArray(target)
+                // Copy existing textures
+                for (i in 0 until feedbackBufferSize) newTextures[i] = feedbackTextures[i]
+                // Create new textures for the extra slots
+                val extra = target - feedbackBufferSize
+                val texIds = IntArray(extra)
+                GLES20.glGenTextures(extra, texIds, 0)
+                for (i in 0 until extra) {
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[i])
+                    GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, width, height, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                    newTextures[feedbackBufferSize + i] = texIds[i]
+                }
+                feedbackTextures = newTextures
+            } else {
+                // Shrink: delete excess textures
+                val excess = feedbackBufferSize - target
+                val toDelete = IntArray(excess)
+                for (i in 0 until excess) toDelete[i] = feedbackTextures[target + i]
+                GLES20.glDeleteTextures(excess, toDelete, 0)
+                feedbackTextures = feedbackTextures.copyOf(target)
+                feedbackWriteIndex = feedbackWriteIndex % target
+            }
+            feedbackBufferSize = target
+        }
+
+        private fun writeFeedbackSlot(srcTex: Int) {
+            if (feedbackFbo == 0 || srcTex == 0 || copyProg == 0 || feedbackBufferSize == 0) return
+            resizeFeedbackBufferIfNeeded()
+            // Attach current write slot's texture to the FBO
+            val destTex = feedbackTextures[feedbackWriteIndex]
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, feedbackFbo)
+            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, destTex, 0)
+            GLES20.glViewport(0, 0, width, height)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glUseProgram(copyProg)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, srcTex)
+            GLES20.glUniform1i(copyLocTex, 0)
+            ShaderHelper.bindQuad(copyProg)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            // Advance ring buffer
+            feedbackWriteIndex = (feedbackWriteIndex + 1) % feedbackBufferSize
+        }
+
+        private fun copyToFeedback(srcTex: Int) {
+            writeFeedbackSlot(srcTex)
+        }
+
+        // Called after the final compositing (post-mask) for FINAL tap mode
+        fun captureFeedbackFinal() {
+            if (!isReady || feedbackFbo == 0) return
+            if (feedbackTapEffectId != "FINAL") return  // Already captured during process()
+            if (finalOutputTexId == 0) return
+            writeFeedbackSlot(finalOutputTexId)
+        }
+
         fun release() {
             if (fboA != 0) { val f = IntArray(2){ if(it==0) fboA else fboB }; val t = IntArray(2){ if(it==0) texA else texB }; GLES20.glDeleteFramebuffers(2, f, 0); GLES20.glDeleteTextures(2, t, 0) }
-            fboA = 0; isReady = false
+            if (feedbackFbo != 0) { GLES20.glDeleteFramebuffers(1, IntArray(1){ feedbackFbo }, 0) }
+            if (feedbackBufferSize > 0) { GLES20.glDeleteTextures(feedbackBufferSize, feedbackTextures, 0) }
+            if (copyProg != 0) { GLES20.glDeleteProgram(copyProg); copyProg = 0 }
+            fboA = 0; feedbackFbo = 0; feedbackTextures = IntArray(0); feedbackBufferSize = 0; feedbackWriteIndex = 0; isReady = false
             effects.forEach { it.release() }
         }
     }
@@ -5172,12 +5303,12 @@ class MainActivity : AppCompatActivity() {
         effectChain.effects.clear()
         effectChain.effects.add(MixerEffect(this))
         effectChain.effects.add(TransformEffect("C", "CAMERA TRANSFORM", this))
+        effectChain.effects.add(ColorEffect(this))
+        effectChain.effects.add(EdgeEffect(this))
         effectChain.effects.add(KaleidoscopeEffect(this))
         effectChain.effects.add(TransformEffect("M", "MASTER TRANSFORM", this))
         effectChain.effects.add(TunnelEffect(this))
         effectChain.effects.add(SwirlEffect(this))
-        effectChain.effects.add(ColorEffect(this))
-        effectChain.effects.add(EdgeEffect(this))
 
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
@@ -6208,7 +6339,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val items = arrayOf("Media (Image/Video)", "RTSP Stream", "Generative Shader")
+        val items = arrayOf("Media (Image/Video)", "RTSP Stream", "Generative Shader", "Feedback Loop")
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Add Source")
             .setItems(items) { _, which ->
@@ -6221,6 +6352,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     1 -> showRtspDialog()
                     2 -> showShaderSourceDialog()
+                    3 -> attemptAddFeedbackSource()
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -6259,6 +6391,25 @@ class MainActivity : AppCompatActivity() {
             ctrl.subtitle = shaderName
             addDynamicSourceControl(ctrl)
             Toast.makeText(this, "Shader Added", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Mixer Full", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun attemptAddFeedbackSource() {
+        // Only allow one feedback source
+        val existing = renderer.sources.any { it.type == SourceType.FEEDBACK }
+        if (existing) {
+            Toast.makeText(this, "Feedback source already exists", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val uniqueId = "FEEDBACK_${System.currentTimeMillis()}"
+        val channel = renderer.addSource(SourceType.FEEDBACK, uniqueId)
+        if (channel != null) {
+            val ctrl = FeedbackSourceControl(uniqueId, "FEEDBACK", uniqueId, this)
+            ctrl.subtitle = "Tap: Final Output"
+            addDynamicSourceControl(ctrl)
+            Toast.makeText(this, "Feedback Loop Added", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(this, "Mixer Full", Toast.LENGTH_SHORT).show()
         }
@@ -8547,6 +8698,15 @@ class MainActivity : AppCompatActivity() {
                 GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, fboTexId, 0)
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
+                if (type == SourceType.FEEDBACK) {
+                    // Feedback source only needs the FBO — no layers, no SurfaceTexture
+                    // Default flip to correct FBO coordinate orientation
+                    userFlipX = -1.0f
+                    userFlipY = -1.0f
+                    isReady = true
+                    return
+                }
+
                 if (type == SourceType.SHADER) {
                     val vSrc = """
                         attribute vec4 p; attribute vec2 t; varying vec2 v;
@@ -8606,7 +8766,7 @@ class MainActivity : AppCompatActivity() {
                 width = w; height = h
                 layerA.width = w; layerA.height = h
                 layerB.width = w; layerB.height = h
-                if (type != SourceType.MEDIA_IMAGE && type != SourceType.SHADER) {
+                if (type != SourceType.MEDIA_IMAGE && type != SourceType.SHADER && type != SourceType.FEEDBACK) {
                     glView.queueEvent { layerA.surfaceTexture?.setDefaultBufferSize(w, h) }
                 }
             }
@@ -8698,12 +8858,33 @@ class MainActivity : AppCompatActivity() {
             fun processToFbo() {
                 if (!isReady) return
 
-                updateSurfaces() // Always drain decoders independent of alpha!
+                if (type != SourceType.FEEDBACK) {
+                    updateSurfaces() // Always drain decoders independent of alpha!
+                }
 
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
                 GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
 
-                if (type == SourceType.SHADER) {
+                if (type == SourceType.FEEDBACK) {
+                    // Copy the previous frame's feedback texture into this source's FBO
+                    val fbTex = ctx.effectChain.feedbackTexId
+                    if (fbTex != 0) {
+                        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                        GLES20.glUseProgram(copy2dProgram)
+                        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fbTex)
+                        GLES20.glUniform1i(loc2dTex, 0)
+                        GLES20.glUniform1f(loc2dAlpha, 1.0f)
+                        val extraRot = if (userRot180) 180f else 0f
+                        GLES20.glUniform1f(loc2dRot, Math.toRadians(-extraRot.toDouble()).toFloat())
+                        GLES20.glUniform2f(loc2dFlip, userFlipX, userFlipY)
+                        GLES20.glUniform2f(loc2dScale, 1.0f, 1.0f)
+                        ShaderHelper.bindQuad(copy2dProgram)
+                        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                    } else {
+                        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    }
+                } else if (type == SourceType.SHADER) {
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                     GLES20.glUseProgram(customProgram)
                     GLES20.glUniform1f(customLocITime, globalTime)
@@ -8973,6 +9154,10 @@ class MainActivity : AppCompatActivity() {
             }
             handleCapture()
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+            // Capture feedback: for FINAL tap mode, copy the composited output for next frame's feedback sources
+            ctx.effectChain.finalOutputTexId = fboTexId
+            ctx.effectChain.captureFeedbackFinal()
 
             renderToScreen()
             renderToExternal()
@@ -9334,7 +9519,8 @@ enum class SourceType {
     MEDIA_IMAGE,
     RTSP,
     SHADER,
-    PLAYLIST
+    PLAYLIST,
+    FEEDBACK
 }
 // In MainActivity.kt
 
@@ -10028,5 +10214,101 @@ class RtspSourceControl(
         } catch(e: Exception) {
             e.printStackTrace()
         }
+    }
+}
+
+class FeedbackSourceControl(
+    id: String,
+    label: String,
+    sourceId: String,
+    mainActivity: MainActivity
+) : SourcePropertyControl(id, label, 500, sourceId, mainActivity) {
+
+    override fun addExtraControls(panel: LinearLayout, context: Context) {
+        // Tap point selector
+        panel.addView(TextView(context).apply {
+            text = "FEEDBACK TAP POINT"; textSize = 10f; setTextColor(Color.LTGRAY)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10 }
+        })
+
+        // Build list of tap points from the effect chain
+        val effectChain = mainActivity.effectChain
+        val tapOptions = mutableListOf<Pair<String, String>>() // id to display name
+        effectChain.effects.forEach { effect ->
+            tapOptions.add(Pair(effect.id, effect.name))
+        }
+        tapOptions.add(Pair("FINAL", "FINAL OUTPUT"))
+
+        val currentTap = effectChain.getFeedbackTap()
+        val foundIndex = tapOptions.indexOfFirst { it.first == currentTap }
+        val currentIndex = if (foundIndex >= 0) foundIndex else tapOptions.size - 1
+
+        val spinner = Spinner(context).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#333333"))
+                cornerRadius = 10f
+                setStroke(1, Color.GRAY)
+            }
+            layoutParams = LinearLayout.LayoutParams(-1, 110).apply { topMargin = 5; bottomMargin = 10 }
+        }
+
+        val displayNames = tapOptions.map { it.second }
+        val adapter = ArrayAdapter(context, android.R.layout.simple_spinner_item, displayNames).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        spinner.adapter = adapter
+        spinner.setSelection(currentIndex)
+
+        spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, itemId: Long) {
+                // Style the spinner text
+                (view as? TextView)?.apply { setTextColor(Color.WHITE); textSize = 13f }
+                val selectedId = tapOptions[position].first
+                effectChain.setFeedbackTap(selectedId)
+                subtitle = "Tap: ${tapOptions[position].second}"
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+        panel.addView(spinner)
+
+        // Delay slider (1-60 frames)
+        panel.addView(TextView(context).apply {
+            text = "FRAME DELAY"; textSize = 10f; setTextColor(Color.LTGRAY)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10 }
+        })
+
+        val delayLabel = TextView(context).apply {
+            text = "1 frame (~17ms)"; textSize = 12f; setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+        }
+
+        val delaySeekBar = SeekBar(context).apply {
+            max = 59  // 0-59 maps to 1-60
+            progress = effectChain.feedbackDelay - 1
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = 5 }
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val frames = progress + 1
+                    effectChain.feedbackDelay = frames
+                    effectChain.setFeedbackBufferSize(frames)
+                    val ms = frames * 17  // ~60fps
+                    val memMB = frames * 8  // ~8MB per frame at 1920x1080 RGBA
+                    delayLabel.text = "$frames frame${if (frames > 1) "s" else ""} (~${ms}ms, ~${memMB}MB)"
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        panel.addView(delaySeekBar)
+        panel.addView(delayLabel)
+
+        // Add standard geometry controls (flip, remove)
+        super.addExtraControls(panel, context)
+    }
+
+    override fun onRemove() {
+        // Reset buffer to minimum when feedback is removed
+        mainActivity.effectChain.setFeedbackBufferSize(1)
+        mainActivity.effectChain.feedbackDelay = 1
     }
 }
