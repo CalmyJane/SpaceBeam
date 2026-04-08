@@ -2016,19 +2016,28 @@ class ExternalDisplayHelper(
     }
 
     fun updatePresentation() {
-        val displays = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+        val allDisplays = displayManager.displays
+        var targetDisplay: Display? = null
 
-        if (displays.isNotEmpty()) {
-            val externalDisplay = displays[0]
+        for (display in allDisplays) {
+            if (display.displayId != Display.DEFAULT_DISPLAY) {
+                if ((display.flags and Display.FLAG_PRESENTATION) != 0) {
+                    targetDisplay = display
+                    break
+                }
+                if (targetDisplay == null) {
+                    targetDisplay = display
+                }
+            }
+        }
 
-            // If we have a presentation but it's for a different display, kill it
-            if (presentation != null && presentation!!.display.displayId != externalDisplay.displayId) {
+        if (targetDisplay != null) {
+            if (presentation != null && presentation!!.display.displayId != targetDisplay.displayId) {
                 dismissPresentation()
             }
 
-            // Create new if null
             if (presentation == null) {
-                presentation = CleanFeedPresentation(context, externalDisplay, renderer)
+                presentation = CleanFeedPresentation(context, targetDisplay, renderer)
                 try {
                     presentation?.show()
                 } catch (e: Exception) {
@@ -2055,7 +2064,6 @@ class ExternalDisplayHelper(
 
             surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
                 override fun surfaceCreated(holder: SurfaceHolder) {
-                    // Force the renderer to use the new surface
                     renderer.setExternalSurface(holder.surface, display.width, display.height)
                 }
 
@@ -2064,7 +2072,6 @@ class ExternalDisplayHelper(
                 }
 
                 override fun surfaceDestroyed(holder: SurfaceHolder) {
-                    // Important: only remove if this is still the active surface
                     renderer.removeExternalSurface()
                 }
             })
