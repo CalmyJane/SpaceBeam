@@ -2659,10 +2659,6 @@ open class PropertyControl(
         stopAnimation()
         setProgress(defaultValue)
 
-        val ratio = (defaultValue.toFloat() / sliderMax.toFloat()).coerceAtLeast(0f)
-        smoothedNormalized = ratio
-        modulatedNormalized = ratio
-
         if (hasModulation) {
             updateModRate(200)
             updateModDepth(0)
