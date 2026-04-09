@@ -3194,21 +3194,47 @@ open class PropertyControl(
             postInvalidate()
         }
 
+        private var touchDownX = 0f
+        private var touchDownY = 0f
+        private var touchDownLocalX = 0f
+        private var directionLocked = false
+        private var isHorizontal = false
+
         @SuppressLint("ClickableViewAccessibility")
         override fun onTouchEvent(event: MotionEvent): Boolean {
-            parent.requestDisallowInterceptTouchEvent(true)
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
+                    touchDownX = event.rawX
+                    touchDownY = event.rawY
+                    touchDownLocalX = event.x
+                    directionLocked = false
+                    isHorizontal = false
                     stopAnimation()
                     if (activeControl != null && activeControl != this@PropertyControl) closeActiveMenu()
                     onTouchDown?.invoke()
-                    updateFromTouch(event.x)
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    updateFromTouch(event.x)
+                    if (!directionLocked) {
+                        val dx = abs(event.rawX - touchDownX)
+                        val dy = abs(event.rawY - touchDownY)
+                        if (dx > 15 || dy > 15) {
+                            directionLocked = true
+                            isHorizontal = dx > dy
+                            parent.requestDisallowInterceptTouchEvent(isHorizontal)
+                            if (isHorizontal) updateFromTouch(touchDownLocalX)
+                        }
+                    }
+                    if (directionLocked && isHorizontal) {
+                        updateFromTouch(event.x)
+                    }
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (!directionLocked) {
+                        // Short tap — apply the touch position
+                        updateFromTouch(event.x)
+                    }
                     parent.requestDisallowInterceptTouchEvent(false)
+                    directionLocked = false
                     onTouchUp?.invoke()
                 }
             }
@@ -7843,7 +7869,6 @@ class MainActivity : AppCompatActivity() {
                 expandedGroups.add(title)
             }
         }
-        applyRobustTouch(header)
         groupContainer.addView(header); groupContainer.addView(content)
         return Pair(groupContainer, content)
     }
