@@ -2886,8 +2886,14 @@ open class PropertyControl(
 
         contentLayout.addView(titleRow)
 
-        val numRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, 140).apply { bottomMargin = 10 } }
+        val numRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, 140).apply { bottomMargin = 12 } }
         val btnDec = createNumButton(context, "-") { setProgress(value - 1) }
+
+        val centerColumn = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(0, -1, 1.5f)
+        }
 
         baseValueInput = EditText(context).apply {
             setText(value.toString())
@@ -2897,9 +2903,9 @@ open class PropertyControl(
             gravity = Gravity.CENTER
             background = null
             includeFontPadding = false
-            setPadding(0, 10, 0, 0)
+            setPadding(0, 0, 0, 0)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER; filters = arrayOf(android.text.InputFilter.LengthFilter(6))
-            imeOptions = EditorInfo.IME_ACTION_DONE; layoutParams = LinearLayout.LayoutParams(0, -1, 1.5f)
+            imeOptions = EditorInfo.IME_ACTION_DONE; layoutParams = LinearLayout.LayoutParams(-1, -2)
             setOnEditorActionListener { v, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_DONE) {
                     val num = v.text.toString().toIntOrNull() ?: value; setProgress(num); v.clearFocus()
@@ -2909,27 +2915,45 @@ open class PropertyControl(
                 } else false
             }
         }
-        val btnInc = createNumButton(context, "+") { setProgress(value + 1) }
-        numRow.addView(btnDec); numRow.addView(baseValueInput); numRow.addView(btnInc)
-        contentLayout.addView(numRow)
+        centerColumn.addView(baseValueInput)
 
         if (hasModulation) {
-            val liveRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 20 } }
             liveValueDisplay = TextView(context).apply {
                 text = formatValue(value)
                 textSize = 14f
                 setTypeface(null, Typeface.BOLD)
                 setTextColor(Color.LTGRAY)
-                setPadding(0, 10, 0, 5)
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+                setPadding(0, 0, 0, 0)
+                layoutParams = LinearLayout.LayoutParams(-1, -2)
             }
-            liveRow.addView(liveValueDisplay)
-            contentLayout.addView(liveRow)
+            centerColumn.addView(liveValueDisplay)
+        }
+
+        val btnInc = createNumButton(context, "+") { setProgress(value + 1) }
+        numRow.addView(btnDec); numRow.addView(centerColumn); numRow.addView(btnInc)
+        contentLayout.addView(numRow)
+
+        if (hasModulation) {
 
             contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 2).apply { bottomMargin = 20 }; setBackgroundColor(Color.DKGRAY) })
 
+            // Hook for subclasses to add controls above smooth (e.g. flip/rotate)
+            addGeometryControls(contentLayout, context)
+
+            // Smooth slider (outside any category)
+            contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 16) })
+            val smoothSb = addSliderToPanel(context, contentLayout, "SMOOTH", smoothing) { updateSmoothing(it) }
+            smoothSb.tag = "SMOOTH_SEEK"
+            contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 16) })
+
+            // --- LFO category (collapsed by default) ---
+            val (lfoGroup, lfoContent) = createCollapsibleDetailGroup(context, "LFO", false)
+
             val shapeSyncRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 25 }
+                layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 25; topMargin = 6 }
             }
 
             shapeBtn = Button(context).apply {
@@ -2960,48 +2984,47 @@ open class PropertyControl(
 
             shapeSyncRow.addView(shapeBtn)
             shapeSyncRow.addView(syncBtn)
-            contentLayout.addView(shapeSyncRow)
+            lfoContent.addView(shapeSyncRow)
 
-            modPanelSpeedSeekBar = addSliderToPanel(context, contentLayout, "SPEED", modRate) { updateModRate(it) }
+            modPanelSpeedSeekBar = addSliderToPanel(context, lfoContent, "SPEED", modRate) { updateModRate(it) }
             modPanelSpeedSeekBar?.setOnTouchListener { v, event ->
                 if(event.action == MotionEvent.ACTION_DOWN) { isRateDragging = true; onTouchDown?.invoke() }
                 if(event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) { isRateDragging = false; onTouchUp?.invoke() }
                 v.onTouchEvent(event); true
             }
 
-            modPanelDepthSeekBar = addSliderToPanel(context, contentLayout, "DEPTH", modDepth) { updateModDepth(it) }
+            modPanelDepthSeekBar = addSliderToPanel(context, lfoContent, "DEPTH", modDepth) { updateModDepth(it) }
             modPanelDepthSeekBar?.setOnTouchListener { v, event ->
                 if(event.action == MotionEvent.ACTION_DOWN) { isDepthDragging = true; onTouchDown?.invoke() }
                 if(event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) { isDepthDragging = false; onTouchUp?.invoke() }
                 v.onTouchEvent(event); true
             }
 
-            val smoothSb = addSliderToPanel(context, contentLayout, "SMOOTH", smoothing) { updateSmoothing(it) }
-            smoothSb.tag = "SMOOTH_SEEK"
+            contentLayout.addView(lfoGroup)
 
-            contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 20) })
+            contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
         }
 
-        // Sensor modulation section
-        contentLayout.addView(View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(-1, 2).apply { topMargin = 10; bottomMargin = 20 }
-            setBackgroundColor(Color.DKGRAY)
-        })
-        contentLayout.addView(TextView(context).apply {
+        // --- Gyro category (collapsed by default) ---
+        val (gyroGroup, gyroContent) = createCollapsibleDetailGroup(context, "GYRO", false)
+
+        gyroContent.addView(TextView(context).apply {
             text = "ROTATION"
             textSize = 10f; setTextColor(Color.GRAY); setPadding(0, 0, 0, 5)
         })
-        addSensorAxisSlider(context, contentLayout, "Pitch", sensorPitch) { sensorPitch = it }
-        addSensorAxisSlider(context, contentLayout, "Roll",  sensorRoll)  { sensorRoll  = it }
-        addSensorAxisSlider(context, contentLayout, "Yaw",   sensorYaw)   { sensorYaw   = it }
-        contentLayout.addView(TextView(context).apply {
+        addSensorAxisSlider(context, gyroContent, "Pitch", sensorPitch) { sensorPitch = it }
+        addSensorAxisSlider(context, gyroContent, "Roll",  sensorRoll)  { sensorRoll  = it }
+        addSensorAxisSlider(context, gyroContent, "Yaw",   sensorYaw)   { sensorYaw   = it }
+        gyroContent.addView(TextView(context).apply {
             text = "ACCELERATION"
             textSize = 10f; setTextColor(Color.GRAY); setPadding(0, 10, 0, 5)
         })
-        addSensorAxisSlider(context, contentLayout, "X", sensorAccelX) { sensorAccelX = it }
-        addSensorAxisSlider(context, contentLayout, "Y", sensorAccelY) { sensorAccelY = it }
-        addSensorAxisSlider(context, contentLayout, "Z", sensorAccelZ) { sensorAccelZ = it }
-        contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 20) })
+        addSensorAxisSlider(context, gyroContent, "X", sensorAccelX) { sensorAccelX = it }
+        addSensorAxisSlider(context, gyroContent, "Y", sensorAccelY) { sensorAccelY = it }
+        addSensorAxisSlider(context, gyroContent, "Z", sensorAccelZ) { sensorAccelZ = it }
+
+        contentLayout.addView(gyroGroup)
+        contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
 
         contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
         val resetBtn = Button(context).apply {
@@ -3106,6 +3129,22 @@ open class PropertyControl(
         parent.addView(row)
     }
 
+    private fun createCollapsibleDetailGroup(context: Context, title: String, startOpen: Boolean): Pair<LinearLayout, LinearLayout> {
+        val groupContainer = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8 } }
+        val header = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(15, 12, 15, 12); background = GradientDrawable().apply { setColor(Color.parseColor("#33FFFFFF")); cornerRadius = 8f; setStroke(1, Color.parseColor("#44FFFFFF")) } }
+        val arrow = TextView(context).apply { text = "▶"; textSize = 9f; setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(50, -2); rotation = if (startOpen) 90f else 0f }
+        val label = TextView(context).apply { text = title; textSize = 10f; setTypeface(null, Typeface.BOLD); setTextColor(Color.WHITE); letterSpacing = 0.15f }
+        header.addView(arrow); header.addView(label)
+        val content = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; visibility = if (startOpen) View.VISIBLE else View.GONE; setPadding(6, 6, 6, 6) }
+        header.setOnClickListener {
+            val isVisible = content.visibility == View.VISIBLE
+            if (isVisible) { content.visibility = View.GONE; arrow.animate().rotation(0f).setDuration(200).start() }
+            else { content.visibility = View.VISIBLE; arrow.animate().rotation(90f).setDuration(200).start() }
+        }
+        groupContainer.addView(header); groupContainer.addView(content)
+        return Pair(groupContainer, content)
+    }
+
     private fun updateLockButtonVisuals() {
         lockButton?.text = if (isLocked) "LOCKED" else "UNLOCKED"
         lockButton?.setTextColor(if (isLocked) Color.parseColor("#FF6666") else Color.parseColor("#66FF66"))
@@ -3116,6 +3155,7 @@ open class PropertyControl(
         }
     }
 
+    open fun addGeometryControls(panel: LinearLayout, context: Context) {}
     open fun addExtraControls(panel: LinearLayout, context: Context) {}
     protected fun createNumButton(ctx: Context, txt: String, action: () -> Unit): Button {
         return Button(ctx).apply { text = txt; textSize = 24f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; includeFontPadding = false; setPadding(0, 0, 0, 0)
@@ -4419,7 +4459,7 @@ class MainActivity : AppCompatActivity() {
             addControl(PropertyControl(pTiltY, "TILT Y", defaultValue = 500, outMin=-1f, outMax=1f, hasModulation = true))
             addControl(PropertyControl(pBend, "BEND", defaultValue = 500, outMin=-3.0f, outMax=3.0f, hasModulation = true))
             addControl(PropertyControl(pWobble, "WOBBLE", defaultValue = 0, outMin=0f, outMax=1.0f, hasModulation = true))
-            if(idPrefix == "C") addControl(PropertyControl("WARP", "DISTORT", defaultValue = 0, outMin=0f, outMax=1f))
+            if(idPrefix == "C") addControl(PropertyControl("WARP", "DISTORT", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
             addControl(PropertyControl(pRgb, "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.1f, hasModulation = true))
         }
 
@@ -4603,8 +4643,8 @@ class MainActivity : AppCompatActivity() {
             // Fog
             addControl(PropertyControl("T_FOG", "FOG DIST", defaultValue = 0, outMin=0.0f, outMax=0.5f, hasModulation = true))
             addControl(PropertyControl("T_FOG_H", "FOG HUE", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
-            addControl(PropertyControl("T_FOG_S", "FOG SAT", defaultValue = 0, outMin=0.0f, outMax=1.0f))
-            addControl(PropertyControl("T_FOG_V", "FOG BRIT", defaultValue = 1000, outMin=0.0f, outMax=1.0f))
+            addControl(PropertyControl("T_FOG_S", "FOG SAT", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true))
+            addControl(PropertyControl("T_FOG_V", "FOG BRIT", defaultValue = 1000, outMin=0.0f, outMax=1.0f, hasModulation = true))
 
             // Color & Distortion
             addControl(PropertyControl("T_HUE_STR", "RAINBOW STR", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
@@ -4776,10 +4816,10 @@ class MainActivity : AppCompatActivity() {
             addControl(PropertyControl("SWIRL_SPEED", "SPEED", defaultValue = 500, outMin=-2.0f, outMax=2.0f, hasModulation = true))
 
             addControl(PropertyControl("S_FOG", "FOG DIST", defaultValue = 100, outMin=0.0f, outMax=1.0f, hasModulation = true))
-            addControl(PropertyControl("S_FOG_FALLOFF", "FOG SOFT", defaultValue = 150, outMin=0.0f, outMax=80.0f))
+            addControl(PropertyControl("S_FOG_FALLOFF", "FOG SOFT", defaultValue = 150, outMin=0.0f, outMax=80.0f, hasModulation = true))
             addControl(PropertyControl("S_FOG_H", "FOG HUE", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
-            addControl(PropertyControl("S_FOG_S", "FOG SAT", defaultValue = 0, outMin=0.0f, outMax=1.0f))
-            addControl(PropertyControl("S_FOG_V", "FOG BRIT", defaultValue = 0, outMin=0.0f, outMax=1.0f))
+            addControl(PropertyControl("S_FOG_S", "FOG SAT", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true))
+            addControl(PropertyControl("S_FOG_V", "FOG BRIT", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true))
         }
 
         override fun reset() {
@@ -4925,12 +4965,12 @@ class MainActivity : AppCompatActivity() {
         private var locTex = -1; private var locBrit = -1; private var locHue = -1; private var locNeg = -1
         private var locGlow = -1; private var locCon = -1; private var locVib = -1
         init {
-            addControl(PropertyControl("BRIT", "BRIGHTNESS", defaultValue = 500, outMin=0f, outMax=2f))
+            addControl(PropertyControl("BRIT", "BRIGHTNESS", defaultValue = 500, outMin=0f, outMax=2f, hasModulation = true))
             addControl(PropertyControl("HUE", "HUE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
             addControl(PropertyControl("NEG", "NEGATIVE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
             addControl(PropertyControl("GLOW", "GLOW", defaultValue = 0, outMin=0f, outMax=2f, hasModulation = true))
-            addControl(PropertyControl("CONTRAST", "CONTRAST", defaultValue = 500, outMin=0f, outMax=2f))
-            addControl(PropertyControl("VIBRANCE", "SATURATION", defaultValue = 500, outMin=0f, outMax=2f))
+            addControl(PropertyControl("CONTRAST", "CONTRAST", defaultValue = 500, outMin=0f, outMax=2f, hasModulation = true))
+            addControl(PropertyControl("VIBRANCE", "SATURATION", defaultValue = 500, outMin=0f, outMax=2f, hasModulation = true))
         }
         override fun init() {
             val fSrc = """
@@ -4976,10 +5016,10 @@ class MainActivity : AppCompatActivity() {
 
         init {
             addControl(PropertyControl("E_AMT", "AMOUNT", defaultValue = 0, outMin = 0f, outMax = 1f, hasModulation = true))
-            addControl(PropertyControl("E_THRESH", "THRESHOLD", defaultValue = 300, outMin = -0.05f, outMax = 0.2f))
+            addControl(PropertyControl("E_THRESH", "THRESHOLD", defaultValue = 300, outMin = -0.05f, outMax = 0.2f, hasModulation = true))
             addControl(PropertyControl("E_HUE", "HUE", defaultValue = 0, outMin = 0f, outMax = 1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
-            addControl(PropertyControl("E_SAT", "SATURATION", defaultValue = 1000, outMin = 0f, outMax = 1f))
-            addControl(PropertyControl("E_BRIT", "BRIGHTNESS", defaultValue = 500, outMin = 0f, outMax = 2f))
+            addControl(PropertyControl("E_SAT", "SATURATION", defaultValue = 1000, outMin = 0f, outMax = 1f, hasModulation = true))
+            addControl(PropertyControl("E_BRIT", "BRIGHTNESS", defaultValue = 500, outMin = 0f, outMax = 2f, hasModulation = true))
         }
 
         override fun init() {
@@ -9549,7 +9589,44 @@ enum class SourceType {
     PLAYLIST,
     FEEDBACK
 }
-// In MainActivity.kt
+fun addFlipRotateButtons(panel: LinearLayout, context: Context, channel: MainActivity.KaleidoscopeRenderer.SourceChannel) {
+    val row = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 110).apply {
+            bottomMargin = 6; topMargin = 6
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+    }
+
+    fun mkBtn(txt: String, topPad: Int, action: () -> Unit): FrameLayout {
+        val frame = FrameLayout(context).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#444444"))
+                cornerRadius = 10f
+                setStroke(1, Color.GRAY)
+            }
+            isClickable = true
+            layoutParams = LinearLayout.LayoutParams(110, -1).apply { setMargins(12, 0, 12, 0) }
+            setOnClickListener { action() }
+        }
+        val label = TextView(context).apply {
+            text = txt
+            textSize = 26f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER_HORIZONTAL
+            includeFontPadding = false
+            layoutParams = FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER; topMargin = -topPad }
+        }
+        frame.addView(label)
+        return frame
+    }
+
+    row.addView(mkBtn("\u2194", 14) { channel.userFlipX *= -1f })
+    row.addView(mkBtn("\u2195", 4) { channel.userFlipY *= -1f })
+    row.addView(mkBtn("\u21BB", 4) { channel.userRot180 = !channel.userRot180 })
+    panel.addView(row)
+}
 
 abstract class SourcePropertyControl(
     id: String,
@@ -9570,33 +9647,13 @@ abstract class SourcePropertyControl(
     defaultLocked = true
 ) {
 
+    override fun addGeometryControls(panel: LinearLayout, context: Context) {
+        val channel = mainActivity.getRendererSource(sourceId) ?: return
+        addFlipRotateButtons(panel, context, channel)
+    }
+
     override fun addExtraControls(panel: LinearLayout, context: Context) {
         val channel = mainActivity.getRendererSource(sourceId) ?: return
-
-        val row = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 20; topMargin = 20 }
-        }
-
-        fun mkBtn(txt: String, action: () -> Unit): Button {
-            return Button(context).apply {
-                text = txt
-                textSize = 12f
-                setTextColor(Color.WHITE)
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#444444"))
-                    cornerRadius = 10f
-                    setStroke(1, Color.GRAY)
-                }
-                layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(4,0,4,0) }
-                setOnClickListener { action() }
-            }
-        }
-
-        row.addView(mkBtn("FLIP X") { channel.userFlipX *= -1f })
-        row.addView(mkBtn("FLIP Y") { channel.userFlipY *= -1f })
-        row.addView(mkBtn("ROT 180") { channel.userRot180 = !channel.userRot180 })
 
         // Blend mode dropdown
         panel.addView(TextView(context).apply {
@@ -9624,11 +9681,6 @@ abstract class SourcePropertyControl(
             }
         }
         panel.addView(spinner)
-
-        panel.addView(TextView(context).apply {
-            text = "SOURCE GEOMETRY"; textSize=10f; setTextColor(Color.LTGRAY)
-        })
-        panel.addView(row)
 
         val removeBtn = Button(context).apply {
             text = "REMOVE SOURCE"
@@ -9721,38 +9773,9 @@ class CameraSourceControl(val mainActivity: MainActivity) : PropertyControl(
     iconResId = android.R.drawable.ic_menu_camera,
     defaultLocked = true
 ) {
-    override fun addExtraControls(panel: LinearLayout, context: Context) {
+    override fun addGeometryControls(panel: LinearLayout, context: Context) {
         val channel = mainActivity.getRendererSource("CAM_MAIN") ?: return
-
-        val row = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 20; topMargin = 20 }
-        }
-
-        fun mkBtn(txt: String, action: () -> Unit): Button {
-            return Button(context).apply {
-                text = txt
-                textSize = 12f
-                setTextColor(Color.WHITE)
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#444444"))
-                    cornerRadius = 10f
-                    setStroke(1, Color.GRAY)
-                }
-                layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(4,0,4,0) }
-                setOnClickListener { action() }
-            }
-        }
-
-        row.addView(mkBtn("FLIP X") { channel.userFlipX *= -1f })
-        row.addView(mkBtn("FLIP Y") { channel.userFlipY *= -1f })
-        row.addView(mkBtn("ROT 180") { channel.userRot180 = !channel.userRot180 })
-
-        panel.addView(TextView(context).apply {
-            text = "SOURCE GEOMETRY"; textSize=10f; setTextColor(Color.LTGRAY)
-        })
-        panel.addView(row)
+        addFlipRotateButtons(panel, context, channel)
     }
 }
 
