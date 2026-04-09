@@ -5598,19 +5598,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun textToIcon(t: String, size: Float = 60f, color: Int = Color.WHITE): BitmapDrawable {
-        // CHANGE 3: Increase bitmap resolution to 500x500 so text is crisp
         val b = Bitmap.createBitmap(500, 500, Bitmap.Config.ARGB_8888)
         val c = Canvas(b)
         val p = Paint().apply {
             this.color = color
-            this.textSize = size
             this.textAlign = Paint.Align.CENTER
             isFakeBoldText = true
             isAntiAlias = true
         }
 
-        // CHANGE 4: Adjust center point to 250 (half of 500)
-        c.drawText(t, 250f, 250f + (size / 3f), p)
+        val finalSize = if (size > 0f) size else {
+            // Auto-size: start large and shrink to fit within 460px width
+            var s = 250f
+            p.textSize = s
+            while (p.measureText(t) > 460f && s > 30f) { s -= 10f; p.textSize = s }
+            s
+        }
+        p.textSize = finalSize
+        c.drawText(t, 250f, 250f + (finalSize / 3f), p)
 
         return BitmapDrawable(resources, b)
     }
@@ -8186,8 +8191,9 @@ class MainActivity : AppCompatActivity() {
             renderer.startRecording(tempFile); isRecording = true; recordingSeconds = 0; recordBtn.alpha = 1.0f
             recordTicker = object : Runnable {
                 override fun run() {
-                    recordingSeconds++; val m = recordingSeconds / 60; val s = recordingSeconds % 60
-                    recordBtn.setImageDrawable(textToIcon("%d:%02d".format(m, s), 250f, Color.RED)); handler.postDelayed(this, 1000)
+                    recordingSeconds++; val h = recordingSeconds / 3600; val m = (recordingSeconds % 3600) / 60; val s = recordingSeconds % 60
+                    val timeStr = if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+                    recordBtn.setImageDrawable(textToIcon(timeStr, 0f, Color.RED)); handler.postDelayed(this, 1000)
                 }
             }; handler.post(recordTicker!!)
         } else {
