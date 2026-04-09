@@ -4336,28 +4336,42 @@ class MainActivity : AppCompatActivity() {
         private var locCount = -1
         private val locTex = IntArray(8)
         private val locMix = IntArray(8)
+        private val locMode = IntArray(8)
         override fun init() {
             val fSrc = """
-            precision mediump float; varying vec2 v; 
-            uniform sampler2D uTex[8]; uniform float uMix[8]; uniform int uCount;
+            precision mediump float; varying vec2 v;
+            uniform sampler2D uTex[8]; uniform float uMix[8]; uniform int uMode[8]; uniform int uCount;
+            vec3 blendOp(vec3 a, vec3 b, int mode) {
+                if (mode == 1) return vec3(1.0) - (vec3(1.0) - a) * (vec3(1.0) - b);
+                if (mode == 2) return a * b;
+                if (mode == 3) return abs(a - b);
+                if (mode == 4) return vec3(
+                    a.r < 0.5 ? 2.0*a.r*b.r : 1.0 - 2.0*(1.0-a.r)*(1.0-b.r),
+                    a.g < 0.5 ? 2.0*a.g*b.g : 1.0 - 2.0*(1.0-a.g)*(1.0-b.g),
+                    a.b < 0.5 ? 2.0*a.b*b.b : 1.0 - 2.0*(1.0-a.b)*(1.0-b.b));
+                if (mode == 5) return max(a, b);
+                if (mode == 6) return min(a, b);
+                if (mode == 7) return a - b;
+                return a + b;
+            }
             void main() {
-                vec4 sum = vec4(0.0);
-                if (uCount > 0 && uMix[0] > 0.0) sum += texture2D(uTex[0], v) * uMix[0];
-                if (uCount > 1 && uMix[1] > 0.0) sum += texture2D(uTex[1], v) * uMix[1];
-                if (uCount > 2 && uMix[2] > 0.0) sum += texture2D(uTex[2], v) * uMix[2];
-                if (uCount > 3 && uMix[3] > 0.0) sum += texture2D(uTex[3], v) * uMix[3];
-                if (uCount > 4 && uMix[4] > 0.0) sum += texture2D(uTex[4], v) * uMix[4];
-                if (uCount > 5 && uMix[5] > 0.0) sum += texture2D(uTex[5], v) * uMix[5];
-                if (uCount > 6 && uMix[6] > 0.0) sum += texture2D(uTex[6], v) * uMix[6];
-                if (uCount > 7 && uMix[7] > 0.0) sum += texture2D(uTex[7], v) * uMix[7];
-                gl_FragColor = clamp(sum, 0.0, 1.0);
+                vec4 r = vec4(0.0);
+                if (uCount > 0 && uMix[0] > 0.0) r = texture2D(uTex[0], v) * uMix[0];
+                if (uCount > 1 && uMix[1] > 0.0) { vec3 t = texture2D(uTex[1], v).rgb; r.rgb = mix(r.rgb, blendOp(r.rgb, t, uMode[1]), uMix[1]); }
+                if (uCount > 2 && uMix[2] > 0.0) { vec3 t = texture2D(uTex[2], v).rgb; r.rgb = mix(r.rgb, blendOp(r.rgb, t, uMode[2]), uMix[2]); }
+                if (uCount > 3 && uMix[3] > 0.0) { vec3 t = texture2D(uTex[3], v).rgb; r.rgb = mix(r.rgb, blendOp(r.rgb, t, uMode[3]), uMix[3]); }
+                if (uCount > 4 && uMix[4] > 0.0) { vec3 t = texture2D(uTex[4], v).rgb; r.rgb = mix(r.rgb, blendOp(r.rgb, t, uMode[4]), uMix[4]); }
+                if (uCount > 5 && uMix[5] > 0.0) { vec3 t = texture2D(uTex[5], v).rgb; r.rgb = mix(r.rgb, blendOp(r.rgb, t, uMode[5]), uMix[5]); }
+                if (uCount > 6 && uMix[6] > 0.0) { vec3 t = texture2D(uTex[6], v).rgb; r.rgb = mix(r.rgb, blendOp(r.rgb, t, uMode[6]), uMix[6]); }
+                if (uCount > 7 && uMix[7] > 0.0) { vec3 t = texture2D(uTex[7], v).rgb; r.rgb = mix(r.rgb, blendOp(r.rgb, t, uMode[7]), uMix[7]); }
+                gl_FragColor = clamp(r, 0.0, 1.0);
             }"""
-            // Use ShaderHelper here
             prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
             locCount = GLES20.glGetUniformLocation(prog, "uCount")
             for (i in 0 until 8) {
                 locTex[i] = GLES20.glGetUniformLocation(prog, "uTex[$i]")
                 locMix[i] = GLES20.glGetUniformLocation(prog, "uMix[$i]")
+                locMode[i] = GLES20.glGetUniformLocation(prog, "uMode[$i]")
             }
         }
 
@@ -4374,6 +4388,7 @@ class MainActivity : AppCompatActivity() {
                 GLES20.glUniform1i(locTex[i], i)
                 val v = activity.controlsMap[sources[i].id]?.computedValue ?: 0f
                 GLES20.glUniform1f(locMix[i], v)
+                GLES20.glUniform1i(locMode[i], sources[i].blendMode.ordinal)
             }
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -8622,6 +8637,7 @@ class MainActivity : AppCompatActivity() {
             var width = 1920; var height = 1080
             var rotation = 0f
             var userFlipX = 1.0f; var userFlipY = 1.0f; var userRot180 = false
+            var blendMode = BlendMode.SCREEN
 
             var customShaderCode: String? = null
             var customProgram: Int = 0
@@ -9513,6 +9529,17 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
     }
 }
 
+enum class BlendMode(val label: String) {
+    ADD("Add"),
+    SCREEN("Screen"),
+    MULTIPLY("Multiply"),
+    DIFFERENCE("Difference"),
+    OVERLAY("Overlay"),
+    MAX("Max (Lighten)"),
+    MIN("Min (Darken)"),
+    SUBTRACT("Subtract")
+}
+
 enum class SourceType {
     CAMERA,
     MEDIA_VIDEO,
@@ -9570,6 +9597,33 @@ abstract class SourcePropertyControl(
         row.addView(mkBtn("FLIP X") { channel.userFlipX *= -1f })
         row.addView(mkBtn("FLIP Y") { channel.userFlipY *= -1f })
         row.addView(mkBtn("ROT 180") { channel.userRot180 = !channel.userRot180 })
+
+        // Blend mode dropdown
+        panel.addView(TextView(context).apply {
+            text = "BLEND MODE"; textSize=10f; setTextColor(Color.LTGRAY)
+            setPadding(0, 10, 0, 0)
+        })
+        val spinner = Spinner(context).apply {
+            val modes = BlendMode.entries.map { it.label }
+            adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, modes).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            setSelection(channel.blendMode.ordinal)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#444444"))
+                cornerRadius = 10f
+                setStroke(1, Color.GRAY)
+            }
+            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 10 }
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, pos: Int, id: Long) {
+                    (parent?.getChildAt(0) as? TextView)?.setTextColor(Color.WHITE)
+                    channel.blendMode = BlendMode.entries[pos]
+                }
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            }
+        }
+        panel.addView(spinner)
 
         panel.addView(TextView(context).apply {
             text = "SOURCE GEOMETRY"; textSize=10f; setTextColor(Color.LTGRAY)
