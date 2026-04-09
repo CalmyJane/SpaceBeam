@@ -2542,11 +2542,7 @@ open class PropertyControl(
         syncUiElements()
         modIndicator?.postInvalidate()
 
-        val displayVal = if (logPower > 1) {
-            (modulatedNormalized.toDouble().pow(1.0/logPower) * sliderMax).roundToInt()
-        } else {
-            (modulatedNormalized * sliderMax).roundToInt()
-        }
+        val displayVal = (modulatedNormalized * sliderMax).roundToInt()
         updateLiveValueUI(displayVal)
     }
 
