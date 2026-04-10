@@ -4202,6 +4202,11 @@ class MainActivity : AppCompatActivity() {
         private var copyProg = 0
         private var copyLocTex = -1
 
+        // Injection blend shader: composites one source onto the chain result
+        private var injectProg = 0
+        private var locInjectBase = -1; private var locInjectSrc = -1
+        private var locInjectMix = -1; private var locInjectMode = -1
+
         // Special key for the final output (after all effects + mask)
         var finalOutputTexId = 0
 
@@ -4235,6 +4240,39 @@ class MainActivity : AppCompatActivity() {
                 copyLocTex = GLES20.glGetUniformLocation(copyProg, "uTex")
             }
 
+            // Injection blend shader: composites one source onto the chain result using blend mode
+            if (injectProg == 0) {
+                val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
+                val fSrc = """
+                precision mediump float; varying vec2 v;
+                uniform sampler2D uBase; uniform sampler2D uSrc;
+                uniform float uMix; uniform int uMode;
+                vec3 blendOp(vec3 a, vec3 b, int mode) {
+                    if (mode == 1) return vec3(1.0) - (vec3(1.0) - a) * (vec3(1.0) - b);
+                    if (mode == 2) return a * b;
+                    if (mode == 3) return abs(a - b);
+                    if (mode == 4) return vec3(
+                        a.r < 0.5 ? 2.0*a.r*b.r : 1.0 - 2.0*(1.0-a.r)*(1.0-b.r),
+                        a.g < 0.5 ? 2.0*a.g*b.g : 1.0 - 2.0*(1.0-a.g)*(1.0-b.g),
+                        a.b < 0.5 ? 2.0*a.b*b.b : 1.0 - 2.0*(1.0-a.b)*(1.0-b.b));
+                    if (mode == 5) return max(a, b);
+                    if (mode == 6) return min(a, b);
+                    if (mode == 7) return a - b;
+                    return a + b;
+                }
+                void main() {
+                    vec4 base = texture2D(uBase, v);
+                    vec3 src = texture2D(uSrc, v).rgb;
+                    base.rgb = mix(base.rgb, blendOp(base.rgb, src, uMode), uMix);
+                    gl_FragColor = clamp(base, 0.0, 1.0);
+                }"""
+                injectProg = ShaderHelper.createProgram(vSrc, fSrc)
+                locInjectBase = GLES20.glGetUniformLocation(injectProg, "uBase")
+                locInjectSrc = GLES20.glGetUniformLocation(injectProg, "uSrc")
+                locInjectMix = GLES20.glGetUniformLocation(injectProg, "uMix")
+                locInjectMode = GLES20.glGetUniformLocation(injectProg, "uMode")
+            }
+
             isReady = true
             effects.forEach { it.init() }
         }
@@ -4244,32 +4282,32 @@ class MainActivity : AppCompatActivity() {
 
             // Collect feedback sources that tap mid-chain (not FINAL)
             val feedbackSources = renderer.sources.filter { it.type == SourceType.FEEDBACK && it.feedbackTapEffectId != "FINAL" }
+            // Collect non-feedback sources with non-mixer injection points
+            val injectedSources = renderer.sources.filter { it.type != SourceType.FEEDBACK && it.injectionPoint != "FX_MIXER" }
 
             effects[0].render(0, fboA, width, height)
 
             var currentInput = texA
-            var currentOutputFbo = fboB
-            var currentOutputTex = texB
 
             // Capture for any feedback sources tapping after the mixer
             captureForSources(feedbackSources, effects[0].id, currentInput)
+            // Inject sources targeting the mixer output
+            currentInput = injectSourcesAfter(injectedSources, effects[0].id, currentInput, renderer)
 
             for (i in 1 until effects.size) {
                 val effect = effects[i]
                 if (effect.active) {
-                    effect.render(currentInput, currentOutputFbo, width, height)
+                    // Write to the FBO that is NOT currentInput
+                    val outputFbo = if (currentInput == texA) fboB else fboA
+                    val outputTex = if (currentInput == texA) texB else texA
+                    effect.render(currentInput, outputFbo, width, height)
 
-                    currentInput = currentOutputTex
+                    currentInput = outputTex
 
                     // Capture for any feedback sources tapping after this effect
                     captureForSources(feedbackSources, effect.id, currentInput)
-
-                    // Swap Ping-Pong
-                    if (currentOutputFbo == fboA) {
-                        currentOutputFbo = fboB; currentOutputTex = texB
-                    } else {
-                        currentOutputFbo = fboA; currentOutputTex = texA
-                    }
+                    // Inject sources targeting this effect's output
+                    currentInput = injectSourcesAfter(injectedSources, effect.id, currentInput, renderer)
                 }
             }
             return currentInput
@@ -4282,6 +4320,41 @@ class MainActivity : AppCompatActivity() {
                     src.writeFeedbackSlot(srcTex, copyProg, copyLocTex)
                 }
             }
+        }
+
+        // Inject sources that target this effect's output, compositing them onto the current chain result
+        // Uses its own ping-pong: reads from inputTex, writes to the other FBO
+        private fun injectSourcesAfter(
+            injectedSources: List<MainActivity.KaleidoscopeRenderer.SourceChannel>,
+            effectId: String, inputTex: Int,
+            renderer: MainActivity.KaleidoscopeRenderer
+        ): Int {
+            var readTex = inputTex
+            for (src in injectedSources) {
+                if (src.injectionPoint != effectId) continue
+                val mixVal = renderer.ctx.controlsMap[src.id]?.computedValue ?: 0f
+                if (mixVal <= 0f) continue
+                // Determine write target: the FBO whose texture is NOT readTex
+                val writeFbo = if (readTex == texA) fboB else fboA
+                val writeTex = if (readTex == texA) texB else texA
+                // Render injection: blend src onto current chain result
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, writeFbo)
+                GLES20.glViewport(0, 0, width, height)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                GLES20.glUseProgram(injectProg)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, readTex)
+                GLES20.glUniform1i(locInjectBase, 0)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, src.fboTexId)
+                GLES20.glUniform1i(locInjectSrc, 1)
+                GLES20.glUniform1f(locInjectMix, mixVal)
+                GLES20.glUniform1i(locInjectMode, src.blendMode.ordinal)
+                ShaderHelper.bindQuad(injectProg)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                readTex = writeTex
+            }
+            return readTex
         }
 
         // Called after the final compositing (post-mask) for FINAL tap mode
@@ -4298,6 +4371,7 @@ class MainActivity : AppCompatActivity() {
         fun release() {
             if (fboA != 0) { val f = IntArray(2){ if(it==0) fboA else fboB }; val t = IntArray(2){ if(it==0) texA else texB }; GLES20.glDeleteFramebuffers(2, f, 0); GLES20.glDeleteTextures(2, t, 0) }
             if (copyProg != 0) { GLES20.glDeleteProgram(copyProg); copyProg = 0 }
+            if (injectProg != 0) { GLES20.glDeleteProgram(injectProg); injectProg = 0 }
             fboA = 0; isReady = false
             effects.forEach { it.release() }
         }
@@ -4352,16 +4426,17 @@ class MainActivity : AppCompatActivity() {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glUseProgram(prog)
 
-            val sources = activity.renderer.sources
-            val cnt = min(sources.size, 8)
+            // Only include sources that target the mixer (FX_MIXER)
+            val mixerSources = activity.renderer.sources.filter { it.injectionPoint == "FX_MIXER" }
+            val cnt = min(mixerSources.size, 8)
             GLES20.glUniform1i(locCount, cnt)
 
             for(i in 0 until cnt) {
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + i); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, sources[i].fboTexId)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + i); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mixerSources[i].fboTexId)
                 GLES20.glUniform1i(locTex[i], i)
-                val v = activity.controlsMap[sources[i].id]?.computedValue ?: 0f
+                val v = activity.controlsMap[mixerSources[i].id]?.computedValue ?: 0f
                 GLES20.glUniform1f(locMix[i], v)
-                GLES20.glUniform1i(locMode[i], sources[i].blendMode.ordinal)
+                GLES20.glUniform1i(locMode[i], mixerSources[i].blendMode.ordinal)
             }
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -8536,7 +8611,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    inner class KaleidoscopeRenderer(private val ctx: MainActivity) : GLSurfaceView.Renderer {
+    inner class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
         private var fpsFrameCount = 0
         private var fpsLastCalcTime = System.currentTimeMillis()
         var globalTime = 0f
@@ -8549,6 +8624,11 @@ class MainActivity : AppCompatActivity() {
         private var locOesFlip = -1; private var locOesScale = -1; private var locOesST = -1
         private var loc2dTex = -1; private var loc2dAlpha = -1; private var loc2dRot = -1
         private var loc2dFlip = -1; private var loc2dScale = -1
+        // Per-source transform shader
+        private var srcTransformProg = 0
+        private var locSrcTrTex = -1; private var locSrcTrZoom = -1; private var locSrcTrAngle = -1
+        private var locSrcTrMove = -1; private var locSrcTrRatio = -1
+        private var srcTransformFbo = 0; private var srcTransformTex = 0
         val stMatrix = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
 
         @Volatile private var isSurfaceReady = false
@@ -8612,6 +8692,13 @@ class MainActivity : AppCompatActivity() {
             var rotation = 0f
             var userFlipX = 1.0f; var userFlipY = 1.0f; var userRot180 = false
             var blendMode = BlendMode.SCREEN
+            var injectionPoint: String = "FX_MIXER"  // default: into the mixer at the start
+
+            // Per-source transform
+            var srcZoom = 1.0f
+            var srcAngle = 0f
+            var srcMoveX = 0f
+            var srcMoveY = 0f
 
             var customShaderCode: String? = null
             var customProgram: Int = 0
@@ -9142,6 +9229,45 @@ class MainActivity : AppCompatActivity() {
             locSimpleTex = GLES20.glGetUniformLocation(simpleProgram, "uTex")
             locSimpleMVP = GLES20.glGetUniformLocation(simpleProgram, "uMVPMatrix")
 
+            // Per-source transform shader (zoom, rotate, move with mirror repeat)
+            val fSrcTr = """
+            precision mediump float; varying vec2 v;
+            uniform sampler2D uTex; uniform float uZoom, uAngle; uniform vec2 uMove; uniform float uRatio;
+            void main() {
+                vec2 uv = v - 0.5;
+                uv /= uZoom;
+                float af = uRatio;
+                uv.x *= af;
+                float c = cos(uAngle); float s = sin(uAngle);
+                uv = vec2(uv.x*c - uv.y*s, uv.x*s + uv.y*c);
+                uv.x /= af;
+                uv += uMove;
+                uv = abs(mod(uv + 0.5, 2.0) - 1.0);
+                gl_FragColor = texture2D(uTex, uv);
+            }""".trimIndent()
+            srcTransformProg = ShaderHelper.createProgram(vSrc, fSrcTr)
+            locSrcTrTex = GLES20.glGetUniformLocation(srcTransformProg, "uTex")
+            locSrcTrZoom = GLES20.glGetUniformLocation(srcTransformProg, "uZoom")
+            locSrcTrAngle = GLES20.glGetUniformLocation(srcTransformProg, "uAngle")
+            locSrcTrMove = GLES20.glGetUniformLocation(srcTransformProg, "uMove")
+            locSrcTrRatio = GLES20.glGetUniformLocation(srcTransformProg, "uRatio")
+
+            // Shared temp FBO for per-source transform
+            run {
+                val f = IntArray(1); val t = IntArray(1)
+                GLES20.glGenFramebuffers(1, f, 0); GLES20.glGenTextures(1, t, 0)
+                srcTransformFbo = f[0]; srcTransformTex = t[0]
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, srcTransformTex)
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, FIXED_WIDTH, FIXED_HEIGHT, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, srcTransformFbo)
+                GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, srcTransformTex, 0)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            }
+
             initMainFBO(FIXED_WIDTH, FIXED_HEIGHT)
             ctx.effectChain.init(FIXED_WIDTH, FIXED_HEIGHT)
 
@@ -9204,6 +9330,40 @@ class MainActivity : AppCompatActivity() {
             ctx.effectChain.effects.forEach { if(it.active) it.update(deltaTime) }
 
             sources.forEach { it.processToFbo() }
+            // Apply per-source transform (zoom, angle, move) if non-default
+            sources.forEach { src ->
+                if (src.srcZoom != 1.0f || src.srcAngle != 0f || src.srcMoveX != 0f || src.srcMoveY != 0f) {
+                    // Render from source FBO through transform shader into temp FBO
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, srcTransformFbo)
+                    GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    GLES20.glUseProgram(srcTransformProg)
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, src.fboTexId)
+                    GLES20.glUniform1i(locSrcTrTex, 0)
+                    GLES20.glUniform1f(locSrcTrZoom, src.srcZoom)
+                    GLES20.glUniform1f(locSrcTrAngle, Math.toRadians(src.srcAngle.toDouble()).toFloat())
+                    GLES20.glUniform2f(locSrcTrMove, src.srcMoveX, src.srcMoveY)
+                    GLES20.glUniform1f(locSrcTrRatio, FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat())
+                    ShaderHelper.bindQuad(srcTransformProg)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                    // Copy back from temp to source FBO
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, src.fboId)
+                    GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    GLES20.glUseProgram(copy2dProgram)
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, srcTransformTex)
+                    GLES20.glUniform1i(loc2dTex, 0)
+                    GLES20.glUniform1f(loc2dAlpha, 1.0f)
+                    GLES20.glUniform1f(loc2dRot, 0f)
+                    GLES20.glUniform2f(loc2dFlip, 1f, 1f)
+                    GLES20.glUniform2f(loc2dScale, 1f, 1f)
+                    ShaderHelper.bindQuad(copy2dProgram)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+                }
+            }
             manageSurfaces()
 
             val finalTex = ctx.effectChain.process(this)
@@ -9679,10 +9839,82 @@ abstract class SourcePropertyControl(
     override fun addGeometryControls(panel: LinearLayout, context: Context) {
         val channel = mainActivity.getRendererSource(sourceId) ?: return
         addFlipRotateButtons(panel, context, channel)
+
+        // Per-source transform sliders
+        fun addTransformSlider(label: String, min: Float, max: Float, default: Float, getter: () -> Float, setter: (Float) -> Unit) {
+            val valueLabel = TextView(context).apply {
+                textSize = 11f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                text = "$label: ${"%.2f".format(getter())}"
+            }
+            val seekBar = SeekBar(context).apply {
+                this.max = 1000
+                progress = ((getter() - min) / (max - min) * 1000).toInt().coerceIn(0, 1000)
+                layoutParams = LinearLayout.LayoutParams(-1, -2)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                        val v = min + (progress / 1000f) * (max - min)
+                        setter(v)
+                        valueLabel.text = "$label: ${"%.2f".format(v)}"
+                    }
+                    override fun onStartTrackingTouch(sb: SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: SeekBar?) {}
+                })
+            }
+            // Double-tap to reset
+            valueLabel.setOnClickListener {
+                setter(default)
+                seekBar.progress = ((default - min) / (max - min) * 1000).toInt().coerceIn(0, 1000)
+                valueLabel.text = "$label: ${"%.2f".format(default)}"
+            }
+            panel.addView(valueLabel)
+            panel.addView(seekBar)
+        }
+
+        panel.addView(TextView(context).apply {
+            text = "SOURCE TRANSFORM"; textSize = 10f; setTextColor(Color.LTGRAY)
+            setPadding(0, 16, 0, 4)
+        })
+        addTransformSlider("ZOOM", 0.1f, 4.0f, 1.0f, { channel.srcZoom }) { channel.srcZoom = it }
+        addTransformSlider("ANGLE", -180f, 180f, 0f, { channel.srcAngle }) { channel.srcAngle = it }
+        addTransformSlider("MOVE X", -1f, 1f, 0f, { channel.srcMoveX }) { channel.srcMoveX = it }
+        addTransformSlider("MOVE Y", -1f, 1f, 0f, { channel.srcMoveY }) { channel.srcMoveY = it }
     }
 
     override fun addExtraControls(panel: LinearLayout, context: Context) {
         val channel = mainActivity.getRendererSource(sourceId) ?: return
+
+        // Injection point dropdown
+        panel.addView(TextView(context).apply {
+            text = "INJECTION POINT"; textSize = 10f; setTextColor(Color.LTGRAY)
+            setPadding(0, 10, 0, 0)
+        })
+        val effectChain = mainActivity.effectChain
+        val injectOptions = mutableListOf<Pair<String, String>>()
+        injectOptions.add(Pair("FX_MIXER", "MIXER (default)"))
+        effectChain.effects.forEach { effect ->
+            if (effect.id != "FX_MIXER") injectOptions.add(Pair(effect.id, "After ${effect.name}"))
+        }
+        val currentIdx = injectOptions.indexOfFirst { it.first == channel.injectionPoint }.coerceAtLeast(0)
+        val injectSpinner = Spinner(context).apply {
+            adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, injectOptions.map { it.second }).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            setSelection(currentIdx)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#444444"))
+                cornerRadius = 10f
+                setStroke(1, Color.GRAY)
+            }
+            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 10 }
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, pos: Int, id: Long) {
+                    (parent?.getChildAt(0) as? TextView)?.setTextColor(Color.WHITE)
+                    channel.injectionPoint = injectOptions[pos].first
+                }
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            }
+        }
+        panel.addView(injectSpinner)
 
         // Blend mode dropdown
         panel.addView(TextView(context).apply {
@@ -9805,6 +10037,81 @@ class CameraSourceControl(val mainActivity: MainActivity) : PropertyControl(
     override fun addGeometryControls(panel: LinearLayout, context: Context) {
         val channel = mainActivity.getRendererSource("CAM_MAIN") ?: return
         addFlipRotateButtons(panel, context, channel)
+
+        // Per-source transform sliders
+        fun addTransformSlider(label: String, min: Float, max: Float, default: Float, getter: () -> Float, setter: (Float) -> Unit) {
+            val valueLabel = TextView(context).apply {
+                textSize = 11f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                text = "$label: ${"%.2f".format(getter())}"
+            }
+            val seekBar = SeekBar(context).apply {
+                this.max = 1000
+                progress = ((getter() - min) / (max - min) * 1000).toInt().coerceIn(0, 1000)
+                layoutParams = LinearLayout.LayoutParams(-1, -2)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                        val v = min + (progress / 1000f) * (max - min)
+                        setter(v)
+                        valueLabel.text = "$label: ${"%.2f".format(v)}"
+                    }
+                    override fun onStartTrackingTouch(sb: SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: SeekBar?) {}
+                })
+            }
+            valueLabel.setOnClickListener {
+                setter(default)
+                seekBar.progress = ((default - min) / (max - min) * 1000).toInt().coerceIn(0, 1000)
+                valueLabel.text = "$label: ${"%.2f".format(default)}"
+            }
+            panel.addView(valueLabel)
+            panel.addView(seekBar)
+        }
+
+        panel.addView(TextView(context).apply {
+            text = "SOURCE TRANSFORM"; textSize = 10f; setTextColor(Color.LTGRAY)
+            setPadding(0, 16, 0, 4)
+        })
+        addTransformSlider("ZOOM", 0.1f, 4.0f, 1.0f, { channel.srcZoom }) { channel.srcZoom = it }
+        addTransformSlider("ANGLE", -180f, 180f, 0f, { channel.srcAngle }) { channel.srcAngle = it }
+        addTransformSlider("MOVE X", -1f, 1f, 0f, { channel.srcMoveX }) { channel.srcMoveX = it }
+        addTransformSlider("MOVE Y", -1f, 1f, 0f, { channel.srcMoveY }) { channel.srcMoveY = it }
+    }
+
+    override fun addExtraControls(panel: LinearLayout, context: Context) {
+        val channel = mainActivity.getRendererSource("CAM_MAIN") ?: return
+
+        // Injection point dropdown
+        panel.addView(TextView(context).apply {
+            text = "INJECTION POINT"; textSize = 10f; setTextColor(Color.LTGRAY)
+            setPadding(0, 10, 0, 0)
+        })
+        val effectChain = mainActivity.effectChain
+        val injectOptions = mutableListOf<Pair<String, String>>()
+        injectOptions.add(Pair("FX_MIXER", "MIXER (default)"))
+        effectChain.effects.forEach { effect ->
+            if (effect.id != "FX_MIXER") injectOptions.add(Pair(effect.id, "After ${effect.name}"))
+        }
+        val currentIdx = injectOptions.indexOfFirst { it.first == channel.injectionPoint }.coerceAtLeast(0)
+        val injectSpinner = Spinner(context).apply {
+            adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, injectOptions.map { it.second }).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            setSelection(currentIdx)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#444444"))
+                cornerRadius = 10f
+                setStroke(1, Color.GRAY)
+            }
+            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { bottomMargin = 10 }
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, pos: Int, id: Long) {
+                    (parent?.getChildAt(0) as? TextView)?.setTextColor(Color.WHITE)
+                    channel.injectionPoint = injectOptions[pos].first
+                }
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            }
+        }
+        panel.addView(injectSpinner)
     }
 }
 
