@@ -4292,9 +4292,6 @@ class MainActivity : AppCompatActivity() {
         private var locInjectBase = -1; private var locInjectSrc = -1
         private var locInjectMix = -1; private var locInjectMode = -1
 
-        // Special key for the final output (after all effects + mask)
-        var finalOutputTexId = 0
-
         fun init(w: Int, h: Int) {
             if (isReady && width == w && height == h) return
             width = w; height = h
@@ -4365,64 +4362,52 @@ class MainActivity : AppCompatActivity() {
         fun process(renderer: MainActivity.KaleidoscopeRenderer): Int {
             if (!isReady || effects.isEmpty()) return 0
 
-            // Collect feedback sources that tap mid-chain (not FINAL)
-            val feedbackSources = renderer.sources.filter { it.type == SourceType.FEEDBACK && it.feedbackTapEffectId != "FINAL" }
-            // Collect non-feedback sources with non-mixer injection points
-            val injectedSources = renderer.sources.filter { it.type != SourceType.FEEDBACK && it.injectionPoint != "FX_MIXER" }
+            val sources = renderer.sources
 
             effects[0].render(0, fboA, width, height)
 
             var currentInput = texA
 
-            // Capture for any feedback sources tapping after the mixer
-            captureForSources(feedbackSources, effects[0].id, currentInput)
-            // Inject sources targeting the mixer output
-            currentInput = injectSourcesAfter(injectedSources, effects[0].id, currentInput, renderer)
+            captureForSources(sources, effects[0].id, currentInput)
+            currentInput = injectSourcesAfter(sources, effects[0].id, currentInput, renderer)
 
             for (i in 1 until effects.size) {
                 val effect = effects[i]
                 if (effect.active) {
-                    // Write to the FBO that is NOT currentInput
                     val outputFbo = if (currentInput == texA) fboB else fboA
                     val outputTex = if (currentInput == texA) texB else texA
                     effect.render(currentInput, outputFbo, width, height)
 
                     currentInput = outputTex
 
-                    // Capture for any feedback sources tapping after this effect
-                    captureForSources(feedbackSources, effect.id, currentInput)
-                    // Inject sources targeting this effect's output
-                    currentInput = injectSourcesAfter(injectedSources, effect.id, currentInput, renderer)
+                    captureForSources(sources, effect.id, currentInput)
+                    currentInput = injectSourcesAfter(sources, effect.id, currentInput, renderer)
                 }
             }
             return currentInput
         }
 
-        private fun captureForSources(feedbackSources: List<MainActivity.KaleidoscopeRenderer.SourceChannel>, effectId: String, srcTex: Int) {
-            for (src in feedbackSources) {
-                if (src.feedbackTapEffectId == effectId) {
-                    src.initFeedbackBuffer(width, height)
-                    src.writeFeedbackSlot(srcTex, copyProg, copyLocTex)
-                }
+        private fun captureForSources(sources: List<MainActivity.KaleidoscopeRenderer.SourceChannel>, effectId: String, srcTex: Int) {
+            for (src in sources) {
+                if (src.type != SourceType.FEEDBACK || src.feedbackTapEffectId != effectId) continue
+                src.initFeedbackBuffer(width, height)
+                src.writeFeedbackSlot(srcTex, copyProg, copyLocTex)
             }
         }
 
         // Inject sources that target this effect's output, compositing them onto the current chain result
-        // Uses its own ping-pong: reads from inputTex, writes to the other FBO
         private fun injectSourcesAfter(
-            injectedSources: List<MainActivity.KaleidoscopeRenderer.SourceChannel>,
+            sources: List<MainActivity.KaleidoscopeRenderer.SourceChannel>,
             effectId: String, inputTex: Int,
             renderer: MainActivity.KaleidoscopeRenderer
         ): Int {
             var readTex = inputTex
-            for (src in injectedSources) {
-                if (src.injectionPoint != effectId) continue
+            for (src in sources) {
+                if (src.injectionPoint == "FX_MIXER" || src.injectionPoint != effectId) continue
                 val mixVal = renderer.ctx.controlsMap[src.id]?.computedValue ?: 0f
                 if (mixVal <= 0f) continue
-                // Determine write target: the FBO whose texture is NOT readTex
                 val writeFbo = if (readTex == texA) fboB else fboA
                 val writeTex = if (readTex == texA) texB else texA
-                // Render injection: blend src onto current chain result
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, writeFbo)
                 GLES20.glViewport(0, 0, width, height)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -4440,17 +4425,6 @@ class MainActivity : AppCompatActivity() {
                 readTex = writeTex
             }
             return readTex
-        }
-
-        // Called after the final compositing (post-mask) for FINAL tap mode
-        fun captureFeedbackFinal(renderer: MainActivity.KaleidoscopeRenderer) {
-            if (!isReady || finalOutputTexId == 0 || copyProg == 0) return
-            for (src in renderer.sources) {
-                if (src.type == SourceType.FEEDBACK && src.feedbackTapEffectId == "FINAL") {
-                    src.initFeedbackBuffer(width, height)
-                    src.writeFeedbackSlot(finalOutputTexId, copyProg, copyLocTex)
-                }
-            }
         }
 
         fun release() {
@@ -4511,18 +4485,18 @@ class MainActivity : AppCompatActivity() {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glUseProgram(prog)
 
-            // Only include sources that target the mixer (FX_MIXER)
-            val mixerSources = activity.renderer.sources.filter { it.injectionPoint == "FX_MIXER" }
-            val cnt = min(mixerSources.size, 8)
-            GLES20.glUniform1i(locCount, cnt)
-
-            for(i in 0 until cnt) {
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + i); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mixerSources[i].fboTexId)
-                GLES20.glUniform1i(locTex[i], i)
-                val v = activity.controlsMap[mixerSources[i].id]?.computedValue ?: 0f
-                GLES20.glUniform1f(locMix[i], v)
-                GLES20.glUniform1i(locMode[i], mixerSources[i].blendMode.ordinal)
+            // Only include sources that target the mixer (FX_MIXER), no allocation
+            var cnt = 0
+            for (src in activity.renderer.sources) {
+                if (src.injectionPoint != "FX_MIXER" || cnt >= 8) continue
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + cnt); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, src.fboTexId)
+                GLES20.glUniform1i(locTex[cnt], cnt)
+                val v = activity.controlsMap[src.id]?.computedValue ?: 0f
+                GLES20.glUniform1f(locMix[cnt], v)
+                GLES20.glUniform1i(locMode[cnt], src.blendMode.ordinal)
+                cnt++
             }
+            GLES20.glUniform1i(locCount, cnt)
             ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
         override fun release() { GLES20.glDeleteProgram(prog) }
@@ -9492,10 +9466,6 @@ class MainActivity : AppCompatActivity() {
             handleCapture()
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-            // Capture feedback: for FINAL tap mode, copy the composited output for next frame's feedback sources
-            ctx.effectChain.finalOutputTexId = fboTexId
-            ctx.effectChain.captureFeedbackFinal(this)
-
             renderToScreen()
             renderToExternal()
             renderToRecorder()
@@ -10730,7 +10700,7 @@ class FeedbackSourceControl(
         panel.addView(delaySeekBar)
         panel.addView(delayLabel)
 
-        // Add standard geometry controls (flip, remove)
+        // Add standard controls (inject after, blend mode, remove)
         super.addExtraControls(panel, context)
     }
 
