@@ -8,6 +8,7 @@
     * Image/Video (playlists) as input-source
     * Generative Shaders as input-source
     * Feedback as input-source
+    * Different merge modes (add, subtract, multiply ...)
     * Accelerometer as modulation for parameters
     * Bluetooth MIDI controller as modulation source
     * BPM tap and beat synced LFOs

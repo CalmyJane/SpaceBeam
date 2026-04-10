@@ -1,0 +1,4 @@
+Cleaned up details menu
+Added Feedback Source
+Added Injection points
+Added merge modes (add, subtract, multiply ...)
