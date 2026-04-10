@@ -6811,7 +6811,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Symbol
-            textPaint.color = if (enabled) Color.WHITE else Color.GRAY
+            textPaint.color = if (enabled) Color.WHITE else Color.argb(128, 255, 255, 255)
             val xPos = w / 2
             val yPos = (h / 2) - ((textPaint.descent() + textPaint.ascent()) / 2)
             canvas.drawText(symbol, xPos, yPos, textPaint)
