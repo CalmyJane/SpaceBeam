@@ -8792,7 +8792,7 @@ class MainActivity : AppCompatActivity() {
             private var customLocIResolution = -1; private var customLocUFlip = -1; private var customLocURotation = -1
 
             // Per-source feedback buffer
-            var feedbackTapEffectId: String = "FINAL"
+            var feedbackTapEffectId: String = "FX_SWIRL"
             var feedbackDelay = 1
             private var fbFbo = 0
             private var fbTextures = IntArray(0)
@@ -10667,7 +10667,6 @@ class FeedbackSourceControl(
         effectChain.effects.forEach { effect ->
             tapOptions.add(Pair(effect.id, effect.name))
         }
-        tapOptions.add(Pair("FINAL", "FINAL OUTPUT"))
 
         val currentTap = channel.feedbackTapEffectId
         val foundIndex = tapOptions.indexOfFirst { it.first == currentTap }
