@@ -2940,6 +2940,10 @@ open class PropertyControl(
             smoothSb.tag = "SMOOTH_SEEK"
             contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 16) })
 
+            // Hook for subclasses to add collapsible categories above LFO (e.g. TRANSFORM for sources)
+            addCategoryControls(contentLayout, context)
+            contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
+
             // --- LFO category (collapsed by default) ---
             val (lfoGroup, lfoContent) = createCollapsibleDetailGroup(context, "LFO", false)
 
@@ -3018,7 +3022,6 @@ open class PropertyControl(
         contentLayout.addView(gyroGroup)
         contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
 
-        contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
         val resetBtn = Button(context).apply {
             text = "RESET"; textSize = 14f; setTextColor(Color.LTGRAY); includeFontPadding = false; setPadding(0, 0, 0, 0); gravity = Gravity.CENTER
             background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(2, Color.DKGRAY); cornerRadius = 12f }
@@ -3121,7 +3124,7 @@ open class PropertyControl(
         parent.addView(row)
     }
 
-    private fun createCollapsibleDetailGroup(context: Context, title: String, startOpen: Boolean): Pair<LinearLayout, LinearLayout> {
+    protected fun createCollapsibleDetailGroup(context: Context, title: String, startOpen: Boolean): Pair<LinearLayout, LinearLayout> {
         val groupContainer = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8 } }
         val header = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(15, 12, 15, 12); background = GradientDrawable().apply { setColor(Color.parseColor("#33FFFFFF")); cornerRadius = 8f; setStroke(1, Color.parseColor("#44FFFFFF")) } }
         val arrow = TextView(context).apply { text = "▶"; textSize = 9f; setTextColor(Color.LTGRAY); layoutParams = LinearLayout.LayoutParams(50, -2); rotation = if (startOpen) 90f else 0f }
@@ -3137,6 +3140,87 @@ open class PropertyControl(
         return Pair(groupContainer, content)
     }
 
+    protected fun buildTransformCategory(panel: LinearLayout, context: Context, channel: MainActivity.KaleidoscopeRenderer.SourceChannel) {
+        val (transformGroup, transformContent) = createCollapsibleDetailGroup(context, "TRANSFORM", false)
+
+        // Flip/rotate buttons at the top of the TRANSFORM group
+        addFlipRotateButtons(transformContent, context, channel)
+
+        // Slider style matching LFO/GYRO: horizontal row, label 130px, seekbar flex
+        fun addRow(label: String, min: Float, max: Float, defaultVal: Float, getter: () -> Float, setter: (Float) -> Unit) {
+            var sbRef: SeekBar? = null
+            val rangeMin = min; val rangeMax = max
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, 5, 0, 5)
+            }
+            val lv = TextView(context).apply {
+                text = label; textSize = 10f; setTextColor(Color.LTGRAY)
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(130, ViewGroup.LayoutParams.MATCH_PARENT)
+                isClickable = true
+                setOnClickListener {
+                    setter(defaultVal)
+                    sbRef?.progress = ((defaultVal - rangeMin) / (rangeMax - rangeMin) * 1000).toInt().coerceIn(0, 1000)
+                }
+            }
+            val sb = SeekBar(context).apply {
+                this.max = 1000
+                progress = ((getter() - rangeMin) / (rangeMax - rangeMin) * 1000).toInt().coerceIn(0, 1000)
+                thumb = GradientDrawable().apply { setColor(Color.WHITE); setSize(30, 30); cornerRadius = 15f }
+                setPadding(0, 0, 0, 0); thumbOffset = 0
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) setter(rangeMin + (p / 1000f) * (rangeMax - rangeMin)) }
+                    override fun onStartTrackingTouch(s: SeekBar?) {}
+                    override fun onStopTrackingTouch(s: SeekBar?) {}
+                })
+            }
+            sbRef = sb
+            row.addView(lv); row.addView(sb)
+            transformContent.addView(row)
+        }
+
+        addRow("ZOOM", 0.1f, 4.0f, 1.0f, { channel.srcZoom }) { channel.srcZoom = it }
+        addRow("ANGLE", -180f, 180f, 0f, { channel.srcAngle }) { channel.srcAngle = it }
+        addRow("MOVE X", -1f, 1f, 0f, { channel.srcMoveX }) { channel.srcMoveX = it }
+        addRow("MOVE Y", -1f, 1f, 0f, { channel.srcMoveY }) { channel.srcMoveY = it }
+
+        // Wrap mode dropdown
+        val wrapRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 5, 0, 5)
+        }
+        wrapRow.addView(TextView(context).apply {
+            text = "WRAP"; textSize = 10f; setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(130, ViewGroup.LayoutParams.MATCH_PARENT)
+        })
+        val wrapSpinner = Spinner(context).apply {
+            adapter = ArrayAdapter(context, android.R.layout.simple_spinner_item, listOf("MIRROR", "HOLD", "REPEAT")).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            setSelection(channel.srcWrapMode)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#333333")); cornerRadius = 8f; setStroke(1, Color.GRAY)
+            }
+            layoutParams = LinearLayout.LayoutParams(0, 90, 1f)
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, pos: Int, id: Long) {
+                    (parent?.getChildAt(0) as? TextView)?.setTextColor(Color.WHITE)
+                    channel.srcWrapMode = pos
+                }
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            }
+        }
+        wrapRow.addView(wrapSpinner)
+        transformContent.addView(wrapRow)
+
+        panel.addView(transformGroup)
+    }
+
     private fun updateLockButtonVisuals() {
         lockButton?.text = if (isLocked) "LOCKED" else "UNLOCKED"
         lockButton?.setTextColor(if (isLocked) Color.parseColor("#FF6666") else Color.parseColor("#66FF66"))
@@ -3148,6 +3232,7 @@ open class PropertyControl(
     }
 
     open fun addGeometryControls(panel: LinearLayout, context: Context) {}
+    open fun addCategoryControls(panel: LinearLayout, context: Context) {}
     open fun addExtraControls(panel: LinearLayout, context: Context) {}
     protected fun createNumButton(ctx: Context, txt: String, action: () -> Unit): Button {
         return Button(ctx).apply { text = txt; textSize = 24f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; includeFontPadding = false; setPadding(0, 0, 0, 0)
@@ -8627,7 +8712,7 @@ class MainActivity : AppCompatActivity() {
         // Per-source transform shader
         private var srcTransformProg = 0
         private var locSrcTrTex = -1; private var locSrcTrZoom = -1; private var locSrcTrAngle = -1
-        private var locSrcTrMove = -1; private var locSrcTrRatio = -1
+        private var locSrcTrMove = -1; private var locSrcTrRatio = -1; private var locSrcTrWrap = -1
         private var srcTransformFbo = 0; private var srcTransformTex = 0
         val stMatrix = FloatArray(16).apply { android.opengl.Matrix.setIdentityM(this, 0) }
 
@@ -8699,6 +8784,7 @@ class MainActivity : AppCompatActivity() {
             var srcAngle = 0f
             var srcMoveX = 0f
             var srcMoveY = 0f
+            var srcWrapMode = 0  // 0=mirror, 1=hold, 2=repeat
 
             var customShaderCode: String? = null
             var customProgram: Int = 0
@@ -9233,6 +9319,7 @@ class MainActivity : AppCompatActivity() {
             val fSrcTr = """
             precision mediump float; varying vec2 v;
             uniform sampler2D uTex; uniform float uZoom, uAngle; uniform vec2 uMove; uniform float uRatio;
+            uniform int uWrap;
             void main() {
                 vec2 uv = v - 0.5;
                 uv /= uZoom;
@@ -9242,7 +9329,10 @@ class MainActivity : AppCompatActivity() {
                 uv = vec2(uv.x*c - uv.y*s, uv.x*s + uv.y*c);
                 uv.x /= af;
                 uv += uMove;
-                uv = abs(mod(uv + 0.5, 2.0) - 1.0);
+                uv += 0.5;
+                if (uWrap == 1) { uv = clamp(uv, 0.0, 1.0); }
+                else if (uWrap == 2) { uv = fract(uv); }
+                else { uv = abs(mod(uv + 1.0, 2.0) - 1.0); }
                 gl_FragColor = texture2D(uTex, uv);
             }""".trimIndent()
             srcTransformProg = ShaderHelper.createProgram(vSrc, fSrcTr)
@@ -9251,6 +9341,7 @@ class MainActivity : AppCompatActivity() {
             locSrcTrAngle = GLES20.glGetUniformLocation(srcTransformProg, "uAngle")
             locSrcTrMove = GLES20.glGetUniformLocation(srcTransformProg, "uMove")
             locSrcTrRatio = GLES20.glGetUniformLocation(srcTransformProg, "uRatio")
+            locSrcTrWrap = GLES20.glGetUniformLocation(srcTransformProg, "uWrap")
 
             // Shared temp FBO for per-source transform
             run {
@@ -9332,7 +9423,7 @@ class MainActivity : AppCompatActivity() {
             sources.forEach { it.processToFbo() }
             // Apply per-source transform (zoom, angle, move) if non-default
             sources.forEach { src ->
-                if (src.srcZoom != 1.0f || src.srcAngle != 0f || src.srcMoveX != 0f || src.srcMoveY != 0f) {
+                if (src.srcZoom != 1.0f || src.srcAngle != 0f || src.srcMoveX != 0f || src.srcMoveY != 0f || src.srcWrapMode != 0) {
                     // Render from source FBO through transform shader into temp FBO
                     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, srcTransformFbo)
                     GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
@@ -9345,6 +9436,7 @@ class MainActivity : AppCompatActivity() {
                     GLES20.glUniform1f(locSrcTrAngle, Math.toRadians(src.srcAngle.toDouble()).toFloat())
                     GLES20.glUniform2f(locSrcTrMove, src.srcMoveX, src.srcMoveY)
                     GLES20.glUniform1f(locSrcTrRatio, FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat())
+                    GLES20.glUniform1i(locSrcTrWrap, src.srcWrapMode)
                     ShaderHelper.bindQuad(srcTransformProg)
                     GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
                     // Copy back from temp to source FBO
@@ -9836,63 +9928,24 @@ abstract class SourcePropertyControl(
     defaultLocked = true
 ) {
 
-    override fun addGeometryControls(panel: LinearLayout, context: Context) {
+    override fun addCategoryControls(panel: LinearLayout, context: Context) {
         val channel = mainActivity.getRendererSource(sourceId) ?: return
-        addFlipRotateButtons(panel, context, channel)
-
-        // Per-source transform sliders
-        fun addTransformSlider(label: String, min: Float, max: Float, default: Float, getter: () -> Float, setter: (Float) -> Unit) {
-            val valueLabel = TextView(context).apply {
-                textSize = 11f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
-                text = "$label: ${"%.2f".format(getter())}"
-            }
-            val seekBar = SeekBar(context).apply {
-                this.max = 1000
-                progress = ((getter() - min) / (max - min) * 1000).toInt().coerceIn(0, 1000)
-                layoutParams = LinearLayout.LayoutParams(-1, -2)
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
-                        val v = min + (progress / 1000f) * (max - min)
-                        setter(v)
-                        valueLabel.text = "$label: ${"%.2f".format(v)}"
-                    }
-                    override fun onStartTrackingTouch(sb: SeekBar?) {}
-                    override fun onStopTrackingTouch(sb: SeekBar?) {}
-                })
-            }
-            // Double-tap to reset
-            valueLabel.setOnClickListener {
-                setter(default)
-                seekBar.progress = ((default - min) / (max - min) * 1000).toInt().coerceIn(0, 1000)
-                valueLabel.text = "$label: ${"%.2f".format(default)}"
-            }
-            panel.addView(valueLabel)
-            panel.addView(seekBar)
-        }
-
-        panel.addView(TextView(context).apply {
-            text = "SOURCE TRANSFORM"; textSize = 10f; setTextColor(Color.LTGRAY)
-            setPadding(0, 16, 0, 4)
-        })
-        addTransformSlider("ZOOM", 0.1f, 4.0f, 1.0f, { channel.srcZoom }) { channel.srcZoom = it }
-        addTransformSlider("ANGLE", -180f, 180f, 0f, { channel.srcAngle }) { channel.srcAngle = it }
-        addTransformSlider("MOVE X", -1f, 1f, 0f, { channel.srcMoveX }) { channel.srcMoveX = it }
-        addTransformSlider("MOVE Y", -1f, 1f, 0f, { channel.srcMoveY }) { channel.srcMoveY = it }
+        buildTransformCategory(panel, context, channel)
     }
 
     override fun addExtraControls(panel: LinearLayout, context: Context) {
         val channel = mainActivity.getRendererSource(sourceId) ?: return
 
-        // Injection point dropdown
+        // Inject after dropdown
         panel.addView(TextView(context).apply {
-            text = "INJECTION POINT"; textSize = 10f; setTextColor(Color.LTGRAY)
+            text = "INJECT AFTER"; textSize = 10f; setTextColor(Color.LTGRAY)
             setPadding(0, 10, 0, 0)
         })
         val effectChain = mainActivity.effectChain
         val injectOptions = mutableListOf<Pair<String, String>>()
         injectOptions.add(Pair("FX_MIXER", "MIXER (default)"))
         effectChain.effects.forEach { effect ->
-            if (effect.id != "FX_MIXER") injectOptions.add(Pair(effect.id, "After ${effect.name}"))
+            if (effect.id != "FX_MIXER") injectOptions.add(Pair(effect.id, effect.name))
         }
         val currentIdx = injectOptions.indexOfFirst { it.first == channel.injectionPoint }.coerceAtLeast(0)
         val injectSpinner = Spinner(context).apply {
@@ -10034,62 +10087,24 @@ class CameraSourceControl(val mainActivity: MainActivity) : PropertyControl(
     iconResId = android.R.drawable.ic_menu_camera,
     defaultLocked = true
 ) {
-    override fun addGeometryControls(panel: LinearLayout, context: Context) {
+    override fun addCategoryControls(panel: LinearLayout, context: Context) {
         val channel = mainActivity.getRendererSource("CAM_MAIN") ?: return
-        addFlipRotateButtons(panel, context, channel)
-
-        // Per-source transform sliders
-        fun addTransformSlider(label: String, min: Float, max: Float, default: Float, getter: () -> Float, setter: (Float) -> Unit) {
-            val valueLabel = TextView(context).apply {
-                textSize = 11f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
-                text = "$label: ${"%.2f".format(getter())}"
-            }
-            val seekBar = SeekBar(context).apply {
-                this.max = 1000
-                progress = ((getter() - min) / (max - min) * 1000).toInt().coerceIn(0, 1000)
-                layoutParams = LinearLayout.LayoutParams(-1, -2)
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
-                        val v = min + (progress / 1000f) * (max - min)
-                        setter(v)
-                        valueLabel.text = "$label: ${"%.2f".format(v)}"
-                    }
-                    override fun onStartTrackingTouch(sb: SeekBar?) {}
-                    override fun onStopTrackingTouch(sb: SeekBar?) {}
-                })
-            }
-            valueLabel.setOnClickListener {
-                setter(default)
-                seekBar.progress = ((default - min) / (max - min) * 1000).toInt().coerceIn(0, 1000)
-                valueLabel.text = "$label: ${"%.2f".format(default)}"
-            }
-            panel.addView(valueLabel)
-            panel.addView(seekBar)
-        }
-
-        panel.addView(TextView(context).apply {
-            text = "SOURCE TRANSFORM"; textSize = 10f; setTextColor(Color.LTGRAY)
-            setPadding(0, 16, 0, 4)
-        })
-        addTransformSlider("ZOOM", 0.1f, 4.0f, 1.0f, { channel.srcZoom }) { channel.srcZoom = it }
-        addTransformSlider("ANGLE", -180f, 180f, 0f, { channel.srcAngle }) { channel.srcAngle = it }
-        addTransformSlider("MOVE X", -1f, 1f, 0f, { channel.srcMoveX }) { channel.srcMoveX = it }
-        addTransformSlider("MOVE Y", -1f, 1f, 0f, { channel.srcMoveY }) { channel.srcMoveY = it }
+        buildTransformCategory(panel, context, channel)
     }
 
     override fun addExtraControls(panel: LinearLayout, context: Context) {
         val channel = mainActivity.getRendererSource("CAM_MAIN") ?: return
 
-        // Injection point dropdown
+        // Inject after dropdown
         panel.addView(TextView(context).apply {
-            text = "INJECTION POINT"; textSize = 10f; setTextColor(Color.LTGRAY)
+            text = "INJECT AFTER"; textSize = 10f; setTextColor(Color.LTGRAY)
             setPadding(0, 10, 0, 0)
         })
         val effectChain = mainActivity.effectChain
         val injectOptions = mutableListOf<Pair<String, String>>()
         injectOptions.add(Pair("FX_MIXER", "MIXER (default)"))
         effectChain.effects.forEach { effect ->
-            if (effect.id != "FX_MIXER") injectOptions.add(Pair(effect.id, "After ${effect.name}"))
+            if (effect.id != "FX_MIXER") injectOptions.add(Pair(effect.id, effect.name))
         }
         val currentIdx = injectOptions.indexOfFirst { it.first == channel.injectionPoint }.coerceAtLeast(0)
         val injectSpinner = Spinner(context).apply {
