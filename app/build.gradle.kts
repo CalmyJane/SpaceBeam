@@ -3,6 +3,16 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+// Copy README.md and readme_content/ into assets/help/ so the in-app help stays in sync
+val copyHelp = tasks.register<Copy>("copyHelpAssets") {
+    from(rootProject.file("README.md"))
+    from(rootProject.file("readme_content"))  { into("readme_content") }
+    into(layout.projectDirectory.dir("src/main/assets/help"))
+}
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach {
+    dependsOn(copyHelp)
+}
+
 android {
     namespace = "com.calmyjane.spacebeam"
     compileSdk {

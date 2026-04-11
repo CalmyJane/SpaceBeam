@@ -11,6 +11,7 @@ Real-time kaleidoscope visual synthesizer for Android, meant for party/event use
 ## Documentation
 - After making changes, check if README.md should be updated to reflect them
 - If so, ask whether to update the README as well
+- README.md is copied to app assets at build time (Gradle `copyHelpAssets` task) and shown as in-app help via WebView — no manual copy needed, just rebuild
 
 ## Creative input welcome
 - Feel free to suggest new features, improvements, or simpler approaches if relevant to the conversation

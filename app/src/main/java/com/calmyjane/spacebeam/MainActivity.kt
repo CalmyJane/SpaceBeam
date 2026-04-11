@@ -1128,6 +1128,10 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         })
 
         // --- GENERAL ITEMS ---
+        contentLayout.addView(createStyledButton("help") {
+            showHelp()
+        })
+
         contentLayout.addView(createStyledButton("reset presets") {
             showConfirmation(
                 "RESET ALL PRESETS?",
@@ -1552,6 +1556,193 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             cornerRadius = 15f
             setStroke(1, Color.GRAY)
         }
+    }
+
+    private fun showHelp() {
+        Thread {
+            try {
+                val md = activity.assets.open("help/README.md").bufferedReader().readText()
+
+                // Find which images the markdown actually references
+                val referencedImages = Regex("!\\[[^\\]]*\\]\\(([^)]+)\\)").findAll(md)
+                    .map { it.groupValues[1].substringAfterLast("/") }.toSet()
+
+                // Load only referenced images as base64 data URIs
+                val imageMap = mutableMapOf<String, String>()
+                val assetFiles = activity.assets.list("help/readme_content") ?: emptyArray()
+                for (name in assetFiles) {
+                    if (name !in referencedImages) continue
+                    val bytes = activity.assets.open("help/readme_content/$name").readBytes()
+                    val ext = name.substringAfterLast('.').lowercase()
+                    val mime = when (ext) {
+                        "png" -> "image/png"
+                        "jpg", "jpeg" -> "image/jpeg"
+                        "svg" -> "image/svg+xml"
+                        else -> "image/png"
+                    }
+                    imageMap[name] = "data:$mime;base64,${android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)}"
+                }
+
+                inlineImageMap = imageMap
+                val html = markdownToHtml(md)
+                inlineImageMap = null
+
+                val helpDir = File(activity.cacheDir, "help")
+                helpDir.mkdirs()
+                val htmlFile = File(helpDir, "help.html")
+                htmlFile.writeText(html)
+
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    activity, "${activity.packageName}.fileprovider", htmlFile
+                )
+                activity.runOnUiThread {
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, "text/html")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    try { activity.startActivity(intent) }
+                    catch (e: Exception) {
+                        Toast.makeText(activity, "No browser found", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) {
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "Help not available — rebuild app", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun markdownToHtml(md: String): String {
+        val sb = StringBuilder()
+        var inCodeBlock = false
+        var inTable = false
+        var tableHeaderDone = false
+        var inList = false
+        var listOrdered = false
+
+        for (rawLine in md.lines()) {
+            val line = rawLine.trimEnd()
+
+            // Code blocks
+            if (line.trimStart().startsWith("```")) {
+                if (inCodeBlock) { sb.append("</code></pre>"); inCodeBlock = false }
+                else { sb.append("<pre><code>"); inCodeBlock = true }
+                continue
+            }
+            if (inCodeBlock) { sb.append(escapeHtml(line)).append("\n"); continue }
+
+            // Close lists if needed
+            if (inList && !line.startsWith("- ") && !line.startsWith("  -") && !line.matches(Regex("^\\d+\\.\\s.*"))) {
+                sb.append(if (listOrdered) "</ol>" else "</ul>"); inList = false
+            }
+
+            // Close table if needed
+            if (inTable && !line.startsWith("|")) { sb.append("</table>"); inTable = false; tableHeaderDone = false }
+
+            // Blank line — skip, spacing handled by CSS margins
+            if (line.isBlank()) continue
+
+            // Horizontal rule
+            if (line.matches(Regex("^-{3,}$"))) { sb.append("<hr>"); continue }
+
+            // Headers
+            if (line.startsWith("#")) {
+                val level = line.takeWhile { it == '#' }.length.coerceAtMost(6)
+                val text = inline(line.drop(level).trim())
+                sb.append("<h$level>$text</h$level>")
+                continue
+            }
+
+            // Table
+            if (line.startsWith("|")) {
+                if (line.replace("|", "").replace("-", "").replace(" ", "").isBlank()) continue // separator row
+                if (!inTable) { sb.append("<table>"); inTable = true; tableHeaderDone = false }
+                val tag = if (!tableHeaderDone) { tableHeaderDone = true; "th" } else "td"
+                sb.append("<tr>")
+                line.trim('|').split("|").forEach { cell ->
+                    sb.append("<$tag>${inline(cell.trim())}</$tag>")
+                }
+                sb.append("</tr>")
+                continue
+            }
+
+            // Unordered list
+            if (line.startsWith("- ") || line.startsWith("  -")) {
+                if (!inList || listOrdered) {
+                    if (inList) sb.append("</ol>")
+                    sb.append("<ul>"); inList = true; listOrdered = false
+                }
+                sb.append("<li>${inline(line.trimStart().removePrefix("- ").trim())}</li>")
+                continue
+            }
+
+            // Ordered list
+            val olMatch = Regex("^(\\d+)\\.\\s(.*)").find(line)
+            if (olMatch != null) {
+                if (!inList || !listOrdered) {
+                    if (inList) sb.append("</ul>")
+                    sb.append("<ol>"); inList = true; listOrdered = true
+                }
+                sb.append("<li>${inline(olMatch.groupValues[2])}</li>")
+                continue
+            }
+
+            // Paragraph
+            sb.append("<p>${inline(line)}</p>")
+        }
+
+        if (inCodeBlock) sb.append("</code></pre>")
+        if (inList) sb.append(if (listOrdered) "</ol>" else "</ul>")
+        if (inTable) sb.append("</table>")
+
+        return """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+body { background: #1a1a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; line-height: 1.4; }
+p { margin: 4px 0; }
+h1 { color: #fff; border-bottom: 1px solid #444; padding-bottom: 6px; margin: 16px 0 8px; }
+h2 { color: #eee; border-bottom: 1px solid #333; padding-bottom: 4px; margin: 20px 0 6px; }
+h3 { color: #ccc; margin: 14px 0 4px; }
+a { color: #6cacff; }
+img { max-width: 100%; border-radius: 8px; margin: 12px 0; }
+code { background: #2a2a2a; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #2a2a2a; padding: 12px; border-radius: 8px; overflow-x: auto; }
+pre code { padding: 0; background: none; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+th, td { border: 1px solid #444; padding: 8px 12px; text-align: left; }
+th { background: #2a2a2a; color: #fff; }
+hr { border: none; border-top: 1px solid #444; margin: 24px 0; }
+blockquote { border-left: 3px solid #555; padding-left: 12px; color: #aaa; }
+li { margin: 4px 0; }
+</style></head><body>${sb}</body></html>"""
+    }
+
+    private var inlineImageMap: MutableMap<String, String>? = null
+
+    private fun inline(text: String): String {
+        var s = escapeHtml(text)
+        // Images: ![alt](src)
+        s = s.replace(Regex("!\\[([^\\]]*)\\]\\(([^)]+)\\)")) { m ->
+            val rawSrc = m.groupValues[2]
+            val fileName = rawSrc.substringAfterLast("/")
+            val src = inlineImageMap?.get(fileName) ?: rawSrc
+            "<img src=\"$src\" alt=\"${m.groupValues[1]}\">"
+        }
+        // Links: [text](url)
+        s = s.replace(Regex("\\[([^\\]]*)\\]\\(([^)]+)\\)")) { m ->
+            "<a href=\"${m.groupValues[2]}\">${m.groupValues[1]}</a>"
+        }
+        // Bold: **text**
+        s = s.replace(Regex("\\*\\*([^*]+)\\*\\*")) { "<strong>${it.groupValues[1]}</strong>" }
+        // Italic: *text*
+        s = s.replace(Regex("(?<!\\*)\\*([^*]+)\\*(?!\\*)")) { "<em>${it.groupValues[1]}</em>" }
+        // Inline code: `text`
+        s = s.replace(Regex("`([^`]+)`")) { "<code>${it.groupValues[1]}</code>" }
+        return s
+    }
+
+    private fun escapeHtml(s: String): String {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     }
 
     private fun showSaveOptions() {
