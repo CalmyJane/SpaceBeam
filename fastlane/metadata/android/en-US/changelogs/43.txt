@@ -1,0 +1,3 @@
+-Refactored codebase into modular files
+-Added CI/CD pipeline for automated builds
+-Updated help documentation
