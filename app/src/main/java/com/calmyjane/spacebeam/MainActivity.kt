@@ -37,6 +37,10 @@ import android.provider.MediaStore
 import android.view.*
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
@@ -3371,6 +3375,7 @@ open class PropertyControl(
 
 
 // --- MAIN ACTIVITY ---
+@OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
 class MainActivity : AppCompatActivity() {
     private var originalScreenTimeout = -1
     var forceScreenOn = false
@@ -3782,6 +3787,9 @@ class MainActivity : AppCompatActivity() {
     private var mixerGroupContainer: LinearLayout? = null
     private lateinit var saveConfirmBtn: View
     private lateinit var renderer: KaleidoscopeRenderer
+    private data class CameraEntry(val id: String, val name: String, val isFront: Boolean)
+    private var allCameras: List<CameraEntry> = emptyList()
+    private var currentCameraIndex = 0
     private var currentSelector = CameraSelector.DEFAULT_FRONT_CAMERA
     lateinit var overlayHUD: FrameLayout
     private lateinit var displayHelper: ExternalDisplayHelper
@@ -5507,10 +5515,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun startCamera() {
+        if (allCameras.isEmpty()) enumerateCameras()
         val cpFuture = ProcessCameraProvider.getInstance(this)
         cpFuture.addListener({
             val provider = cpFuture.get()
             provider.unbindAll()
+            val cam = allCameras.getOrNull(currentCameraIndex) ?: return@addListener
+            currentSelector = CameraSelector.Builder()
+                .addCameraFilter { cameras -> cameras.filter { Camera2CameraInfo.from(it).cameraId == cam.id } }
+                .build()
             glView.queueEvent {
                 runOnUiThread {
                     val preview = Preview.Builder()
@@ -5522,6 +5535,49 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun enumerateCameras() {
+        val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+
+        data class RawCam(val id: String, val isFront: Boolean, val fl: Float?)
+
+        val raw = mutableListOf<RawCam>()
+        for (id in cm.cameraIdList) {
+            val chars = cm.getCameraCharacteristics(id)
+            val facing = chars.get(CameraCharacteristics.LENS_FACING) ?: continue
+            val isFront = facing == CameraCharacteristics.LENS_FACING_FRONT
+            val fl = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
+            raw.add(RawCam(id, isFront, fl))
+        }
+
+        // Name cameras relative to others with same facing
+        fun nameGroup(group: List<RawCam>): List<CameraEntry> {
+            if (group.size == 1) {
+                val prefix = if (group[0].isFront) "Front" else "Back"
+                return listOf(CameraEntry(group[0].id, prefix, group[0].isFront))
+            }
+            val sorted = group.sortedBy { it.fl ?: Float.MAX_VALUE }
+            return sorted.mapIndexed { i, cam ->
+                val prefix = if (cam.isFront) "Front" else "Back"
+                val type = when {
+                    cam.fl == null -> "Camera ${i + 1}"
+                    i == 0 && (cam.fl < 2.5f || cam.fl < (sorted.getOrNull(1)?.fl ?: cam.fl) * 0.7f) -> "Ultrawide"
+                    i == sorted.lastIndex && cam.fl > 6.0f -> "Telephoto"
+                    i == sorted.lastIndex -> "Narrow"
+                    else -> "Wide"
+                }
+                CameraEntry(cam.id, "$prefix $type", cam.isFront)
+            }
+        }
+
+        val front = nameGroup(raw.filter { it.isFront })
+        val back = nameGroup(raw.filter { !it.isFront })
+        allCameras = front + back
+
+        // Default to first front camera
+        val frontIdx = allCameras.indexOfFirst { it.isFront }
+        if (frontIdx >= 0) currentCameraIndex = frontIdx
     }
 
     override fun onResume() {
@@ -6707,8 +6763,14 @@ class MainActivity : AppCompatActivity() {
         axisCtrl.attachTo(this, parent)
     }
 
+    private var cameraToast: Toast? = null
+
     fun switchCamera() {
-        currentSelector = if (currentSelector == CameraSelector.DEFAULT_BACK_CAMERA) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+        if (allCameras.isEmpty()) return
+        currentCameraIndex = (currentCameraIndex + 1) % allCameras.size
+        cameraToast?.cancel()
+        cameraToast = Toast.makeText(this, allCameras[currentCameraIndex].name, Toast.LENGTH_SHORT)
+        cameraToast?.show()
         startCamera()
     }
 
