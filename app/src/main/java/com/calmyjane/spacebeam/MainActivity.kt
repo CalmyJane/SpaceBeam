@@ -4309,10 +4309,11 @@ class MainActivity : AppCompatActivity() {
                 GLES20.glGenFramebuffers(1, f, 0); GLES20.glGenTextures(1, t, 0)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, t[0])
                 GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
-                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR)
                 GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
                 GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
                 GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, f[0])
                 GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, t[0], 0)
                 return Pair(f[0], t[0])
@@ -4374,6 +4375,8 @@ class MainActivity : AppCompatActivity() {
             effects[0].render(0, fboA, width, height)
 
             var currentInput = texA
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, currentInput)
+            GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
 
             captureForSources(sources, effects[0].id, currentInput)
             currentInput = injectSourcesAfter(sources, effects[0].id, currentInput, renderer)
@@ -4386,6 +4389,8 @@ class MainActivity : AppCompatActivity() {
                     effect.render(currentInput, outputFbo, width, height)
 
                     currentInput = outputTex
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, currentInput)
+                    GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
 
                     captureForSources(sources, effect.id, currentInput)
                     currentInput = injectSourcesAfter(sources, effect.id, currentInput, renderer)
@@ -4777,7 +4782,7 @@ class MainActivity : AppCompatActivity() {
                 
                 // Flux distortion
                 dist += sin(atan(uv.y, uv.x) * 4.0 + dist * 10.0) * uFlux * dist; 
-                float safe = max(dist, 0.01);
+                float safe = sqrt(dist * dist + 0.003);
                 
                 // Projection (Depth)
                 float proj = (uFov * 0.8 + 0.2) / safe;
@@ -4791,7 +4796,7 @@ class MainActivity : AppCompatActivity() {
                 // --- 4. Mix & Wrap ---
                 // Wrap Coordinates BEFORE Mixing (Fixes jump glitch)
                 vec2 wrappedTunnel = abs(mod(tUV + 0.5, 2.0) - 1.0);
-                vec2 wrappedFlat = abs(mod(flatUV + 0.5, 2.0) - 1.0); 
+                vec2 wrappedFlat = abs(mod(flatUV + 0.5, 2.0) - 1.0);
 
                 vec2 finalUV = mix(wrappedFlat, wrappedTunnel, uMix * uMix);
                 vec4 col = texture2D(uTex, finalUV);
@@ -4921,7 +4926,7 @@ class MainActivity : AppCompatActivity() {
             precision highp float; varying vec2 v; uniform sampler2D uTex;
             uniform float uStr, uWide, uScroll, uSwayTime, uRatio;
             uniform float uFogD, uFogF, uFogH, uFogS, uFogV;
-            
+
             #define PI 3.14159
             #define FAR 80.0
             
@@ -4989,7 +4994,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 vec2 wrappedTunnel = abs(mod(tunnelUV + 0.5, 2.0) - 1.0);
-                vec2 wrappedFlat = abs(mod(flatUV + 0.5, 2.0) - 1.0); 
+                vec2 wrappedFlat = abs(mod(flatUV + 0.5, 2.0) - 1.0);
 
                 vec2 finalUV = mix(wrappedFlat, wrappedTunnel, smoothstep(0.0, 1.0, uStr));
                 vec4 col = texture2D(uTex, finalUV);
