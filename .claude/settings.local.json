@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n '    \\)$' MainActivity.kt)",
+      "Bash(awk '/private val BUILTIN_SHADERS = mapOf\\\\\\(/{start=NR} start && /^    \\\\\\)$/{print NR; exit}' MainActivity.kt)",
+      "Bash(wc -l *.kt)",
+      "Bash(find app/src/main/java/com/calmyjane/spacebeam -name \"*.kt\" -exec wc -l {} \\\\;)"
+    ]
+  }
+}
