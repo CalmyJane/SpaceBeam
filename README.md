@@ -192,8 +192,6 @@ Projects the image onto the inside of a 3D tunnel:
 | **Vortex** | Twist the tunnel                                                                    |
 | **Flux** | Organic distortion of the tunnel walls                                              |
 
-![The 3D tunnel effect active showing the kaleidoscope pattern mapped onto the inside of a circular tunnel receding into the distance with slight fog, creating an infinite corridor illusion](screenshots/tunnel_effect.png)
-
 ### Swirl
 
 A raymarched gyroid tunnel effect:
