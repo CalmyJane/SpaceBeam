@@ -9467,7 +9467,20 @@ class MainActivity : AppCompatActivity() {
                 if (EGL14.eglMakeCurrent(mSavedDisplay, recordSurface, recordSurface, mSavedContext)) {
                     GLES20.glViewport(0, 0, videoRecorder!!.width, videoRecorder!!.height)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                    drawSimpleTexture(fboTexId)
+                    if (videoRecorder!!.isPortrait) {
+                        val recMvp = FloatArray(16)
+                        android.opengl.Matrix.setIdentityM(recMvp, 0)
+                        android.opengl.Matrix.rotateM(recMvp, 0, -90f, 0f, 0f, 1f)
+                        GLES20.glUseProgram(simpleProgram)
+                        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
+                        GLES20.glUniform1i(locSimpleTex, 0)
+                        GLES20.glUniformMatrix4fv(locSimpleMVP, 1, false, recMvp, 0)
+                        ShaderHelper.bindQuad(simpleProgram)
+                        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                    } else {
+                        drawSimpleTexture(fboTexId)
+                    }
                     val timeNow = System.nanoTime()
                     if (recordStartTimeNs == 0L) recordStartTimeNs = timeNow
                     EGLExt.eglPresentationTimeANDROID(mSavedDisplay, recordSurface!!, timeNow - recordStartTimeNs)
@@ -9538,10 +9551,17 @@ class MainActivity : AppCompatActivity() {
         private fun handleCapture() {
             if (captureRequested) {
                 captureRequested = false
+                val isPortrait = viewWidth < viewHeight
                 val b = ByteBuffer.allocate(FIXED_WIDTH * FIXED_HEIGHT * 4)
                 GLES20.glReadPixels(0, 0, FIXED_WIDTH, FIXED_HEIGHT, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
                 Thread {
-                    val bmp = Bitmap.createBitmap(FIXED_WIDTH, FIXED_HEIGHT, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
+                    var bmp = Bitmap.createBitmap(FIXED_WIDTH, FIXED_HEIGHT, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
+                    if (isPortrait) {
+                        val matrix = android.graphics.Matrix().apply { postRotate(-90f) }
+                        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+                        bmp.recycle()
+                        bmp = rotated
+                    }
                     val values = ContentValues().apply {
                         put(MediaStore.Images.Media.DISPLAY_NAME, "SB_${System.currentTimeMillis()}.jpg")
                         put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -9588,8 +9608,9 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
     val inputSurface: Surface
     private var videoTrackIndex = -1
 
-    val width: Int = 1920
-    val height: Int = 1080
+    val isPortrait: Boolean = rawWidth < rawHeight
+    val width: Int = if (isPortrait) 1080 else 1920
+    val height: Int = if (isPortrait) 1920 else 1080
 
     private var audioEncoder: MediaCodec? = null
     private var audioRecord: AudioRecord? = null
