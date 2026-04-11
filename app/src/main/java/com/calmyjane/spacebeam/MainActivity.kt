@@ -1287,10 +1287,9 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         })
         contentLayout.addView(undoRow)
 
-        contentLayout.addView(createStyledDivider())
-
         // --- MIDI MAPPING SECTION (Visible only if connected) ---
         if (activity.midiHelper.isConnected) {
+            contentLayout.addView(createStyledDivider())
             contentLayout.addView(TextView(activity).apply {
                 text = "MIDI MAPPING"
                 textSize = 14f
@@ -1965,9 +1964,12 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             setTextColor(Color.WHITE)
             setTypeface(null, Typeface.BOLD)
             gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 110).apply {
-                setMargins(0, 15, 0, 15)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 8, 0, 8)
             }
+            setPadding(20, 12, 20, 12)
+            minHeight = 0
+            minimumHeight = 0
             background = GradientDrawable().apply {
                 setColor(Color.argb(255, 45, 45, 50))
                 cornerRadius = 15f
