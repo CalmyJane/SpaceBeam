@@ -3939,9 +3939,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var presetPanel: LinearLayout
     private lateinit var recordControls: LinearLayout
     private lateinit var tapBtn: Button
-    private lateinit var orientationBtn: ImageButton
+
     private lateinit var settingsBtn: ImageButton
-    private var isOrientationLocked = false
     private val expandedGroups = mutableSetOf<String>()
     private var lastScrollY = 0
     private var isRebuildingHUD = false
@@ -5417,7 +5416,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         midiHelper = MidiHelper(this)
         sensorHelper = SensorHelper(this)
-        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         hideSystemUI()
 
         renderer = KaleidoscopeRenderer(this)
@@ -5705,8 +5704,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        val orientationBtnView = createOrientationButton()
-
         settingsBtn = ImageButton(this).apply {
             setImageResource(android.R.drawable.ic_menu_preferences)
             setColorFilter(Color.WHITE)
@@ -5757,7 +5754,6 @@ class MainActivity : AppCompatActivity() {
         overlayHUD.addView(presetPanel, presetParams)
 
         overlayHUD.addView(settingsBtn)
-        overlayHUD.addView(orientationBtnView)
 
         updateSidebarVisuals()
         applyReadabilityStyle()
@@ -8180,7 +8176,7 @@ class MainActivity : AppCompatActivity() {
         val getCircleBg = { alpha: Int -> getBg(alpha).apply { shape = GradientDrawable.OVAL } }
 
         val panels = listOf(controlBox, presetPanel)
-        val utils = listOf(menuBtn, orientationBtn, settingsBtn)
+        val utils = listOf(menuBtn, settingsBtn)
 
         // Reset clip
         panels.forEach { it.clipToOutline = true }
@@ -8483,70 +8479,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun createLockedIconDrawable(locked: Boolean): BitmapDrawable {
-        // 1. Create a larger canvas (240x240) for high resolution
-        val size = 240
-        val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val c = Canvas(b)
-
-        // 2. Draw the standard System Rotate Icon (The arrows)
-        val icon = ContextCompat.getDrawable(this, android.R.drawable.ic_menu_rotate)?.mutate()
-        if (icon != null) {
-            // Minimal padding so the icon uses the full size
-            icon.setBounds(10, 10, size - 10, size - 10)
-            icon.setTint(Color.WHITE) // Arrows always white
-            icon.draw(c)
-        }
-
-        // 3. Draw the center dot to indicate state
-        // User Request: Locked (On) = White, Unlocked (Off) = Grey
-        val p = Paint().apply {
-            color = if (locked) Color.WHITE else Color.parseColor("#505050") // Dark Grey for Off
-            style = Paint.Style.FILL
-            isAntiAlias = true
-        }
-
-        // 4. Draw circle at center (Increased radius for visibility)
-        c.drawCircle(size / 2f, size / 2f, 25f, p)
-
-        return BitmapDrawable(resources, b)
-    }
-
-    private fun createOrientationButton() = ImageButton(this).apply {
-        // Set initial icon
-        setImageDrawable(createLockedIconDrawable(isOrientationLocked))
-
-        // Visual state
-        background = null
-        scaleType = ImageView.ScaleType.FIT_CENTER
-        setPadding(15, 15, 15, 15) // Reduced padding to maximize icon size
-        alpha = 0.9f
-
-        orientationBtn = this
-
-        layoutParams = FrameLayout.LayoutParams(140, 140).apply {
-            gravity = Gravity.BOTTOM or Gravity.END
-            bottomMargin = 180
-            rightMargin = 35
-        }
-
-        setOnClickListener {
-            isOrientationLocked = !isOrientationLocked
-
-            // Update Icon state
-            setImageDrawable(createLockedIconDrawable(isOrientationLocked))
-
-            if (isOrientationLocked) {
-                // LOCK: Freezes the screen in the CURRENT orientation
-                requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LOCKED
-                Toast.makeText(context, "Orientation Locked", Toast.LENGTH_SHORT).show()
-            } else {
-                // UNLOCK: Allow sensor rotation
-                requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-                Toast.makeText(context, "Orientation Unlocked", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
 
     private fun initDefaultPresets() {
         val prefs = getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
