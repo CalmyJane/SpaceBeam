@@ -1508,27 +1508,37 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             setPadding(0, 16, 0, 8)
         })
 
-        contentLayout.addView(TextView(activity).apply {
-            text = "info@calmyjane.com"
-            textSize = 13f
-            setTextColor(Color.LTGRAY)
-            gravity = Gravity.CENTER
-            setPadding(0, 4, 0, 4)
-            setOnClickListener {
-                val clip = android.content.ClipData.newPlainText("email", "info@calmyjane.com")
-                (activity.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(clip)
+        fun footerRow(iconRes: Int, label: String, onClick: () -> Unit): LinearLayout {
+            return LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                setPadding(0, 16, 0, 16)
+                addView(ImageView(activity).apply {
+                    setImageResource(iconRes)
+                    setColorFilter(Color.LTGRAY)
+                    layoutParams = LinearLayout.LayoutParams(64, 64).apply { rightMargin = 20 }
+                })
+                addView(TextView(activity).apply {
+                    text = label
+                    textSize = 22f
+                    setTextColor(Color.LTGRAY)
+                })
+                setOnClickListener { onClick() }
             }
+        }
+
+        contentLayout.addView(footerRow(android.R.drawable.ic_dialog_email, "info@calmyjane.com") {
+            val clip = android.content.ClipData.newPlainText("email", "info@calmyjane.com")
+            (activity.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(clip)
+            Toast.makeText(activity, "Email copied", Toast.LENGTH_SHORT).show()
         })
 
-        contentLayout.addView(TextView(activity).apply {
-            text = "www.calmyjane.com"
-            textSize = 13f
-            setTextColor(Color.LTGRAY)
-            gravity = Gravity.CENTER
-            setPadding(0, 4, 0, 0)
-            setOnClickListener {
-                activity.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.calmyjane.com")))
-            }
+        contentLayout.addView(footerRow(android.R.drawable.ic_menu_view, "www.calmyjane.com") {
+            activity.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.calmyjane.com")))
+        })
+
+        contentLayout.addView(footerRow(android.R.drawable.ic_menu_share, "GitHub") {
+            activity.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/calmyjane/spacebeam")))
         })
 
         scrollContainer!!.addView(contentLayout)
