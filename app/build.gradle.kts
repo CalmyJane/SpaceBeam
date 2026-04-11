@@ -9,22 +9,24 @@ val copyHelp = tasks.register<Copy>("copyHelpAssets") {
     from(rootProject.file("readme_content"))  { into("readme_content") }
     into(layout.projectDirectory.dir("src/main/assets/help"))
 }
-tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach {
+tasks.matching {
+    (it.name.startsWith("merge") && it.name.endsWith("Assets")) ||
+    it.name.startsWith("lintVitalAnalyze") ||
+    it.name.startsWith("generateReleaseLintVitalReportModel")
+}.configureEach {
     dependsOn(copyHelp)
 }
 
 android {
     namespace = "com.calmyjane.spacebeam"
-    compileSdk {
-        version = release(35)
-    }
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.calmyjane.spacebeam"
         minSdk = 29
         targetSdk = 35
-        versionCode = 9
-        versionName = "4.1"
+        versionCode = 10
+        versionName = "4.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

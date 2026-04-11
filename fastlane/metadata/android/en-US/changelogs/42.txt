@@ -1,0 +1,3 @@
+-Added Help Document
+-Added anti-aliasing
+-removed screen-lock (rely on android screen orientation)
