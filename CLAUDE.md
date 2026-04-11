@@ -8,6 +8,10 @@ Real-time kaleidoscope visual synthesizer for Android, meant for party/event use
 - I do my own git commits from Android Studio — don't commit, push, or run git unless explicitly asked
 - Don't run `./gradlew` or adb commands unless explicitly asked
 
+## Documentation
+- After making changes, check if README.md should be updated to reflect them
+- If so, ask whether to update the README as well
+
 ## Creative input welcome
 - Feel free to suggest new features, improvements, or simpler approaches if relevant to the conversation
 - The app is for live party visuals — prioritize hands-on usability, flexibility, and visual impact
