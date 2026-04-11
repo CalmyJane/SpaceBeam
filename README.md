@@ -21,7 +21,8 @@ No laptops. No cables. No expensive software. Just your phone.
 5. Adjust the slider above the presets to change the transition duration
 6. Press the play button next to the slider to cycle through presets automatically
 7. Press the camera/camcorder icon to take snapshot/video
-8. Have Fun! :)
+8. Start changing parameters manually, adding new sources and saving your own presets
+9. Have Fun! :)
 
 ---
 
