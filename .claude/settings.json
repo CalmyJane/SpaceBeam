@@ -1,23 +1,19 @@
 {
   "permissions": {
     "deny": [
-      "Bash(git push*master*)",
       "Bash(git push*--force*)",
       "Bash(git push* -f*)",
       "Bash(git push*--tags*)",
       "Bash(git push*refs/tags*)",
       "Bash(git push*--delete*)",
       "Bash(git tag *)",
-      "Bash(gh pr merge*)",
       "Bash(gh release *)",
-      "PowerShell(git push*master*)",
       "PowerShell(git push*--force*)",
       "PowerShell(git push* -f*)",
       "PowerShell(git push*--tags*)",
       "PowerShell(git push*refs/tags*)",
       "PowerShell(git push*--delete*)",
       "PowerShell(git tag *)",
-      "PowerShell(gh pr merge*)",
       "PowerShell(gh release *)"
     ]
   }

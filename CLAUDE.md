@@ -3,11 +3,11 @@
 Real-time kaleidoscope visual synthesizer for Android, meant for party/event use.
 
 ## Workflow
-- `master` is always releasable — never commit to it directly. Only I merge into it, via pull request
+- `master` only gets tested states. Claude never commits to it directly
 - Claude works on a branch per feature/fix (`feature/<name>`, `fix/<name>`), created from up-to-date `master`
-- One commit per finished task, even when I ask for several things in one message; small follow-up fixes go on the same branch
-- When a feature is done (or I ask), push the branch and open a PR with a summary and what to test on the device. I review and squash-merge
-- Never merge PRs, push to `master`, force-push, create tags or bump the version unless I explicitly ask — releases are mine (a `v*` tag publishes to GitHub + F-Droid)
+- One commit per finished task, even when I ask for several things in one message; small follow-up fixes go on the same branch. Push the branch so it is backed up
+- I test on the device. When I explicitly say "merge", Claude merges the branch into `master` and pushes. No pull requests needed
+- Never force-push, create tags or bump the version unless I explicitly ask — releases are mine (a `v*` tag publishes to GitHub + F-Droid)
 - Building and installing the debug build on my connected phone (`./gradlew assembleDebug`, `adb install -r`, launch, read logcat) is fine when a change needs testing; never uninstall the app or clear its data without asking (that wipes my presets)
 - I may also run/debug from Android Studio myself
 
