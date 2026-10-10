@@ -1,0 +1,6 @@
+-Hand tracking: steer parameters with finger pinch, hand tilt and hand distance
+-Face tracking: head tilt, distance and mouth width
+-Gyro button, look around inside the tunnels by tilting the phone
+-All factory presets react to hand, face and gyro
+-Performance mode (720p) and faster rendering
+-New feedback defaults, smaller app, updated help

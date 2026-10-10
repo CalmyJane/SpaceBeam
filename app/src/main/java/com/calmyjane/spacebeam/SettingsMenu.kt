@@ -170,6 +170,17 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         }
         contentLayout.addView(screenOnBtn)
 
+        val perfLabel = { if (activity.performanceMode) "performance mode (720p): ON" else "performance mode (720p): OFF" }
+        val perfBtn = createStyledButton(perfLabel()) {}
+        perfBtn.setOnClickListener {
+            activity.performanceMode = !activity.performanceMode
+            activity.renderer.setPerformanceMode(activity.performanceMode)
+            perfBtn.text = perfLabel()
+            activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+                .edit().putBoolean("PERF_MODE", activity.performanceMode).apply()
+        }
+        contentLayout.addView(perfBtn)
+
         contentLayout.addView(createStyledButton("connect bluetooth midi") {
             showMidiScanner()
         })
@@ -450,6 +461,16 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         addSmoothRow("Pitch", { activity.sensorHelper.pitchSmoothing }) { activity.sensorHelper.pitchSmoothing = it }
         addSmoothRow("Roll",  { activity.sensorHelper.rollSmoothing  }) { activity.sensorHelper.rollSmoothing  = it }
         addSmoothRow("Yaw",   { activity.sensorHelper.yawSmoothing   }) { activity.sensorHelper.yawSmoothing   = it }
+        addSmoothRow("Hand",  { activity.handTracker.smoothing }) {
+            activity.handTracker.smoothing = it
+            activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+                .edit().putInt("HAND_SMOOTH", it).apply()
+        }
+        addSmoothRow("Face",  { activity.faceTracker.smoothing }) {
+            activity.faceTracker.smoothing = it
+            activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
+                .edit().putInt("FACE_SMOOTH", it).apply()
+        }
 
         contentLayout.addView(createStyledDivider())
 

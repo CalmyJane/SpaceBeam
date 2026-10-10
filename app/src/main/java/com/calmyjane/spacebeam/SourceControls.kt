@@ -810,8 +810,9 @@ class FeedbackSourceControl(
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10 }
         })
 
+        fun delayText(frames: Int) = "$frames frame${if (frames > 1) "s" else ""} (~${frames * 17}ms, ~${frames * 8}MB)"
         val delayLabel = TextView(context).apply {
-            text = "1 frame (~17ms)"; textSize = 12f; setTextColor(Color.WHITE)
+            text = delayText(channel.feedbackDelay); textSize = 12f; setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
         }
 
@@ -824,9 +825,7 @@ class FeedbackSourceControl(
                     val frames = progress + 1
                     channel.feedbackDelay = frames
                     channel.setFeedbackBufferSize(frames)
-                    val ms = frames * 17  // ~60fps
-                    val memMB = frames * 8  // ~8MB per frame at 1920x1080 RGBA
-                    delayLabel.text = "$frames frame${if (frames > 1) "s" else ""} (~${ms}ms, ~${memMB}MB)"
+                    delayLabel.text = delayText(frames)  // ~17ms/frame at 60fps, ~8MB/frame at 1080p RGBA
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}

@@ -3,10 +3,13 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
-// Copy README.md and readme_content/ into assets/help/ so the in-app help stays in sync
-val copyHelp = tasks.register<Copy>("copyHelpAssets") {
+// Sync README.md and the images it actually references into assets/help/ so the in-app help stays in sync.
+// Only referenced images are packaged: readme_content/ also holds large files used elsewhere (store listing etc.).
+val helpImages = Regex("readme_content/([A-Za-z0-9_.-]+)")
+    .findAll(rootProject.file("README.md").readText()).map { it.groupValues[1] }.toSet()
+val copyHelp = tasks.register<Sync>("copyHelpAssets") {
     from(rootProject.file("README.md"))
-    from(rootProject.file("readme_content"))  { into("readme_content") }
+    from(rootProject.file("readme_content")) { include(helpImages); into("readme_content") }
     into(layout.projectDirectory.dir("src/main/assets/help"))
 }
 tasks.matching {
@@ -25,8 +28,8 @@ android {
         applicationId = "com.calmyjane.spacebeam"
         minSdk = 29
         targetSdk = 35
-        versionCode = 11
-        versionName = "4.3"
+        versionCode = 12
+        versionName = "5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -52,6 +55,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Phones are ARM only; leaving out the x86 emulator builds of the native tracking libraries
+            // shrinks the release APK considerably. Debug builds keep all ABIs so emulators still work.
+            ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         }
     }
     compileOptions {
@@ -60,6 +66,9 @@ android {
     }
     kotlinOptions {
         jvmTarget = "11"
+    }
+    androidResources {
+        noCompress += "task"  // MediaPipe models (assets/*.task) are memory-mapped
     }
 }
 
@@ -81,4 +90,5 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-rtsp:1.2.0")
     implementation("androidx.media3:media3-ui:1.2.0")
     implementation("androidx.media3:media3-common:1.2.0")
+    implementation("com.google.mediapipe:tasks-vision:0.10.14")
 }
