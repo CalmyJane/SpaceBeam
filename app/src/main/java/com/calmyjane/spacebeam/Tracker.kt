@@ -31,8 +31,10 @@ class VisionPipeline {
     val trackers = mutableListOf<Tracker>()
     private var analysis: ImageAnalysis? = null
     @Volatile private var mirror = false
-    /** False when the current camera can't run preview + analysis together (tracking unavailable). */
+    /** True once the analysis stream is bound next to the preview. */
     var available = false; private set
+    /** True when the current camera can't run preview + analysis together (as opposed to: camera not started yet). */
+    var unsupported = false; private set
 
     /** Analysis use case to bind next to the camera preview (idle until a tracker is on). */
     fun createAnalysis(isFrontCamera: Boolean, displayRotation: Int): ImageAnalysis {
@@ -50,6 +52,7 @@ class VisionPipeline {
             .build()
         analysis = a
         available = true
+        unsupported = false
         updateAnalyzer()
         return a
     }
@@ -59,6 +62,7 @@ class VisionPipeline {
         analysis?.clearAnalyzer()
         analysis = null
         available = false
+        unsupported = true
     }
 
     /** Attach the analyzer while any tracker is on, detach it otherwise (no frames are converted then). */

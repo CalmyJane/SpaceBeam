@@ -806,7 +806,9 @@ class MainActivity : AppCompatActivity() {
         if (on == tracker.enabled) return
         if (on) {
             if (!vision.available) {
-                Toast.makeText(this, "Hand/face tracking not supported on this camera", Toast.LENGTH_SHORT).show()
+                val msg = if (vision.unsupported) "Hand/face tracking not supported on this camera"
+                          else "Camera not ready yet (check the camera permission)"
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
                 return
             }
             tracker.enable { ok ->
