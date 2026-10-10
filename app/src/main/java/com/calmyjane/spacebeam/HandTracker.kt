@@ -132,6 +132,13 @@ class TrackingOverlayView(
     private val loc = IntArray(2)
     private val myLoc = IntArray(2)
     private val spotRect = RectF()
+    // The HUD rarely moves: reuse the last free spot for a moment instead of walking all HUD views every draw
+    private var spotTime = 0L
+    private var spotW = -1f
+    private var spotH = -1f
+    // One pending refresh at most while sensor bars are shown (each draw must not start its own timer chain)
+    private var refreshScheduled = false
+    private val refresh = Runnable { refreshScheduled = false; invalidate() }
 
     init {
         isClickable = false
@@ -159,6 +166,9 @@ class TrackingOverlayView(
 
     /** Top-left of a free area of size w x h: top center, bottom center, the corners, then a scan. */
     private fun findFreeSpot(w: Float, h: Float): RectF {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (w == spotW && h == spotH && now - spotTime < 400L) return spotRect
+        spotW = w; spotH = h; spotTime = now
         val margin = 16f
         hudRects.clear()
         getLocationInWindow(myLoc)
@@ -201,8 +211,8 @@ class TrackingOverlayView(
 
     override fun onDraw(canvas: Canvas) {
         if (!hand.enabled && !face.enabled && !sensors.enabled) return
-        // Sensors change continuously without a detection callback: keep refreshing while they are shown
-        if (sensors.enabled) postInvalidateDelayed(50)
+        // Sensors change continuously without a detection callback: keep refreshing (~20 Hz) while they are shown
+        if (sensors.enabled && !refreshScheduled) { refreshScheduled = true; postDelayed(refresh, 50) }
 
         // Which channels anything is mapped to — unmapped ones stay hidden
         handMapped.fill(false); faceMapped.fill(false); sensorMapped.fill(false)
