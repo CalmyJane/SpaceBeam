@@ -28,8 +28,8 @@ android {
         applicationId = "com.calmyjane.spacebeam"
         minSdk = 29
         targetSdk = 35
-        versionCode = 11
-        versionName = "4.3"
+        versionCode = 12
+        versionName = "5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

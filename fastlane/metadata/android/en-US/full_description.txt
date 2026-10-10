@@ -9,7 +9,9 @@
     * Generative Shaders as input-source
     * Feedback as input-source
     * Different merge modes (add, subtract, multiply ...)
-    * Accelerometer as modulation for parameters
+    * Hand tracking: control parameters with finger pinch, hand tilt and hand distance
+    * Face tracking: control parameters with head tilt, distance and mouth width
+    * Accelerometer/Gyroscope as modulation for parameters, look around in the tunnel effects
     * Bluetooth MIDI controller as modulation source
     * BPM tap and beat synced LFOs
     * 9 presets slots with smooth transitions between presets
@@ -32,6 +34,8 @@
     www.calmyjane.com
 
 Permission Notes:
+Camera is the live input. Hand and face tracking analyze the camera image on the device only, nothing is stored or sent anywhere.
+
 Network Usage is needed for streaming Videos from other devices into the app. The app does not communicate with the internet. If your OS allows, you can block Network Usage for the app, this will cause error message when trying to add RTSP sources, but otherwise won't affect the apps performance.
 
 Modifying System Settings is needed to force the screen timeout to infinite. The "keep screen on" flag doesnt work on all devices, if your screen turns black you can force it on in the settings menu. This needs permission to modify system settings. No other settings except screen timeout are touched by the app.
