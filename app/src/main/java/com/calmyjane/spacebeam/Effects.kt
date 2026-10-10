@@ -981,7 +981,7 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
     private var locTex = -1; private var locRatio = -1; private var locStr = -1; private var locWide = -1
     private var locScroll = -1; private var locSwayTime = -1; private var locFogD = -1; private var locFogF = -1
     private var locFogH = -1; private var locFogS = -1; private var locFogV = -1
-    private var locLook = -1
+    private var locLook = -1; private var locRoll = -1
 
     init {
         addControl(PropertyControl("UTWIRL", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
@@ -999,6 +999,8 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
         // Look around: turns the view direction
         addControl(PropertyControl("S_LOOK_X", "LOOK X", defaultValue = 500, outMin=-0.8f, outMax=0.8f, hasModulation = true))
         addControl(PropertyControl("S_LOOK_Y", "LOOK Y", defaultValue = 500, outMin=-0.8f, outMax=0.8f, hasModulation = true))
+        // Roll: rotates the view around the flight direction (the whole tunnel turns, not the texture on its walls)
+        addControl(PropertyControl("S_ROLL", "ROLL", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
     }
 
     override val needsMipmaps = true
@@ -1032,6 +1034,7 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
         uniform float uStr, uWide, uScroll, uSwayTime, uRatio;
         uniform float uFogD, uFogF, uFogH, uFogS, uFogV;
         uniform vec2 uLook;
+        uniform float uRoll;
 
         #define PI 3.14159
         #define FAR 80.0
@@ -1065,7 +1068,7 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
             vec3 ro = vec3(PI/2.0, 0.0, uScroll); 
             vec3 rd = normalize(vec3(aspectUV + uLook, -0.5)); // uLook: look around
 
-            rd.xy = rot(sin(uSwayTime * 0.2) * uWide * 0.5) * rd.xy;
+            rd.xy = rot(sin(uSwayTime * 0.2) * uWide * 0.5 + uRoll) * rd.xy;
             vec3 targetOffsets = vec3(cos(uSwayTime * 0.4), sin(uSwayTime * 0.4), 4.0);
             targetOffsets.xy *= uWide; 
             vec3 ta = normalize(targetOffsets);
@@ -1127,6 +1130,7 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
         locFogH = GLES20.glGetUniformLocation(prog, "uFogH"); locFogS = GLES20.glGetUniformLocation(prog, "uFogS")
         locFogV = GLES20.glGetUniformLocation(prog, "uFogV")
         locLook = GLES20.glGetUniformLocation(prog, "uLook")
+        locRoll = GLES20.glGetUniformLocation(prog, "uRoll")
     }
 
     override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
@@ -1136,6 +1140,7 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
 
         GLES20.glUniform1f(locRatio, w.toFloat()/h.toFloat())
         GLES20.glUniform2f(locLook, ctrl("S_LOOK_X", 0f), ctrl("S_LOOK_Y", 0f))
+        GLES20.glUniform1f(locRoll, ctrl("S_ROLL", 0f) * 6.2831853f)
         GLES20.glUniform1f(locStr, mainActivity.controlsMap["UTWIRL"]?.computedValue ?: 0f)
 
         GLES20.glUniform1f(locWide, mainActivity.controlsMap["S_WIDE"]?.computedValue ?: 1f)

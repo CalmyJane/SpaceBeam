@@ -209,6 +209,7 @@ A raymarched gyroid tunnel effect:
 | **Speed** | Forward/backward scroll speed |
 | **Fog Dist/Soft/Hue/Sat/Brit** | Distance fog with softness control |
 | **Look X/Y** | Look around: turns the view direction inside the structure |
+| **Roll** | Rotates the view around the flight direction -- the whole tunnel turns, not the image on its walls |
 
 ---
 
@@ -329,7 +330,7 @@ All nine factory presets come with mappings, so you can just switch a button on 
 
 | Input | Presets 1-5 (kaleidoscope) | Presets 6-9 (tunnel / swirl) |
 |---|---|---|
-| **Hand angle / head rotation** | Rotates the image | Rotates the image, twists or bends the tunnel |
+| **Hand angle / head rotation** | Rotates the image | Rotates the image, twists or bends the tunnel; in the swirl preset it rolls the view inside the tunnel |
 | **Hand / head distance** | Zooms | Flight speed: close = fly in, middle = hover, far = fly back out |
 | **Thumb-index, thumb-middle** | A color effect (edge detect, hue, glow, RGB shift, ...) | Rainbow, wave, fog color, tunnel shape |
 | **Mouth** | Another effect (glow, kaleidoscope zoom, hue, wobble, RGB shift) | Fisheye, flux, fog, activity |
