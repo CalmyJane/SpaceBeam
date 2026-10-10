@@ -5,10 +5,13 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
-// Copy README.md and readme_content/ into assets/help/ so the in-app help stays in sync
-val copyHelp = tasks.register<Copy>("copyHelpAssets") {
+// Sync README.md and the images it actually references into assets/help/ so the in-app help stays in sync.
+// Only referenced images are packaged: readme_content/ also holds large files used elsewhere (store listing etc.).
+val helpImages = Regex("readme_content/([A-Za-z0-9_.-]+)")
+    .findAll(rootProject.file("README.md").readText()).map { it.groupValues[1] }.toSet()
+val copyHelp = tasks.register<Sync>("copyHelpAssets") {
     from(rootProject.file("README.md"))
-    from(rootProject.file("readme_content"))  { into("readme_content") }
+    from(rootProject.file("readme_content")) { include(helpImages); into("readme_content") }
     into(layout.projectDirectory.dir("src/main/assets/help"))
 }
 // MediaPipe hand + face landmark models (Apache 2.0, ~7.5 MB + ~3.6 MB) — fetched once into assets if missing
@@ -70,6 +73,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Phones are ARM only; leaving out the x86 emulator builds of the native tracking libraries
+            // shrinks the release APK considerably. Debug builds keep all ABIs so emulators still work.
+            ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         }
     }
     compileOptions {
