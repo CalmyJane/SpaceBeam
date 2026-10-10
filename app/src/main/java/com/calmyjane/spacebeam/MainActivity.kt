@@ -4044,9 +4044,9 @@ class MainActivity : AppCompatActivity() {
             4 -> listOf(Triple("M_ANGLE", A, 1000), Triple("M_ZOOM", D, 1000), Triple("GLOW", I, 800), Triple("E_AMT", M, 1000))
             5 -> listOf(Triple("M_ANGLE", A, 1000), Triple("M_ZOOM", D, -900), Triple("NEG", I, 1000), Triple("M_WOBBLE", M, 700))
             6 -> listOf(Triple("S_SPEED", D, -1000), Triple("TWIST", A, 1000), Triple("T_HUE_STR", I, 1000))
-            7 -> listOf(Triple("S_SPEED", D, -1000), Triple("CURVE", A, 800), Triple("T_WAVE_STR", I, 1000))
-            8 -> listOf(Triple("S_SPEED", D, -1000), Triple("M_ANGLE", A, 1000), Triple("T_FOG_H", I, 1000), Triple("S_SHAPE", M, 1000))
-            9 -> listOf(Triple("SWIRL_SPEED", D, -1000), Triple("M_ANGLE", A, 1000), Triple("HUE", I, 1000), Triple("S_FOG", M, 800))
+            7 -> listOf(Triple("S_SPEED", D, -1000), Triple("T_ROLL", A, 1000), Triple("T_WAVE_STR", I, 1000))
+            8 -> listOf(Triple("S_SPEED", D, -1000), Triple("T_ROLL", A, 1000), Triple("T_FOG_H", I, 1000), Triple("S_SHAPE", M, 1000))
+            9 -> listOf(Triple("SWIRL_SPEED", D, -1000), Triple("S_ROLL", A, 1000), Triple("HUE", I, 1000), Triple("S_FOG", M, 800))
             else -> emptyList()
         }
         // Head modulation per preset: tilt rotates, distance does the same as the hand distance (zoom / flight speed)
@@ -4059,7 +4059,7 @@ class MainActivity : AppCompatActivity() {
             6 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("S_SPEED", FaceTracker.DIST, -1000), Triple("S_FOV", FaceTracker.MOUTH, 800))
             7 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("S_SPEED", FaceTracker.DIST, -1000), Triple("FLUX", FaceTracker.MOUTH, 900))
             8 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("S_SPEED", FaceTracker.DIST, -1000), Triple("T_FOG", FaceTracker.MOUTH, 600))
-            9 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("SWIRL_SPEED", FaceTracker.DIST, -1000), Triple("S_ACTIVITY", FaceTracker.MOUTH, 800))
+            9 -> listOf(Triple("S_ROLL", FaceTracker.ROT, 1000), Triple("SWIRL_SPEED", FaceTracker.DIST, -1000), Triple("S_ACTIVITY", FaceTracker.MOUTH, 800))
             else -> emptyList()
         }
         // Gyro/accelerometer per preset (active once the gyro button is on): control id, sensor channel
