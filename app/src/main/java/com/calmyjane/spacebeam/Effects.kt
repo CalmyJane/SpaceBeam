@@ -1068,7 +1068,7 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
             vec3 ro = vec3(PI/2.0, 0.0, uScroll); 
             vec3 rd = normalize(vec3(aspectUV + uLook, -0.5)); // uLook: look around
 
-            rd.xy = rot(sin(uSwayTime * 0.2) * uWide * 0.5 + uRoll) * rd.xy;
+            rd.xy = rot(sin(uSwayTime * 0.2) * uWide * 0.5 - uRoll) * rd.xy;  // minus: tilting the hand right turns the view right
             vec3 targetOffsets = vec3(cos(uSwayTime * 0.4), sin(uSwayTime * 0.4), 4.0);
             targetOffsets.xy *= uWide; 
             vec3 ta = normalize(targetOffsets);
