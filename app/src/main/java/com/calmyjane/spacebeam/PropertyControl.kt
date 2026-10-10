@@ -83,6 +83,17 @@ open class PropertyControl(
     var sensorPitch: Int = 500
     var sensorRoll: Int = 500
     var sensorYaw: Int = 500
+    // Hand tracking: how strongly each channel (index, middle, ring, pinky distance to thumb, hand angle, distance)
+    // drives the value: 0 = off, ±1000 = channel spans the whole range, negative = inverted
+    val handAmount = IntArray(HandTracker.CHANNELS)
+    // Effective amounts: follow handAmount, but ease from the old mapping during preset transitions
+    private val handLive = FloatArray(HandTracker.CHANNELS)
+    private val handFrom = FloatArray(HandTracker.CHANNELS)
+    // Face tracking: rotation, distance, mouth width — same signed semantics as handAmount
+    val faceAmount = IntArray(FaceTracker.CHANNELS)
+    private val faceLive = FloatArray(FaceTracker.CHANNELS)
+    private val faceFrom = FloatArray(FaceTracker.CHANNELS)
+    private var trackerAnimating = false
 
     var preciseModRate: Float = 200f
     var preciseModDepth: Float = 0f
@@ -141,10 +152,15 @@ open class PropertyControl(
 
     data class Snapshot(val value: Int, val active: Boolean, val rate: Int, val depth: Int, val shape: String, val smoothing: Int, val isSynced: Boolean = false, val syncIndex: Int = 3,
                         val sensorAccelX: Int = 500, val sensorAccelY: Int = 500, val sensorAccelZ: Int = 500,
-                        val sensorPitch: Int = 500, val sensorRoll: Int = 500, val sensorYaw: Int = 500)
+                        val sensorPitch: Int = 500, val sensorRoll: Int = 500, val sensorYaw: Int = 500,
+                        val handIndex: Int = 0, val handMiddle: Int = 0, val handRing: Int = 0, val handPinky: Int = 0,
+                        val handAngle: Int = 0, val handDist: Int = 0,
+                        val faceRot: Int = 0, val faceDist: Int = 0, val faceMouth: Int = 0)
 
     fun getSnapshot(): Snapshot = Snapshot(value, modDepth > 0, modRate, modDepth, modShape.name, smoothing, isBeatSynced, beatMultiplierIndex,
-        sensorAccelX, sensorAccelY, sensorAccelZ, sensorPitch, sensorRoll, sensorYaw)
+        sensorAccelX, sensorAccelY, sensorAccelZ, sensorPitch, sensorRoll, sensorYaw,
+        handAmount[0], handAmount[1], handAmount[2], handAmount[3], handAmount[4], handAmount[5],
+        faceAmount[0], faceAmount[1], faceAmount[2])
 
     fun restore(s: Snapshot, durationSec: Float) {
         if (isLocked) return
@@ -173,6 +189,12 @@ open class PropertyControl(
         this.sensorPitch  = s.sensorPitch
         this.sensorRoll   = s.sensorRoll
         this.sensorYaw    = s.sensorYaw
+        handLive.copyInto(handFrom); faceLive.copyInto(faceFrom)
+        trackerAnimating = durationSec > 0f
+        handAmount[0] = s.handIndex; handAmount[1] = s.handMiddle
+        handAmount[2] = s.handRing;  handAmount[3] = s.handPinky
+        handAmount[4] = s.handAngle; handAmount[5] = s.handDist
+        faceAmount[0] = s.faceRot; faceAmount[1] = s.faceDist; faceAmount[2] = s.faceMouth
     }
 
     fun animateTo(target: Float, durationSec: Float, newShape: String? = null) {
@@ -359,25 +381,35 @@ open class PropertyControl(
             }
         }
 
-        val sh = (currentContext as? MainActivity)?.sensorHelper
-        if (sh != null && (sensorAccelX != 500 || sensorAccelY != 500 || sensorAccelZ != 500 ||
-                           sensorPitch != 500 || sensorRoll != 500 || sensorYaw != 500)) {
+        val act = currentContext as? MainActivity
+        val sh = act?.sensorHelper
+        val useSensors = sh != null && sh.blend > 0f && (sensorAccelX != 500 || sensorAccelY != 500 || sensorAccelZ != 500 ||
+                           sensorPitch != 500 || sensorRoll != 500 || sensorYaw != 500)
+        // Effective tracker amounts ease from the previous mapping during preset transitions
+        val easing = trackerAnimating && isAnimating
+        for (f in handLive.indices) handLive[f] = if (easing) handFrom[f] + (handAmount[f] - handFrom[f]) * ease else handAmount[f].toFloat()
+        for (f in faceLive.indices) faceLive[f] = if (easing) faceFrom[f] + (faceAmount[f] - faceFrom[f]) * ease else faceAmount[f].toFloat()
+        if (!isAnimating) trackerAnimating = false
+        if (useSensors) {
             // t*|t| applies a quadratic curve while preserving sign:
             // small slider deviations from center → very small effect, full deflection → full effect
             fun sensorScale(v: Int): Float { val t = (v - 500) / 500f; return t * abs(t) }
+            // Relative to the orientation at switch-on, faded by the gyro button's blend
             var sensorOffset = 0f
-            sensorOffset += sensorScale(sensorAccelX) * sh.accelX
-            sensorOffset += sensorScale(sensorAccelY) * sh.accelY
-            sensorOffset += sensorScale(sensorAccelZ) * sh.accelZ
-            sensorOffset += sensorScale(sensorPitch)  * sh.pitch
-            sensorOffset += sensorScale(sensorRoll)   * sh.roll
-            sensorOffset += sensorScale(sensorYaw)    * sh.yaw
+            for (ch in 0 until 6) {
+                val amt = sensorAmount(ch)
+                if (amt != 500) sensorOffset += sensorScale(amt) * sh!!.relative(ch)
+            }
+            sensorOffset *= sh!!.blend
             currentCalculatedOutput = if (modMode == ModMode.WRAP) {
                 ((currentCalculatedOutput + sensorOffset) % 1.0f + 1.0f) % 1.0f
             } else {
                 (currentCalculatedOutput + sensorOffset).coerceIn(0f, 1f)
             }
         }
+
+        currentCalculatedOutput = applyTracker(act?.faceTracker, faceLive, currentCalculatedOutput)
+        currentCalculatedOutput = applyTracker(act?.handTracker, handLive, currentCalculatedOutput)
 
         modulatedNormalized = currentCalculatedOutput
 
@@ -386,6 +418,39 @@ open class PropertyControl(
 
         val displayVal = (modulatedNormalized * sliderMax).roundToInt()
         updateLiveValueUI(displayVal)
+    }
+
+    /**
+     * Tracker channels take over the value: at full amount a channel spans the parameter's whole range
+     * (e.g. touching = min, spread = max), independent of the base value; partial amounts crossfade,
+     * negative amounts invert the channel. The tracker's blend eases all of this in/out on toggle.
+     * Exception: the angle channel on a wrapping parameter (rotation, hue) is a relative offset along the
+     * circular tilt, so it can never spin through a full turn.
+     */
+    private fun applyTracker(t: Tracker?, live: FloatArray, input: Float): Float {
+        if (t == null || t.blend <= 0f) return input
+        var out = input
+        for (f in live.indices) {
+            val a = live[f] / 1000f * t.blend
+            if (a == 0f) continue
+            out = if (f == t.angleChannel && modMode == ModMode.WRAP) {
+                ((out + a * t.angleOffset) % 1f + 1f) % 1f
+            } else {
+                val v = if (a < 0f) 1f - t.values[f] else t.values[f]
+                out + (v - out) * abs(a)
+            }
+        }
+        return out
+    }
+
+    /** Sensor slider per channel (500 = off): 0 pitch, 1 roll, 2 yaw, 3-5 accel X/Y/Z. */
+    fun sensorAmount(channel: Int): Int = when (channel) {
+        0 -> sensorPitch
+        1 -> sensorRoll
+        2 -> sensorYaw
+        3 -> sensorAccelX
+        4 -> sensorAccelY
+        else -> sensorAccelZ
     }
 
     private fun syncUiElements() {
@@ -864,6 +929,28 @@ open class PropertyControl(
         contentLayout.addView(gyroGroup)
         contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
 
+        // --- Hand category (collapsed by default) ---
+        val (handGroup, handContent) = createCollapsibleDetailGroup(context, "HAND", false)
+        handContent.addView(TextView(context).apply {
+            text = "THUMB-TO-FINGER DISTANCE, HAND TILT, DISTANCE TO CAMERA · center = off, left = inverted (enable with the hand button)"
+            textSize = 10f; setTextColor(Color.GRAY); setPadding(0, 0, 0, 5)
+        })
+        val fingerLabels = arrayOf("Index", "Middle", "Ring", "Pinky", "Angle", "Distance")
+        for (f in 0 until HandTracker.CHANNELS) addTrackerAmountSlider(context, handContent, fingerLabels[f], handAmount, f)
+        contentLayout.addView(handGroup)
+        contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
+
+        // --- Face category (collapsed by default) ---
+        val (faceGroup, faceContent) = createCollapsibleDetailGroup(context, "FACE", false)
+        faceContent.addView(TextView(context).apply {
+            text = "HEAD TILT, DISTANCE TO CAMERA, MOUTH WIDTH · center = off, left = inverted (enable with the face button)"
+            textSize = 10f; setTextColor(Color.GRAY); setPadding(0, 0, 0, 5)
+        })
+        val faceLabels = arrayOf("Rotation", "Distance", "Mouth")
+        for (f in 0 until FaceTracker.CHANNELS) addTrackerAmountSlider(context, faceContent, faceLabels[f], faceAmount, f)
+        contentLayout.addView(faceGroup)
+        contentLayout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(-1, 10) })
+
         val resetBtn = Button(context).apply {
             text = "RESET"; textSize = 14f; setTextColor(Color.LTGRAY); includeFontPadding = false; setPadding(0, 0, 0, 0); gravity = Gravity.CENTER
             background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(2, Color.DKGRAY); cornerRadius = 12f }
@@ -931,7 +1018,15 @@ open class PropertyControl(
         return sb
     }
 
-    private fun addSensorAxisSlider(ctx: Context, parent: ViewGroup, name: String, current: Int, onChange: (Int) -> Unit) {
+    /** Bipolar tracker amount: center = off, right = normal, left = inverted; small dead zone so center is easy to hit. */
+    private fun addTrackerAmountSlider(ctx: Context, parent: ViewGroup, name: String, amounts: IntArray, f: Int) {
+        addSensorAxisSlider(ctx, parent, name, (amounts[f] + 1000) / 2) {
+            val amt = it * 2 - 1000
+            amounts[f] = if (abs(amt) < 30) 0 else amt
+        }
+    }
+
+    private fun addSensorAxisSlider(ctx: Context, parent: ViewGroup, name: String, current: Int, resetValue: Int = 500, onChange: (Int) -> Unit) {
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -945,7 +1040,7 @@ open class PropertyControl(
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(130, ViewGroup.LayoutParams.MATCH_PARENT)
             isClickable = true
-            setOnClickListener { onChange(500); seekBarRef?.progress = 500 }
+            setOnClickListener { onChange(resetValue); seekBarRef?.progress = resetValue }
         }
         val sb = SeekBar(ctx).apply {
             max = 1000

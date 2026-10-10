@@ -28,6 +28,38 @@ class SensorHelper(private val activity: MainActivity) : SensorEventListener {
     private var smoothedRoll:  Float = 0f
     private var smoothedYaw:   Float = 0f
 
+    // Sensor modulation switch (gyro button). Off by default; fades in/out via [blend] so parameters never jump.
+    // The orientation at switch-on becomes the neutral reference: modulation is relative to how the phone is held.
+    @Volatile var enabled = false; private set
+    @Volatile var blend = 0f; private set
+    private var blendLinear = 0f
+    private var refPitch = 0f
+    private var refRoll = 0f
+    private var refYaw = 0f
+
+    fun setEnabled(on: Boolean) {
+        if (on && blend <= 0f) { refPitch = pitch; refRoll = roll; refYaw = yaw }
+        enabled = on
+    }
+
+    /** Called once per rendered frame. */
+    fun tick(deltaTime: Float) {
+        val goal = if (enabled) 1f else 0f
+        val step = deltaTime / 0.8f
+        blendLinear = if (blendLinear < goal) minOf(goal, blendLinear + step) else maxOf(goal, blendLinear - step)
+        blend = blendLinear * blendLinear * (3f - 2f * blendLinear)
+    }
+
+    /** Channel relative to the neutral reference, -1..1: 0 pitch, 1 roll, 2 yaw (wraps), 3-5 accel X/Y/Z. */
+    fun relative(channel: Int): Float = when (channel) {
+        0 -> pitch - refPitch
+        1 -> roll - refRoll
+        2 -> { var d = yaw - refYaw; if (d > 1f) d -= 2f; if (d < -1f) d += 2f; d }
+        3 -> accelX
+        4 -> accelY
+        else -> accelZ
+    }
+
     fun start() {
         linearAccelSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         rotationVectorSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }

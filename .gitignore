@@ -15,3 +15,5 @@
 local.properties
 *.jks
 *.keystore
+# MediaPipe tracking models: fetched at build time by the Gradle downloadHandModel task
+/app/src/main/assets/*.task

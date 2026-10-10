@@ -53,8 +53,30 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
     var flipY = -1.0f
     var rot180 = false
 
-    private val FIXED_WIDTH = 1920
-    private val FIXED_HEIGHT = 1080
+    // Internal render resolution: 1080p, or 720p in performance mode (~2.25x fewer pixels per pass)
+    private var renderWidth = if (ctx.performanceMode) 1280 else 1920
+    private var renderHeight = if (ctx.performanceMode) 720 else 1080
+    @Volatile private var pendingRenderSize: Pair<Int, Int>? = null
+
+    fun setPerformanceMode(enabled: Boolean) {
+        pendingRenderSize = if (enabled) Pair(1280, 720) else Pair(1920, 1080)
+    }
+
+    /** GL thread: reallocate every render-size texture in place (FBO attachments stay valid). */
+    private fun applyRenderSize(w: Int, h: Int) {
+        if (w == renderWidth && h == renderHeight) return
+        renderWidth = w; renderHeight = h
+        fun realloc(tex: Int) {
+            if (tex == 0) return
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+        }
+        realloc(srcTransformTex)
+        sources.forEach { realloc(it.fboTexId); it.releaseFeedbackBuffer() }  // feedback ring re-inits lazily at the new size
+        initMainFBO(w, h)
+        ctx.effectChain.init(w, h)
+        ctx.maskManager.needsRegenerate = true
+    }
     private var viewWidth = 1
     private var viewHeight = 1
 
@@ -161,7 +183,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
             val destTex = fbTextures[fbWriteIndex]
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbFbo)
             GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, destTex, 0)
-            GLES20.glViewport(0, 0, width, height)
+            GLES20.glViewport(0, 0, renderWidth, renderHeight)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glUseProgram(copyProg)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -175,7 +197,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
 
         private fun resizeFeedbackBuffer(copyProg: Int) {
             val target = fbPendingResize
-            if (target == fbBufferSize || target < 1 || width == 0) return
+            if (target == fbBufferSize || target < 1) return
             if (target > fbBufferSize) {
                 val newTextures = IntArray(target)
                 for (i in 0 until fbBufferSize) newTextures[i] = fbTextures[i]
@@ -184,7 +206,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
                 GLES20.glGenTextures(extra, texIds, 0)
                 for (i in 0 until extra) {
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[i])
-                    GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, width, height, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+                    GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, renderWidth, renderHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
                     GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
                     GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
                     GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
@@ -269,7 +291,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
             if (fboId == 0 || fboTexId == 0) return
 
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexId)
-            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, FIXED_WIDTH, FIXED_HEIGHT, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, renderWidth, renderHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
@@ -420,7 +442,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
             val isSideways = (kotlin.math.abs(rotation + layer.rotation) % 180f) > 45f
             val effectiveW = if (isSideways) layer.height.toFloat() else layer.width.toFloat()
             val effectiveH = if (isSideways) layer.width.toFloat() else layer.height.toFloat()
-            val fboAspect = FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat()
+            val fboAspect = renderWidth.toFloat() / renderHeight.toFloat()
             val safeH = if (effectiveH > 0) effectiveH else 1.0f
             val srcAspect = effectiveW / safeH
             var sx = 1.0f; var sy = 1.0f
@@ -445,7 +467,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
             }
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-            GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
+            GLES20.glViewport(0, 0, renderWidth, renderHeight)
 
             if (type == SourceType.FEEDBACK) {
                 // Copy this source's own feedback texture into its FBO
@@ -471,7 +493,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
                 GLES20.glUseProgram(customProgram)
                 GLES20.glUniform1f(customLocITime, globalTime)
                 GLES20.glUniform1f(customLocUTime, globalTime)
-                GLES20.glUniform2f(customLocIResolution, FIXED_WIDTH.toFloat(), FIXED_HEIGHT.toFloat())
+                GLES20.glUniform2f(customLocIResolution, renderWidth.toFloat(), renderHeight.toFloat())
                 GLES20.glUniform2f(customLocUFlip, userFlipX, userFlipY)
                 GLES20.glUniform1f(customLocURotation, Math.toRadians((rotation + if(userRot180) 180f else 0f).toDouble()).toFloat())
                 ShaderHelper.bindQuad(customProgram)
@@ -673,7 +695,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
             GLES20.glGenFramebuffers(1, f, 0); GLES20.glGenTextures(1, t, 0)
             srcTransformFbo = f[0]; srcTransformTex = t[0]
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, srcTransformTex)
-            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, FIXED_WIDTH, FIXED_HEIGHT, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, renderWidth, renderHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
@@ -683,8 +705,8 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         }
 
-        initMainFBO(FIXED_WIDTH, FIXED_HEIGHT)
-        ctx.effectChain.init(FIXED_WIDTH, FIXED_HEIGHT)
+        initMainFBO(renderWidth, renderHeight)
+        ctx.effectChain.init(renderWidth, renderHeight)
 
         sources.forEach { it.init() }
         ctx.runOnUiThread { ctx.startCamera() }
@@ -711,6 +733,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
 
     override fun onDrawFrame(gl: GL10?) {
         if (!isSurfaceReady) return
+        pendingRenderSize?.let { pendingRenderSize = null; applyRenderSize(it.first, it.second) }
         sources.forEach { if (!it.isReady) it.init() }
 
         val now = System.nanoTime()
@@ -741,6 +764,9 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
             }
         }
 
+        ctx.handTracker.tick(deltaTime)
+        ctx.faceTracker.tick(deltaTime)
+        ctx.sensorHelper.tick(deltaTime)
         ctx.controls.forEach { it.update(deltaTime) }
         ctx.effectChain.effects.forEach { if(it.active) it.update(deltaTime) }
 
@@ -750,7 +776,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
             if (src.srcZoom != 1.0f || src.srcAngle != 0f || src.srcMoveX != 0f || src.srcMoveY != 0f || src.srcWrapMode != 0) {
                 // Render from source FBO through transform shader into temp FBO
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, srcTransformFbo)
-                GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
+                GLES20.glViewport(0, 0, renderWidth, renderHeight)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                 GLES20.glUseProgram(srcTransformProg)
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -759,13 +785,13 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
                 GLES20.glUniform1f(locSrcTrZoom, src.srcZoom)
                 GLES20.glUniform1f(locSrcTrAngle, Math.toRadians(src.srcAngle.toDouble()).toFloat())
                 GLES20.glUniform2f(locSrcTrMove, src.srcMoveX, src.srcMoveY)
-                GLES20.glUniform1f(locSrcTrRatio, FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat())
+                GLES20.glUniform1f(locSrcTrRatio, renderWidth.toFloat() / renderHeight.toFloat())
                 GLES20.glUniform1i(locSrcTrWrap, src.srcWrapMode)
                 ShaderHelper.bindQuad(srcTransformProg)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
                 // Copy back from temp to source FBO
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, src.fboId)
-                GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
+                GLES20.glViewport(0, 0, renderWidth, renderHeight)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                 GLES20.glUseProgram(copy2dProgram)
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -789,17 +815,17 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
         if (mask.needsRegenerate) {
             mask.needsRegenerate = false
             mask.initShader()
-            mask.requestRegenerate(FIXED_WIDTH, FIXED_HEIGHT)
+            mask.requestRegenerate(renderWidth, renderHeight)
         }
         if (mask.needsHiResRegenerate) {
             mask.needsHiResRegenerate = false
             mask.initShader()
-            mask.requestHiResRegenerate(FIXED_WIDTH, FIXED_HEIGHT)
+            mask.requestHiResRegenerate(renderWidth, renderHeight)
         }
         mask.uploadPendingMask()
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-        GLES20.glViewport(0, 0, FIXED_WIDTH, FIXED_HEIGHT)
+        GLES20.glViewport(0, 0, renderWidth, renderHeight)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
         if (mask.enabled && mask.maskTexId != 0) {
@@ -829,7 +855,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
         val isPortrait = viewWidth < viewHeight
         android.opengl.Matrix.setIdentityM(mvpMatrix, 0)
 
-        val fboRatio = FIXED_WIDTH.toFloat() / FIXED_HEIGHT.toFloat()
+        val fboRatio = renderWidth.toFloat() / renderHeight.toFloat()
         val screenRatio = viewWidth.toFloat() / viewHeight.toFloat()
 
         if (isPortrait) {
@@ -970,10 +996,11 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
         if (captureRequested) {
             captureRequested = false
             val isPortrait = viewWidth < viewHeight
-            val b = ByteBuffer.allocate(FIXED_WIDTH * FIXED_HEIGHT * 4)
-            GLES20.glReadPixels(0, 0, FIXED_WIDTH, FIXED_HEIGHT, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
+            val w = renderWidth; val h = renderHeight
+            val b = ByteBuffer.allocate(w * h * 4)
+            GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
             Thread {
-                var bmp = Bitmap.createBitmap(FIXED_WIDTH, FIXED_HEIGHT, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
+                var bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(b) }
                 if (isPortrait) {
                     val matrix = android.graphics.Matrix().apply { postRotate(-90f) }
                     val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)

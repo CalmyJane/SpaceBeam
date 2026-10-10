@@ -196,6 +196,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var displayHelper: ExternalDisplayHelper
     lateinit var midiHelper: MidiHelper
     lateinit var sensorHelper: SensorHelper
+    val vision = VisionPipeline()
+    val handTracker = HandTracker(this, vision)
+    val faceTracker = FaceTracker(this, vision)
+    private var handBtn: ImageButton? = null
+    private var faceBtn: ImageButton? = null
+    private var gyroBtn: ImageButton? = null
+    private var trackingOverlay: TrackingOverlayView? = null
+    var performanceMode = false
     var autoPlayFilter = mutableSetOf(1, 2, 3, 4, 5, 6, 7, 8, 9)
     val controls = java.util.concurrent.CopyOnWriteArrayList<PropertyControl>()
     val controlsMap = java.util.concurrent.ConcurrentHashMap<String, PropertyControl>()
@@ -520,6 +528,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 "CMD_AUTOPLAY" -> toggleAutoPlay()
                 "CMD_CAM_SWITCH" -> switchCamera()
+                "CMD_HAND" -> setTracking(handTracker, !handTracker.enabled)
+                "CMD_FACE" -> setTracking(faceTracker, !faceTracker.enabled)
+                "CMD_GYRO" -> setSensorModulation(!sensorHelper.enabled)
                 "CMD_FLIP_X" -> {
                     renderer.flipX = if (renderer.flipX == 1f) -1f else 1f
                     updateSidebarVisuals()
@@ -650,6 +661,7 @@ class MainActivity : AppCompatActivity() {
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         hideSystemUI()
 
+        performanceMode = getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE).getBoolean("PERF_MODE", false)
         renderer = KaleidoscopeRenderer(this)
 
         effectChain.effects.clear()
@@ -689,6 +701,8 @@ class MainActivity : AppCompatActivity() {
         undoHistorySize = prefs.getInt("UNDO_HISTORY", 20)
         undoManager.maxHistory = undoHistorySize
         forceScreenOn = prefs.getBoolean("FORCE_SCREEN_ON", false)
+        handTracker.smoothing = prefs.getInt("HAND_SMOOTH", Tracker.DEFAULT_SMOOTHING)
+        faceTracker.smoothing = prefs.getInt("FACE_SMOOTH", Tracker.DEFAULT_SMOOTHING)
         maskManager.loadFromPrefs(prefs)
         val filterStr = prefs.getString("AP_FILTER", null)
         if (filterStr != null) {
@@ -706,6 +720,8 @@ class MainActivity : AppCompatActivity() {
         displayHelper = ExternalDisplayHelper(this, renderer)
         displayHelper.start()
         checkAndRequestPermissions()
+        // Warm up the tracking models shortly after start so the hand/face buttons react without a hitch
+        glView.postDelayed({ handTracker.preload(); faceTracker.preload() }, 3000)
     }
 
     private fun checkAndRequestPermissions() {
@@ -754,10 +770,57 @@ class MainActivity : AppCompatActivity() {
                         .build()
 
                     preview.setSurfaceProvider { req -> renderer.provideCameraSurface(req) }
-                    try { provider.bindToLifecycle(this, currentSelector, preview) } catch (e: Exception) { Log.e("Camera", "Bind failed", e) }
+                    val analysis = vision.createAnalysis(cam.isFront, glView.display?.rotation ?: Surface.ROTATION_0)
+                    try {
+                        // Unbind right before binding: startCamera can run twice in quick succession (surface created +
+                        // permission result), and the deferred binds would otherwise stack their use cases on one camera
+                        provider.unbindAll()
+                        provider.bindToLifecycle(this, currentSelector, preview, analysis)
+                    } catch (e: Exception) {
+                        // Camera can't stream preview + analysis together: keep the visuals, drop tracking
+                        Log.w("Camera", "Bind with analysis failed, falling back to preview only", e)
+                        vision.dropAnalysis()
+                        val wasTracking = handTracker.enabled || faceTracker.enabled
+                        handTracker.disable(); faceTracker.disable()
+                        updateTrackingButtons()
+                        if (wasTracking) Toast.makeText(this, "Hand/face tracking not supported on this camera", Toast.LENGTH_SHORT).show()
+                        try { provider.unbindAll(); provider.bindToLifecycle(this, currentSelector, preview) } catch (e2: Exception) { Log.e("Camera", "Bind failed", e2) }
+                    }
                 }
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    fun setTracking(tracker: Tracker, on: Boolean) {
+        if (on == tracker.enabled) return
+        if (on) {
+            if (!vision.available) {
+                Toast.makeText(this, "Hand/face tracking not supported on this camera", Toast.LENGTH_SHORT).show()
+                return
+            }
+            tracker.enable { ok ->
+                // The analysis stream is already running next to the preview: just attach the analyzer (no camera restart)
+                if (ok) vision.updateAnalyzer()
+                else Toast.makeText(this, "Tracking model missing (${tracker.modelAsset})", Toast.LENGTH_LONG).show()
+                updateTrackingButtons()
+            }
+        } else {
+            tracker.disable()
+            vision.updateAnalyzer()
+            updateTrackingButtons()
+        }
+    }
+
+    fun setSensorModulation(on: Boolean) {
+        sensorHelper.setEnabled(on)
+        updateTrackingButtons()
+    }
+
+    private fun updateTrackingButtons() {
+        handBtn?.alpha = if (handTracker.enabled) 1.0f else 0.45f
+        faceBtn?.alpha = if (faceTracker.enabled) 1.0f else 0.45f
+        gyroBtn?.alpha = if (sensorHelper.enabled) 1.0f else 0.45f
+        trackingOverlay?.invalidate()
     }
 
     private fun enumerateCameras() {
@@ -827,6 +890,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         restoreScreenTimeout()
         midiHelper.close()
+        vision.close()
         // Detach all UI from controls to prevent context leaks
         controls.forEach { it.detach() }
 
@@ -1002,7 +1066,69 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        handBtn = ImageButton(this).apply {
+            setImageDrawable(HandIconDrawable())
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(28, 28, 28, 28)
+            setBackgroundColor(Color.TRANSPARENT)
+            layoutParams = FrameLayout.LayoutParams(130, 130).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                bottomMargin = 180
+                rightMargin = 35
+            }
+            setOnClickListener { setTracking(handTracker, !handTracker.enabled) }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_HAND", "TOGGLE HAND TRACKING")
+                    true
+                } else false
+            }
+        }
+        faceBtn = ImageButton(this).apply {
+            setImageDrawable(FaceIconDrawable())
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(28, 28, 28, 28)
+            setBackgroundColor(Color.TRANSPARENT)
+            layoutParams = FrameLayout.LayoutParams(130, 130).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                bottomMargin = 330
+                rightMargin = 35
+            }
+            setOnClickListener { setTracking(faceTracker, !faceTracker.enabled) }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_FACE", "TOGGLE FACE TRACKING")
+                    true
+                } else false
+            }
+        }
+        gyroBtn = ImageButton(this).apply {
+            setImageDrawable(GyroIconDrawable())
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(28, 28, 28, 28)
+            setBackgroundColor(Color.TRANSPARENT)
+            layoutParams = FrameLayout.LayoutParams(130, 130).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                bottomMargin = 480
+                rightMargin = 35
+            }
+            setOnClickListener { setSensorModulation(!sensorHelper.enabled) }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_GYRO", "TOGGLE GYRO MODULATION")
+                    true
+                } else false
+            }
+        }
+        // Phone-only overlay: lives in the HUD, never in the GL output that goes to projector/recording
+        trackingOverlay = TrackingOverlayView(this, this, handTracker, faceTracker, sensorHelper).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
+        val overlay = trackingOverlay!!
+        handTracker.onUpdate = { overlay.postInvalidate() }
+        faceTracker.onUpdate = { overlay.postInvalidate() }
+        vision.setDisplayRotation(glView.display?.rotation ?: Surface.ROTATION_0)
+
         overlayHUD.addView(flashOverlay)
+        overlayHUD.addView(overlay)
         overlayHUD.addView(logoView)
         overlayHUD.addView(leftHUDContainer)
 
@@ -1033,6 +1159,10 @@ class MainActivity : AppCompatActivity() {
         overlayHUD.addView(presetPanel, presetParams)
 
         overlayHUD.addView(settingsBtn)
+        overlayHUD.addView(handBtn)
+        overlayHUD.addView(faceBtn)
+        overlayHUD.addView(gyroBtn)
+        updateTrackingButtons()
 
         updateSidebarVisuals()
         applyReadabilityStyle()
@@ -1803,9 +1933,14 @@ class MainActivity : AppCompatActivity() {
         val uniqueId = "FEEDBACK_${System.currentTimeMillis()}"
         val channel = renderer.addSource(SourceType.FEEDBACK, uniqueId)
         if (channel != null) {
+            // Defaults: half-second echo of the edge-detect stage, screened on top
+            channel.feedbackTapEffectId = "FX_EDGE"
+            channel.feedbackDelay = 30
+            channel.setFeedbackBufferSize(30)
+            channel.blendMode = BlendMode.SCREEN
             val label = if (feedbackCount == 0) "FEEDBACK" else "FEEDBACK ${feedbackCount + 1}"
             val ctrl = FeedbackSourceControl(uniqueId, label, uniqueId, this)
-            ctrl.subtitle = "Tap: Final Output"
+            ctrl.subtitle = "Tap: ${effectChain.effects.find { it.id == "FX_EDGE" }?.name ?: "Edge Detect"}"
             addDynamicSourceControl(ctrl)
             Toast.makeText(this, "Feedback Loop Added", Toast.LENGTH_SHORT).show()
         } else {
@@ -3461,7 +3596,7 @@ class MainActivity : AppCompatActivity() {
         val getCircleBg = { alpha: Int -> getBg(alpha).apply { shape = GradientDrawable.OVAL } }
 
         val panels = listOf(controlBox, presetPanel)
-        val utils = listOf(menuBtn, settingsBtn)
+        val utils = listOfNotNull(menuBtn, settingsBtn, handBtn, faceBtn, gyroBtn)
 
         // Reset clip
         panels.forEach { it.clipToOutline = true }
@@ -3745,6 +3880,15 @@ class MainActivity : AppCompatActivity() {
                 snapObj.put("sp",  snap.sensorPitch)
                 snapObj.put("sro", snap.sensorRoll)
                 snapObj.put("sy",  snap.sensorYaw)
+                snapObj.put("hi", snap.handIndex)
+                snapObj.put("hm", snap.handMiddle)
+                snapObj.put("hr", snap.handRing)
+                snapObj.put("hp", snap.handPinky)
+                snapObj.put("ha", snap.handAngle)
+                snapObj.put("hd", snap.handDist)
+                snapObj.put("fr", snap.faceRot)
+                snapObj.put("fd", snap.faceDist)
+                snapObj.put("fm", snap.faceMouth)
                 controlsObj.put(key, snapObj)
             }
             rootObj.put("controls", controlsObj)
@@ -3835,7 +3979,16 @@ class MainActivity : AppCompatActivity() {
                             s.optInt("saz", 500),
                             s.optInt("sp",  500),
                             s.optInt("sro", 500),
-                            s.optInt("sy",  500)
+                            s.optInt("sy",  500),
+                            s.optInt("hi", 0),
+                            s.optInt("hm", 0),
+                            s.optInt("hr", 0),
+                            s.optInt("hp", 0),
+                            s.optInt("ha", 0),
+                            s.optInt("hd", 0),
+                            s.optInt("fr", 0),
+                            s.optInt("fd", 0),
+                            s.optInt("fm", 0)
                         )
                     }
                     presets[idx] = Preset(snapshots, fx, fy, r180, ax)
@@ -3865,6 +4018,79 @@ class MainActivity : AppCompatActivity() {
             9 -> pFunc(2, base + arrayOf("UTWIRL", 1000, "S_WIDE", 1000, "S_ACTIVITY", 677, "SWIRL_SPEED", 609, "S_FOG", 255, "S_FOG_FALLOFF", 422, "M_ANGLE", 0, 60, 1000, "RAMP", "M_ZOOM", 262, 150, 200, "HUE", 0, 80, 0, "RAMP", "GLOW", 600, "VIBRANCE", 600))
             else -> pFunc(2, emptyArray<Any>())
         }
+
+        // Hand modulation per preset: control id, channel, amount (±1000 = channel spans the full range, negative = inverted).
+        // Kaleidoscope presets: hand tilt rotates, distance zooms (direction varies), pinch drives a color effect.
+        // Tunnel/Swirl presets: distance drives the flight speed, inverted: hand close = fly in, mid = hover, far = back out.
+        val I = 0; val M = 1; val A = HandTracker.ANGLE; val D = HandTracker.DIST
+        val hand: List<Triple<String, Int, Int>> = when (idx) {
+            1 -> listOf(Triple("M_ANGLE", A, 1000), Triple("M_ZOOM", D, -900), Triple("E_AMT", I, 1000))
+            2 -> listOf(Triple("M_ANGLE", A, 1000), Triple("M_ZOOM", D, 900), Triple("HUE", I, 1000), Triple("M_RGB", M, 600))
+            3 -> listOf(Triple("M_ANGLE", A, 1000), Triple("M_ZOOM", D, -1000), Triple("M_RGB", I, 800), Triple("K_ZOOM", M, 600))
+            4 -> listOf(Triple("M_ANGLE", A, 1000), Triple("M_ZOOM", D, 1000), Triple("GLOW", I, 800), Triple("E_AMT", M, 1000))
+            5 -> listOf(Triple("M_ANGLE", A, 1000), Triple("M_ZOOM", D, -900), Triple("NEG", I, 1000), Triple("M_WOBBLE", M, 700))
+            6 -> listOf(Triple("S_SPEED", D, -1000), Triple("TWIST", A, 1000), Triple("T_HUE_STR", I, 1000))
+            7 -> listOf(Triple("S_SPEED", D, -1000), Triple("CURVE", A, 800), Triple("T_WAVE_STR", I, 1000))
+            8 -> listOf(Triple("S_SPEED", D, -1000), Triple("M_ANGLE", A, 1000), Triple("T_FOG_H", I, 1000), Triple("S_SHAPE", M, 1000))
+            9 -> listOf(Triple("SWIRL_SPEED", D, -1000), Triple("M_ANGLE", A, 1000), Triple("HUE", I, 1000), Triple("S_FOG", M, 800))
+            else -> emptyList()
+        }
+        // Head modulation per preset: tilt rotates, distance does the same as the hand distance (zoom / flight speed)
+        val face: List<Triple<String, Int, Int>> = when (idx) {
+            1 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("M_ZOOM", FaceTracker.DIST, -900), Triple("GLOW", FaceTracker.MOUTH, 900))
+            2 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("M_ZOOM", FaceTracker.DIST, 900), Triple("K_ZOOM", FaceTracker.MOUTH, 700))
+            3 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("M_ZOOM", FaceTracker.DIST, -1000), Triple("HUE", FaceTracker.MOUTH, 1000))
+            4 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("M_ZOOM", FaceTracker.DIST, 1000), Triple("M_WOBBLE", FaceTracker.MOUTH, 800))
+            5 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("M_ZOOM", FaceTracker.DIST, -900), Triple("M_RGB", FaceTracker.MOUTH, 800))
+            6 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("S_SPEED", FaceTracker.DIST, -1000), Triple("S_FOV", FaceTracker.MOUTH, 800))
+            7 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("S_SPEED", FaceTracker.DIST, -1000), Triple("FLUX", FaceTracker.MOUTH, 900))
+            8 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("S_SPEED", FaceTracker.DIST, -1000), Triple("T_FOG", FaceTracker.MOUTH, 600))
+            9 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("SWIRL_SPEED", FaceTracker.DIST, -1000), Triple("S_ACTIVITY", FaceTracker.MOUTH, 800))
+            else -> emptyList()
+        }
+        // Gyro/accelerometer per preset (active once the gyro button is on): control id, sensor channel
+        // (0 pitch, 1 roll, 2 yaw, 3-5 accel X/Y/Z), slider value (500 = off, further from 500 = stronger, <500 = inverted).
+        // Flat presets: tilting the phone tilts the image, a push toward the screen punches the zoom.
+        // Tunnel/Swirl presets: tilting the phone looks around inside the tunnel.
+        val sensors: List<Triple<String, Int, Int>> = when (idx) {
+            1, 2, 3, 4, 5 -> listOf(Triple("M_TILTX", 1, 900), Triple("M_TILTY", 0, 900), Triple("M_ZOOM", 5, 720))
+            6, 7, 8 -> listOf(Triple("T_LOOK_X", 1, 950), Triple("T_LOOK_Y", 0, 950), Triple("S_FOV", 5, 700))
+            9 -> listOf(Triple("S_LOOK_X", 1, 950), Triple("S_LOOK_Y", 0, 950))
+            else -> emptyList()
+        }
+        val preset = presets[idx] ?: return
+        val snaps = preset.controlSnapshots.toMutableMap()
+        for ((id, ch, value) in sensors) {
+            val s = snaps[id] ?: continue
+            snaps[id] = when (ch) {
+                0 -> s.copy(sensorPitch = value)
+                1 -> s.copy(sensorRoll = value)
+                2 -> s.copy(sensorYaw = value)
+                3 -> s.copy(sensorAccelX = value)
+                4 -> s.copy(sensorAccelY = value)
+                else -> s.copy(sensorAccelZ = value)
+            }
+        }
+        for ((id, ch, amount) in face) {
+            val s = snaps[id] ?: continue
+            snaps[id] = when (ch) {
+                FaceTracker.ROT -> s.copy(faceRot = amount)
+                FaceTracker.DIST -> s.copy(faceDist = amount)
+                else -> s.copy(faceMouth = amount)
+            }
+        }
+        for ((id, ch, amount) in hand) {
+            val s = snaps[id] ?: continue
+            snaps[id] = when (ch) {
+                0 -> s.copy(handIndex = amount)
+                1 -> s.copy(handMiddle = amount)
+                2 -> s.copy(handRing = amount)
+                3 -> s.copy(handPinky = amount)
+                HandTracker.ANGLE -> s.copy(handAngle = amount)
+                else -> s.copy(handDist = amount)
+            }
+        }
+        presets[idx] = preset.copy(controlSnapshots = snaps)
     }
 
     private fun toggleHud() {

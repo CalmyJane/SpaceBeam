@@ -25,6 +25,17 @@ abstract class ShaderEffect(
 
     open fun reset() {}
 
+    /** True when the pass currently has no visible effect, so the chain can skip it. */
+    open fun isBypassed(): Boolean = false
+
+    /** Tunnel/Swirl at strength 0 still rotate the image 180° (their flat-UV wrap); a skipped one must keep that. */
+    open val flipsWhenBypassed: Boolean = false
+
+    /** True when the pass may sample its input minified (zoom out / depth), so it needs fresh mipmaps. */
+    open val needsMipmaps: Boolean = false
+
+    protected fun ctrl(id: String, default: Float): Float = mainActivity.controlsMap[id]?.computedValue ?: default
+
     protected fun addControl(control: PropertyControl) {
         controls.add(control)
         mainActivity.controlsMap[control.id] = control
@@ -306,6 +317,10 @@ class EffectChain {
     private var copyProg = 0
     private var copyLocTex = -1
 
+    // 180° rotation pass, used to materialize the flip of a skipped Tunnel/Swirl
+    private var flipProg = 0
+    private var flipLocTex = -1
+
     // Injection blend shader: composites one source onto the chain result
     private var injectProg = 0
     private var locInjectBase = -1; private var locInjectSrc = -1
@@ -340,6 +355,15 @@ class EffectChain {
             val fSrc = "precision mediump float; varying vec2 v; uniform sampler2D uTex; void main() { gl_FragColor = texture2D(uTex, v); }"
             copyProg = ShaderHelper.createProgram(vSrc, fSrc)
             copyLocTex = GLES20.glGetUniformLocation(copyProg, "uTex")
+        }
+
+        if (flipProg == 0) {
+            val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
+            // highp is required: in mediump (fp16 on Mali) the computed 1.0 - v rounds to ~1 texel at 1920 px,
+            // giving a regular stripe pattern that the following Swirl then amplifies
+            val fSrc = "precision highp float; varying vec2 v; uniform sampler2D uTex; void main() { gl_FragColor = texture2D(uTex, 1.0 - v); }"
+            flipProg = ShaderHelper.createProgram(vSrc, fSrc)
+            flipLocTex = GLES20.glGetUniformLocation(flipProg, "uTex")
         }
 
         // Injection blend shader: composites one source onto the chain result using blend mode
@@ -387,28 +411,66 @@ class EffectChain {
         effects[0].render(0, fboA, width, height)
 
         var currentInput = texA
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, currentInput)
-        GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
+        var mipsValid = false
+        // A skipped Tunnel/Swirl leaves a pending 180° flip; it is only rendered when
+        // something reads the image (next real pass, a tap/injection, or the chain output).
+        // Two skipped flips cancel out for free.
+        var pendingFlip = false
 
         captureForSources(sources, effects[0].id, currentInput)
         currentInput = injectSourcesAfter(sources, effects[0].id, currentInput, renderer)
 
         for (i in 1 until effects.size) {
             val effect = effects[i]
-            if (effect.active) {
+            if (!effect.active) continue
+
+            if (effect.isBypassed()) {
+                if (effect.flipsWhenBypassed) pendingFlip = !pendingFlip
+            } else {
+                if (pendingFlip) { currentInput = renderFlip(currentInput); pendingFlip = false; mipsValid = false }
+                if (effect.needsMipmaps && !mipsValid) {
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, currentInput)
+                    GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
+                    mipsValid = true
+                }
                 val outputFbo = if (currentInput == texA) fboB else fboA
                 val outputTex = if (currentInput == texA) texB else texA
                 effect.render(currentInput, outputFbo, width, height)
-
                 currentInput = outputTex
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, currentInput)
-                GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
-
-                captureForSources(sources, effect.id, currentInput)
-                currentInput = injectSourcesAfter(sources, effect.id, currentInput, renderer)
+                mipsValid = false
             }
+
+            if (pendingFlip && hasTapAt(sources, effect.id, renderer)) {
+                currentInput = renderFlip(currentInput); pendingFlip = false; mipsValid = false
+            }
+            captureForSources(sources, effect.id, currentInput)
+            val injected = injectSourcesAfter(sources, effect.id, currentInput, renderer)
+            if (injected != currentInput) { currentInput = injected; mipsValid = false }
         }
+        if (pendingFlip) currentInput = renderFlip(currentInput)
         return currentInput
+    }
+
+    private fun hasTapAt(sources: List<KaleidoscopeRenderer.SourceChannel>, effectId: String, renderer: KaleidoscopeRenderer): Boolean {
+        for (src in sources) {
+            if (src.type == SourceType.FEEDBACK && src.feedbackTapEffectId == effectId) return true
+            if (src.injectionPoint == effectId && (renderer.ctx.controlsMap[src.id]?.computedValue ?: 0f) > 0f) return true
+        }
+        return false
+    }
+
+    private fun renderFlip(inputTex: Int): Int {
+        val writeFbo = if (inputTex == texA) fboB else fboA
+        val writeTex = if (inputTex == texA) texB else texA
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, writeFbo)
+        GLES20.glViewport(0, 0, width, height)
+        GLES20.glUseProgram(flipProg)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTex)
+        GLES20.glUniform1i(flipLocTex, 0)
+        ShaderHelper.bindQuad(flipProg)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        return writeTex
     }
 
     private fun captureForSources(sources: List<KaleidoscopeRenderer.SourceChannel>, effectId: String, srcTex: Int) {
@@ -454,6 +516,7 @@ class EffectChain {
     fun release() {
         if (fboA != 0) { val f = IntArray(2){ if(it==0) fboA else fboB }; val t = IntArray(2){ if(it==0) texA else texB }; GLES20.glDeleteFramebuffers(2, f, 0); GLES20.glDeleteTextures(2, t, 0) }
         if (copyProg != 0) { GLES20.glDeleteProgram(copyProg); copyProg = 0 }
+        if (flipProg != 0) { GLES20.glDeleteProgram(flipProg); flipProg = 0 }
         if (injectProg != 0) { GLES20.glDeleteProgram(injectProg); injectProg = 0 }
         fboA = 0; isReady = false
         effects.forEach { it.release() }
@@ -542,6 +605,8 @@ class TransformEffect(idPrefix: String, title: String, activity: MainActivity) :
     private val pRgb = "${idPrefix}_RGB"
     private val pBend = "${idPrefix}_BEND"
     private val pWobble = "${idPrefix}_WOBBLE"
+
+    override val needsMipmaps = true
 
     init {
         addControl(PropertyControl(pAngle, "ANGLE", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
@@ -648,6 +713,7 @@ class KaleidoscopeEffect(activity: MainActivity) : ShaderEffect("FX_KALEIDO", "K
     private var prog = 0
     private var locTex = -1; private var locAx = -1; private var locAmt = -1
     private var locZoom = -1; private var locRatio = -1
+    override val needsMipmaps = true
     init {
         addControl(PropertyControl("AXIS", "AXIS", min=1, max=25, sliderMax=25, defaultValue=2, includeInPreset=true, defaultLocked=true, allowSmoothing=false))
         addControl(PropertyControl("K_AMT", "AMOUNT", defaultValue=1000, outMin=0f, outMax=1f, hasModulation=true))
@@ -724,6 +790,7 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
     private var locFov = -1; private var locScroll = -1; private var locHStr = -1; private var locHPos = -1
     private var locWStr = -1; private var locWPos = -1; private var locCurve = -1; private var locTwist = -1
     private var locFlux = -1; private var locFogD = -1; private var locFogH = -1; private var locFogS = -1; private var locFogV = -1
+    private var locLook = -1
 
     init {
         addControl(PropertyControl("3D_MIX", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
@@ -751,7 +818,16 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
         // Twist: Reduced range to 10% (was +/- 5.0, now +/- 0.5)
         addControl(PropertyControl("TWIST", "VORTEX", defaultValue = 500, outMin=-0.5f, outMax=0.5f, hasModulation = true))
         addControl(PropertyControl("FLUX", "FLUX", defaultValue = 0, outMin=0f, outMax=0.5f, hasModulation = true))
+
+        // Look around: shifts the vanishing point
+        addControl(PropertyControl("T_LOOK_X", "LOOK X", defaultValue = 500, outMin=-0.6f, outMax=0.6f, hasModulation = true))
+        addControl(PropertyControl("T_LOOK_Y", "LOOK Y", defaultValue = 500, outMin=-0.6f, outMax=0.6f, hasModulation = true))
     }
+
+    override val needsMipmaps = true
+    override val flipsWhenBypassed = true
+    // At 3D_MIX 0 every term (geometry, rainbow, wave, fog) is scaled away — only the flat-UV flip remains
+    override fun isBypassed() = ctrl("3D_MIX", 0f) <= 0.001f
 
     override fun reset() {
         scrollAccum = 0.0f
@@ -771,6 +847,7 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
         uniform float uMix, uShape, uFov, uScroll, uHStr, uHPos, uWStr, uWPos, uRatio;
         uniform float uCurve, uTwist, uFlux;
         uniform float uFogD, uFogH, uFogS, uFogV;
+        uniform vec2 uLook;
 
         vec3 hsb2rgb(vec3 c) {
             vec3 rgb = clamp(abs(mod(c.x*6.0+vec3(0.0,4.0,2.0), 6.0)-3.0)-1.0, 0.0, 1.0);
@@ -782,6 +859,8 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
             vec2 uv = flatUV;
             uv.x *= uRatio;
             
+            uv += uLook; // look around: move the vanishing point
+
             // --- 1. Curve (Parabolic view bend) ---
             // We bend the view plane BEFORE calculating tunnel geometry.
             // uCurve 1.0 = 0.0 offset.
@@ -859,6 +938,7 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
         locFlux = GLES20.glGetUniformLocation(prog, "uFlux"); locFogD = GLES20.glGetUniformLocation(prog, "uFogD")
         locFogH = GLES20.glGetUniformLocation(prog, "uFogH"); locFogS = GLES20.glGetUniformLocation(prog, "uFogS")
         locFogV = GLES20.glGetUniformLocation(prog, "uFogV")
+        locLook = GLES20.glGetUniformLocation(prog, "uLook")
     }
 
     override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
@@ -866,6 +946,7 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
         GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
         GLES20.glUniform1i(locTex, 0)
         GLES20.glUniform1f(locRatio, w.toFloat()/h.toFloat())
+        GLES20.glUniform2f(locLook, ctrl("T_LOOK_X", 0f), ctrl("T_LOOK_Y", 0f))
         GLES20.glUniform1f(locMix, mainActivity.controlsMap["3D_MIX"]?.computedValue ?: 0f)
         GLES20.glUniform1f(locShape, mainActivity.controlsMap["S_SHAPE"]?.computedValue ?: 0f)
         GLES20.glUniform1f(locFov, mainActivity.controlsMap["S_FOV"]?.computedValue ?: 0.5f)
@@ -900,6 +981,7 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
     private var locTex = -1; private var locRatio = -1; private var locStr = -1; private var locWide = -1
     private var locScroll = -1; private var locSwayTime = -1; private var locFogD = -1; private var locFogF = -1
     private var locFogH = -1; private var locFogS = -1; private var locFogV = -1
+    private var locLook = -1
 
     init {
         addControl(PropertyControl("UTWIRL", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
@@ -913,7 +995,16 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
         addControl(PropertyControl("S_FOG_H", "FOG HUE", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true, modMode=PropertyControl.ModMode.WRAP))
         addControl(PropertyControl("S_FOG_S", "FOG SAT", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true))
         addControl(PropertyControl("S_FOG_V", "FOG BRIT", defaultValue = 0, outMin=0.0f, outMax=1.0f, hasModulation = true))
+
+        // Look around: turns the view direction
+        addControl(PropertyControl("S_LOOK_X", "LOOK X", defaultValue = 500, outMin=-0.8f, outMax=0.8f, hasModulation = true))
+        addControl(PropertyControl("S_LOOK_Y", "LOOK Y", defaultValue = 500, outMin=-0.8f, outMax=0.8f, hasModulation = true))
     }
+
+    override val needsMipmaps = true
+    override val flipsWhenBypassed = true
+    // At strength 0 the raymarch result and fog are mixed away — only the flat-UV flip remains
+    override fun isBypassed() = ctrl("UTWIRL", 0f) <= 0.001f
 
     override fun reset() {
         scrollAccum = 0.0f
@@ -940,6 +1031,7 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
         precision highp float; varying vec2 v; uniform sampler2D uTex;
         uniform float uStr, uWide, uScroll, uSwayTime, uRatio;
         uniform float uFogD, uFogF, uFogH, uFogS, uFogV;
+        uniform vec2 uLook;
 
         #define PI 3.14159
         #define FAR 80.0
@@ -971,7 +1063,7 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
             aspectUV.x *= uRatio; 
             
             vec3 ro = vec3(PI/2.0, 0.0, uScroll); 
-            vec3 rd = normalize(vec3(aspectUV, -0.5)); 
+            vec3 rd = normalize(vec3(aspectUV + uLook, -0.5)); // uLook: look around
 
             rd.xy = rot(sin(uSwayTime * 0.2) * uWide * 0.5) * rd.xy;
             vec3 targetOffsets = vec3(cos(uSwayTime * 0.4), sin(uSwayTime * 0.4), 4.0);
@@ -1012,6 +1104,12 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
 
             vec2 finalUV = mix(wrappedFlat, wrappedTunnel, smoothstep(0.0, 1.0, uStr));
             vec4 col = texture2D(uTex, finalUV);
+            // At low strength ray-hit edges make the UV derivatives spike, so the GPU picks blurry mip
+            // levels along them (cut lines on an otherwise flat image). Crossfade from the clean flat
+            // sample so those edges only fade in with the effect. (A negative LOD bias can't fix this:
+            // the deep tunnel needs the mips even at low strength, else it aliases into stripes.)
+            float fadeIn = smoothstep(0.0, 0.2, uStr);
+            if (fadeIn < 1.0) col = mix(texture2D(uTex, wrappedFlat), col, fadeIn);
             
             if (uFogD > 0.001) {
                 vec3 fogColor = hsb2rgb(vec3(uFogH, uFogS, uFogV));
@@ -1028,6 +1126,7 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
         locFogD = GLES20.glGetUniformLocation(prog, "uFogD"); locFogF = GLES20.glGetUniformLocation(prog, "uFogF")
         locFogH = GLES20.glGetUniformLocation(prog, "uFogH"); locFogS = GLES20.glGetUniformLocation(prog, "uFogS")
         locFogV = GLES20.glGetUniformLocation(prog, "uFogV")
+        locLook = GLES20.glGetUniformLocation(prog, "uLook")
     }
 
     override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
@@ -1036,6 +1135,7 @@ class SwirlEffect(activity: MainActivity) : ShaderEffect("FX_SWIRL", "SWIRL", ac
         GLES20.glUniform1i(locTex, 0)
 
         GLES20.glUniform1f(locRatio, w.toFloat()/h.toFloat())
+        GLES20.glUniform2f(locLook, ctrl("S_LOOK_X", 0f), ctrl("S_LOOK_Y", 0f))
         GLES20.glUniform1f(locStr, mainActivity.controlsMap["UTWIRL"]?.computedValue ?: 0f)
 
         GLES20.glUniform1f(locWide, mainActivity.controlsMap["S_WIDE"]?.computedValue ?: 1f)
@@ -1065,6 +1165,11 @@ class ColorEffect(activity: MainActivity) : ShaderEffect("FX_COLOR", "COLOR", ac
         addControl(PropertyControl("CONTRAST", "CONTRAST", defaultValue = 500, outMin=0f, outMax=2f, hasModulation = true))
         addControl(PropertyControl("VIBRANCE", "SATURATION", defaultValue = 500, outMin=0f, outMax=2f, hasModulation = true))
     }
+    // Identity at defaults; hue/glow below 0.01 are already skipped inside the shader
+    override fun isBypassed() =
+        ctrl("NEG", 0f) <= 0.001f && ctrl("HUE", 0f) <= 0.01f && ctrl("GLOW", 0f) <= 0.01f &&
+        abs(ctrl("BRIT", 1f) - 1f) <= 0.002f && abs(ctrl("CONTRAST", 1f) - 1f) <= 0.002f &&
+        abs(ctrl("VIBRANCE", 1f) - 1f) <= 0.002f
     override fun init() {
         val fSrc = """
         precision mediump float; varying vec2 v; uniform sampler2D uTex;
@@ -1114,6 +1219,7 @@ class EdgeEffect(activity: MainActivity) : ShaderEffect("FX_EDGE", "EDGE DETECT"
         addControl(PropertyControl("E_SAT", "SATURATION", defaultValue = 1000, outMin = 0f, outMax = 1f, hasModulation = true))
         addControl(PropertyControl("E_BRIT", "BRIGHTNESS", defaultValue = 500, outMin = 0f, outMax = 2f, hasModulation = true))
     }
+    override fun isBypassed() = ctrl("E_AMT", 0f) <= 0.001f
 
     override fun init() {
         val fSrc = """
