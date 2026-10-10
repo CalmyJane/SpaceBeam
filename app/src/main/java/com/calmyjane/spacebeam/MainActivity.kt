@@ -203,6 +203,15 @@ class MainActivity : AppCompatActivity() {
     private var faceBtn: ImageButton? = null
     private var gyroBtn: ImageButton? = null
     private var trackingOverlay: TrackingOverlayView? = null
+    // A 180° turn (landscape <-> reverse landscape) triggers no onConfigurationChanged, only a display change:
+    // without this the tracking image would stay upside down
+    private val displayListener = object : android.hardware.display.DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            if (::glView.isInitialized) glView.display?.let { vision.setDisplayRotation(it.rotation) }
+        }
+    }
     var performanceMode = false
     var autoPlayFilter = mutableSetOf(1, 2, 3, 4, 5, 6, 7, 8, 9)
     val controls = java.util.concurrent.CopyOnWriteArrayList<PropertyControl>()
@@ -720,6 +729,8 @@ class MainActivity : AppCompatActivity() {
         displayHelper = ExternalDisplayHelper(this, renderer)
         displayHelper.start()
         checkAndRequestPermissions()
+        (getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+            .registerDisplayListener(displayListener, android.os.Handler(mainLooper))
         // Warm up the tracking models shortly after start so the hand/face buttons react without a hitch
         glView.postDelayed({ handTracker.preload(); faceTracker.preload() }, 3000)
     }
@@ -890,6 +901,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         restoreScreenTimeout()
         midiHelper.close()
+        (getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager).unregisterDisplayListener(displayListener)
         vision.close()
         // Detach all UI from controls to prevent context leaks
         controls.forEach { it.detach() }
