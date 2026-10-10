@@ -790,7 +790,7 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
     private var locFov = -1; private var locScroll = -1; private var locHStr = -1; private var locHPos = -1
     private var locWStr = -1; private var locWPos = -1; private var locCurve = -1; private var locTwist = -1
     private var locFlux = -1; private var locFogD = -1; private var locFogH = -1; private var locFogS = -1; private var locFogV = -1
-    private var locLook = -1
+    private var locLook = -1; private var locRoll = -1
 
     init {
         addControl(PropertyControl("3D_MIX", "STRENGTH", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
@@ -822,6 +822,8 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
         // Look around: shifts the vanishing point
         addControl(PropertyControl("T_LOOK_X", "LOOK X", defaultValue = 500, outMin=-0.6f, outMax=0.6f, hasModulation = true))
         addControl(PropertyControl("T_LOOK_Y", "LOOK Y", defaultValue = 500, outMin=-0.6f, outMax=0.6f, hasModulation = true))
+        // Roll: rotates the view around the tunnel axis (same direction convention as the Swirl ROLL)
+        addControl(PropertyControl("T_ROLL", "ROLL", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
     }
 
     override val needsMipmaps = true
@@ -848,6 +850,7 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
         uniform float uCurve, uTwist, uFlux;
         uniform float uFogD, uFogH, uFogS, uFogV;
         uniform vec2 uLook;
+        uniform float uRoll;
 
         vec3 hsb2rgb(vec3 c) {
             vec3 rgb = clamp(abs(mod(c.x*6.0+vec3(0.0,4.0,2.0), 6.0)-3.0)-1.0, 0.0, 1.0);
@@ -859,6 +862,8 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
             vec2 uv = flatUV;
             uv.x *= uRatio;
             
+            float rc = cos(uRoll); float rs = sin(uRoll);
+            uv = vec2(uv.x * rc - uv.y * rs, uv.x * rs + uv.y * rc); // roll the view around the tunnel axis
             uv += uLook; // look around: move the vanishing point
 
             // --- 1. Curve (Parabolic view bend) ---
@@ -939,6 +944,7 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
         locFogH = GLES20.glGetUniformLocation(prog, "uFogH"); locFogS = GLES20.glGetUniformLocation(prog, "uFogS")
         locFogV = GLES20.glGetUniformLocation(prog, "uFogV")
         locLook = GLES20.glGetUniformLocation(prog, "uLook")
+        locRoll = GLES20.glGetUniformLocation(prog, "uRoll")
     }
 
     override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
@@ -947,6 +953,7 @@ class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNE
         GLES20.glUniform1i(locTex, 0)
         GLES20.glUniform1f(locRatio, w.toFloat()/h.toFloat())
         GLES20.glUniform2f(locLook, ctrl("T_LOOK_X", 0f), ctrl("T_LOOK_Y", 0f))
+        GLES20.glUniform1f(locRoll, ctrl("T_ROLL", 0f) * 6.2831853f)  // same rotation sense as the Swirl ROLL
         GLES20.glUniform1f(locMix, mainActivity.controlsMap["3D_MIX"]?.computedValue ?: 0f)
         GLES20.glUniform1f(locShape, mainActivity.controlsMap["S_SHAPE"]?.computedValue ?: 0f)
         GLES20.glUniform1f(locFov, mainActivity.controlsMap["S_FOV"]?.computedValue ?: 0.5f)

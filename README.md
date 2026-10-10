@@ -196,6 +196,7 @@ Projects the image onto the inside of a 3D tunnel:
 | **Vortex** | Twist the tunnel                                                                    |
 | **Flux** | Organic distortion of the tunnel walls                                              |
 | **Look X/Y** | Look around: moves the vanishing point of the tunnel                              |
+| **Roll** | Rotates the view around the tunnel axis                                             |
 
 ### Swirl
 
@@ -330,7 +331,7 @@ All nine factory presets come with mappings, so you can just switch a button on 
 
 | Input | Presets 1-5 (kaleidoscope) | Presets 6-9 (tunnel / swirl) |
 |---|---|---|
-| **Hand angle / head rotation** | Rotates the image | Rotates the image, twists or bends the tunnel; in the swirl preset it rolls the view inside the tunnel |
+| **Hand angle / head rotation** | Rotates the image | Rotates the image, twists or bends the tunnel; in presets 7-9 the hand angle rolls the view inside the tunnel |
 | **Hand / head distance** | Zooms | Flight speed: close = fly in, middle = hover, far = fly back out |
 | **Thumb-index, thumb-middle** | A color effect (edge detect, hue, glow, RGB shift, ...) | Rainbow, wave, fog color, tunnel shape |
 | **Mouth** | Another effect (glow, kaleidoscope zoom, hue, wobble, RGB shift) | Fisheye, flux, fog, activity |
