@@ -347,7 +347,7 @@ All modulation settings (LFO speed, depth, shape, sensor, hand and face mappings
 
 In the mixer you can add a **Feedback Loop** input source. This will take the result image with all effects applied, and feed it back into the mixer. You can adjust the frame-delay to have a delayed version of the image fed back.
 This can create very complex and interesting results (trippy evolving patterns, trails, glitchy effects).
-A new feedback source starts with a frame delay of 30, tap point Edge Detect and blend mode Screen. Note that every frame of delay needs graphics memory (about 8 MB per frame, shown below the slider).
+A new feedback source starts with a frame delay of 30, tap point Edge Detect and blend mode Screen.
 The tapping point can be adjusted to any source in the effect chain. Tapping after the kaleidoscope usually is less useful but can be interesting. Often you would want to tap after the Camera Transform, Color or Edge Detect effect.
 
 Some Ideas:

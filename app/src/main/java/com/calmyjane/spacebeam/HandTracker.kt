@@ -390,31 +390,6 @@ class GyroIconDrawable : Drawable() {
     override fun getIntrinsicHeight(): Int = 90
 }
 
-/** (Unused) earlier hand button icon: two fingertips with the distance line between them. */
-class PinchIconDrawable : Drawable() {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeCap = Paint.Cap.ROUND }
-
-    override fun draw(canvas: Canvas) {
-        val w = bounds.width().toFloat(); val h = bounds.height().toFloat()
-        val ox = bounds.left.toFloat(); val oy = bounds.top.toFloat()
-        val ax = ox + w * 0.28f; val ay = oy + h * 0.70f
-        val bx = ox + w * 0.72f; val by = oy + h * 0.30f
-        paint.style = Paint.Style.STROKE; paint.strokeWidth = w * 0.05f
-        paint.pathEffect = DashPathEffect(floatArrayOf(w * 0.06f, w * 0.06f), 0f)
-        canvas.drawLine(ax, ay, bx, by, paint)
-        paint.pathEffect = null
-        paint.style = Paint.Style.FILL
-        canvas.drawCircle(ax, ay, w * 0.11f, paint)
-        canvas.drawCircle(bx, by, w * 0.11f, paint)
-    }
-
-    override fun setAlpha(alpha: Int) { paint.alpha = alpha }
-    override fun setColorFilter(colorFilter: ColorFilter?) { paint.colorFilter = colorFilter }
-    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
-    override fun getIntrinsicWidth(): Int = 90
-    override fun getIntrinsicHeight(): Int = 90
-}
-
 /** Button icon: face outline with eyes and mouth. */
 class FaceIconDrawable : Drawable() {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeCap = Paint.Cap.ROUND }
