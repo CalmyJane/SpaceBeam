@@ -21,8 +21,9 @@ No laptops. No cables. No expensive software. Just your phone.
 5. Adjust the slider above the presets to change the transition duration
 6. Press the play button next to the slider to cycle through presets automatically
 7. Press the camera/camcorder icon to take snapshot/video
-8. Start changing parameters manually, adding new sources and saving your own presets
-9. Have Fun! :)
+8. Tap the **hand**, **face** or **gyro** button on the right to steer the visuals with your hand, your head or by tilting the phone -- every factory preset already reacts to them
+9. Start changing parameters manually, adding new sources and saving your own presets
+10. Have Fun! :)
 
 ---
 
@@ -119,6 +120,8 @@ Every Effect has multiple sliders for effect parameters.
 
 Some Effects have an **Amount** slider to completely disable them or slowly fade them in.
 
+Effects that currently change nothing (Edge Detect at Amount 0, Color at its default values, 3D Tunnel and Swirl at Strength 0) are skipped automatically and cost no performance. So if you never use the tunnels, just leave their Strength at 0.
+
 
 ### Mixer
 
@@ -192,6 +195,7 @@ Projects the image onto the inside of a 3D tunnel:
 | **Curve** | Bend the tunnel left or right                                                       |
 | **Vortex** | Twist the tunnel                                                                    |
 | **Flux** | Organic distortion of the tunnel walls                                              |
+| **Look X/Y** | Look around: moves the vanishing point of the tunnel                              |
 
 ### Swirl
 
@@ -204,6 +208,7 @@ A raymarched gyroid tunnel effect:
 | **Activity** | Speed of the organic swaying motion |
 | **Speed** | Forward/backward scroll speed |
 | **Fog Dist/Soft/Hue/Sat/Brit** | Distance fog with softness control |
+| **Look X/Y** | Look around: turns the view direction inside the structure |
 
 ---
 
@@ -268,7 +273,7 @@ LFOs can be **BPM-synced** -- turn syncing on and set the BPM in settings or wit
 
 ### Gyroscope / Accelerometer
 
-Each parameter can also be modulated by phone motion:
+Each parameter can also be modulated by phone motion. Sensor modulation is switched on and off with the **gyro button** (tilted phone icon) on the right side of the screen. Long-press the button to map it to a MIDI control.
 
 | Sensor | Description |
 |--------|------------|
@@ -277,11 +282,64 @@ Each parameter can also be modulated by phone motion:
 | **Yaw** | Rotating the phone flat on a surface |
 | **Accel X/Y/Z** | Shaking or moving the phone in space |
 
+- The way you hold the phone when you switch the gyro on counts as **neutral**. Everything is measured relative to that position, so nothing jumps and you can start from any position. Switch it off and on again to set a new neutral position.
+- The sliders in the **GYRO** section of a parameter's details menu have their zero in the middle: right = normal, left = inverted.
+- Switching on and off fades in and out softly.
+- Sudden sensor glitches are filtered out.
+
 This makes the visuals reactive to physical movement/position.
+
+### Hand Tracking
+
+Tap the **hand button** on the right side of the screen to steer parameters with one hand in front of the camera that is currently in use. Everything runs on the phone itself; no image ever leaves the device.
+
+Six values are measured:
+
+| Channel | What it measures |
+|---------|-----------------|
+| **Index / Middle / Ring / Pinky** | Distance between the thumb tip and that fingertip (touching = 0%, fully spread = 100%) |
+| **Angle** | Tilt of the whole hand (fingers pointing up = neutral) |
+| **Distance** | How far the hand is from the camera (close = 0%, far = 100%) |
+
+Map them in the **HAND** section of any parameter's details menu:
+
+- The sliders have their zero in the middle. Right = normal, left = inverted, middle = off. Tap the name to reset to off.
+- At full slider the channel takes over the **whole range** of the parameter, no matter where its normal slider stands. In between, hand value and normal value are blended.
+- **Angle** on rotating parameters (Angle, Hue) works relative: hand upright changes nothing, tilting turns from there. An LFO on the same parameter keeps running underneath.
+- When the hand leaves the picture, the last values are held.
+- Switching on and off, and switching presets, fades softly -- nothing jumps.
+
+On the phone screen (never on the projector or in recordings) you see a faint hand skeleton, a colored line for every mapped channel and one colored bar per mapped channel.
+
+### Face Tracking
+
+The **face button** works the same way with your face:
+
+| Channel | What it measures |
+|---------|-----------------|
+| **Rotation** | Tilting your head left/right |
+| **Distance** | How far your face is from the camera (close = 0%, far = 100%) |
+| **Mouth** | Width of your mouth (pursed = 0%, wide smile = 100%) |
+
+Map them in the **FACE** section of a parameter's details menu. Hand and face tracking can run at the same time. Running both costs more performance -- keep an eye on the FPS counter on slower phones.
+
+### Tracking in the factory presets
+
+All nine factory presets come with mappings, so you can just switch a button on and play:
+
+| Input | Presets 1-5 (kaleidoscope) | Presets 6-9 (tunnel / swirl) |
+|---|---|---|
+| **Hand angle / head rotation** | Rotates the image | Rotates the image, twists or bends the tunnel |
+| **Hand / head distance** | Zooms | Flight speed: close = fly in, middle = hover, far = fly back out |
+| **Thumb-index, thumb-middle** | A color effect (edge detect, hue, glow, RGB shift, ...) | Rainbow, wave, fog color, tunnel shape |
+| **Mouth** | Another effect (glow, kaleidoscope zoom, hue, wobble, RGB shift) | Fisheye, flux, fog, activity |
+| **Gyro** | Tilting the phone tilts the image | Tilting the phone looks around in the tunnel |
+
+If you saved your own presets in earlier versions they stay as they are. Use **Reset Presets** in the Settings to get the new factory presets.
 
 ### Modulation in Presets
 
-All modulation settings (LFO speed, depth, shape, sensor mappings) are stored in presets. This means each preset can have completely different animation behavior.
+All modulation settings (LFO speed, depth, shape, sensor, hand and face mappings) are stored in presets. This means each preset can have completely different animation behavior.
 
 ---
 
@@ -289,6 +347,7 @@ All modulation settings (LFO speed, depth, shape, sensor mappings) are stored in
 
 In the mixer you can add a **Feedback Loop** input source. This will take the result image with all effects applied, and feed it back into the mixer. You can adjust the frame-delay to have a delayed version of the image fed back.
 This can create very complex and interesting results (trippy evolving patterns, trails, glitchy effects).
+A new feedback source starts with a frame delay of 30, tap point Edge Detect and blend mode Screen. Note that every frame of delay needs graphics memory (about 8 MB per frame, shown below the slider).
 The tapping point can be adjusted to any source in the effect chain. Tapping after the kaleidoscope usually is less useful but can be interesting. Often you would want to tap after the Camera Transform, Color or Edge Detect effect.
 
 Some Ideas:
@@ -369,7 +428,7 @@ Once connected, MIDI mapping options appear in the Settings menu:
   - in the **clear midi mappings** menu, move any midi control to see what parameters it is mapped to
   - remove single mappings or all
   - press "show all" to display all midi mappings for all parameters (useful for clearing all mappings)
-- Long-press any parameter slider name or button, then move a MIDI control to map it
+- Long-press any parameter slider name or button, then move a MIDI control to map it. This also works for the hand, face and gyro buttons
 
 ---
 
@@ -388,11 +447,13 @@ Access via the gear icon in the bottom-right corner:
 | **Reset Presets** | Restore all 9 presets to factory defaults |
 | **Edit Mask** | Open the mask shape editor |
 | **Force Screen On** | Override system screen timeout (useful for Samsung devices that ignore the standard keep-screen-on flag) |
+| **Performance Mode (720p)** | Renders the visuals internally at 1280x720 instead of 1920x1080. Much faster on slower phones, slightly softer image. Photos are then 720p too |
 | **Connect Bluetooth MIDI** | Scan and connect to MIDI controllers |
 | **BPM** | Set beats-per-minute for LFO sync |
 | **Undo Steps** | Configure undo history depth |
 | **Auto-Play** | Duration, random order, preset filter |
 | **MIDI Mapping** | Load/Save/Clear MIDI mappings (visible when MIDI connected) |
+| **Sensor Smoothing** | How smooth Pitch, Roll, Yaw, **Hand** and **Face** values follow your movement. Left = direct, right = slow and soft |
 
 ---
 
@@ -400,7 +461,7 @@ Access via the gear icon in the bottom-right corner:
 
 | Permission | Why |
 |-----------|-----|
-| **Camera** | Live camera input |
+| **Camera** | Live camera input. Hand and face tracking analyze the camera image on the device only; nothing is stored or sent anywhere |
 | **Network** | RTSP streaming from other devices. The app never communicates with the internet. You can block network access in your OS -- RTSP sources will show an error but everything else works fine |
 | **Microphone** | Audio recording during video capture |
 | **Modify System Settings** | Force screen timeout override. Only touches the screen timeout value; original timeout is restored when you leave the app |
@@ -426,16 +487,19 @@ cd spacebeam
 
 Open in Android Studio and run on a physical device (emulator won't have camera/OpenGL ES support).
 
+The build needs no downloads besides the Gradle dependencies. The two tracking models in `app/src/main/assets` (`hand_landmarker.task`, `face_landmarker.task`) are Google's MediaPipe models, licensed under Apache 2.0.
+
 ### Architecture
 
-The app is a single-activity architecture in `MainActivity.kt`:
+The app is a single-activity architecture around `MainActivity.kt`:
 
-- **Effect chain**: Pipeline of GLSL shader effects rendered to ping-pong FBOs at 1920x1080
+- **Effect chain**: Pipeline of GLSL shader effects rendered to ping-pong FBOs at 1920x1080 (1280x720 in performance mode); effects without visible effect are skipped
 - **Sources**: Camera (CameraX), RTSP (Media3/ExoPlayer), media files, generative shaders, feedback loops
 - **Rendering**: OpenGL ES 2.0, continuous rendering on a `GLSurfaceView`
 - **Recording**: `MediaCodec` H.264 encoder writing to `MediaMuxer`
 - **MIDI**: Android MIDI API over Bluetooth LE
 - **Sensors**: Accelerometer + gyroscope via `SensorManager`
+- **Hand / face tracking**: MediaPipe Hand Landmarker and Face Landmarker, running on the CPU on a small CameraX analysis stream next to the camera preview
 
 ---
 
