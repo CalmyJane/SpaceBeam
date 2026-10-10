@@ -60,6 +60,39 @@ class SensorHelper(private val activity: MainActivity) : SensorEventListener {
         else -> accelZ
     }
 
+    // Spike filter for the rotation angles (the roll angle can flip when the phone passes vertical):
+    // a sample that jumps more than JUMP_LIMIT from the last accepted one is ignored until CONFIRM_SAMPLES
+    // consecutive samples agree on the new value. After that, MAX_STEP turns the jump into a short glide.
+    private val accepted = FloatArray(3)   // pitch, roll, yaw
+    private val candidate = FloatArray(3)
+    private val candidateCount = IntArray(3)
+    private var hasRotation = false
+
+    private fun wrapDiff(a: Float, b: Float, wraps: Boolean): Float {
+        var d = a - b
+        if (wraps) { if (d > 1f) d -= 2f; if (d < -1f) d += 2f }
+        return d
+    }
+
+    private fun despike(i: Int, raw: Float, wraps: Boolean): Float {
+        if (!hasRotation || kotlin.math.abs(wrapDiff(raw, accepted[i], wraps)) <= JUMP_LIMIT) {
+            accepted[i] = raw
+            candidateCount[i] = 0
+            return raw
+        }
+        if (candidateCount[i] > 0 && kotlin.math.abs(wrapDiff(raw, candidate[i], wraps)) <= CONFIRM_TOL) candidateCount[i]++ else candidateCount[i] = 1
+        candidate[i] = raw
+        if (candidateCount[i] >= CONFIRM_SAMPLES) { accepted[i] = raw; candidateCount[i] = 0 }
+        return accepted[i]
+    }
+
+    private companion object {
+        const val JUMP_LIMIT = 0.3f      // of the -1..1 range, per ~20 ms sample
+        const val CONFIRM_TOL = 0.1f
+        const val CONFIRM_SAMPLES = 5    // ~100 ms
+        const val MAX_STEP = 0.06f       // per sample, ~3 range units per second
+    }
+
     fun start() {
         linearAccelSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         rotationVectorSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
@@ -101,16 +134,20 @@ class SensorHelper(private val activity: MainActivity) : SensorEventListener {
                 // R[8] = screen normal's vertical (world-Z) component:
                 //   0 when phone is upright (screen faces horizontally)
                 //   +1 when screen faces up, -1 when screen faces down
-                val rawPitch = adjustedRotMatrix[8].coerceIn(-1f, 1f)
-                val rawRoll  = (orientation[2] / halfPi).coerceIn(-1f, 1f)
-                val rawYaw   = (orientation[0] / Math.PI.toFloat()).coerceIn(-1f, 1f)
+                val rawPitch = despike(0, adjustedRotMatrix[8].coerceIn(-1f, 1f), false)
+                val rawRoll  = despike(1, (orientation[2] / halfPi).coerceIn(-1f, 1f), false)
+                val rawYaw   = despike(2, (orientation[0] / Math.PI.toFloat()).coerceIn(-1f, 1f), true)
+                hasRotation = true
                 // Apply per-axis EMA smoothing
                 val pa = 1f - (pitchSmoothing / 1000f) * 0.97f
                 val ra = 1f - (rollSmoothing  / 1000f) * 0.97f
                 val ya = 1f - (yawSmoothing   / 1000f) * 0.97f
-                smoothedPitch += (rawPitch - smoothedPitch) * pa
-                smoothedRoll  += (rawRoll  - smoothedRoll)  * ra
-                smoothedYaw   += (rawYaw   - smoothedYaw)   * ya
+                smoothedPitch += ((rawPitch - smoothedPitch) * pa).coerceIn(-MAX_STEP, MAX_STEP)
+                smoothedRoll  += ((rawRoll  - smoothedRoll)  * ra).coerceIn(-MAX_STEP, MAX_STEP)
+                // Yaw is circular (-1 and 1 are the same direction): move the short way and wrap
+                smoothedYaw   += (wrapDiff(rawYaw, smoothedYaw, true) * ya).coerceIn(-MAX_STEP, MAX_STEP)
+                if (smoothedYaw > 1f) smoothedYaw -= 2f
+                if (smoothedYaw < -1f) smoothedYaw += 2f
                 pitch = smoothedPitch
                 roll  = smoothedRoll
                 yaw   = smoothedYaw
