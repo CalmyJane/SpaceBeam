@@ -1,5 +1,3 @@
-import java.net.URI
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -14,28 +12,12 @@ val copyHelp = tasks.register<Sync>("copyHelpAssets") {
     from(rootProject.file("readme_content")) { include(helpImages); into("readme_content") }
     into(layout.projectDirectory.dir("src/main/assets/help"))
 }
-// MediaPipe hand + face landmark models (Apache 2.0, ~7.5 MB + ~3.6 MB) — fetched once into assets if missing
-val trackingModels = listOf("hand_landmarker", "face_landmarker")
-val trackingModelFiles = trackingModels.map { layout.projectDirectory.file("src/main/assets/$it.task").asFile }
-val downloadHandModel = tasks.register("downloadHandModel") {
-    outputs.files(trackingModelFiles)
-    onlyIf { trackingModelFiles.any { !it.exists() } }
-    doLast {
-        trackingModels.zip(trackingModelFiles).forEach { (name, file) ->
-            if (file.exists()) return@forEach
-            file.parentFile.mkdirs()
-            val url = "https://storage.googleapis.com/mediapipe-models/$name/$name/float16/1/$name.task"
-            URI(url).toURL().openStream().use { input -> file.outputStream().use { out -> input.copyTo(out) } }
-        }
-    }
-}
 tasks.matching {
     (it.name.startsWith("merge") && it.name.endsWith("Assets")) ||
     it.name.startsWith("lintVitalAnalyze") ||
     it.name.startsWith("generateReleaseLintVitalReportModel")
 }.configureEach {
     dependsOn(copyHelp)
-    dependsOn(downloadHandModel)
 }
 
 android {
@@ -86,7 +68,7 @@ android {
         jvmTarget = "11"
     }
     androidResources {
-        noCompress += "task"  // MediaPipe model is memory-mapped from assets
+        noCompress += "task"  // MediaPipe models (assets/*.task) are memory-mapped
     }
 }
 
