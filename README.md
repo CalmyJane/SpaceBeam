@@ -507,7 +507,7 @@ The app is a single-activity architecture around `MainActivity.kt`:
 
 ## License
 
-SpaceBeam is licensed under the **GNU General Public License v3.0** (GPL-3.0).
+SpaceBeam is licensed under the **GNU General Public License v3.0 only** (GPL-3.0-only).
 
 See [LICENSE](LICENSE) for full text.
 
