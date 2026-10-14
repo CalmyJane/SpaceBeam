@@ -20,7 +20,7 @@ Real-time kaleidoscope visual synthesizer for Android, meant for party/event use
 - Single-activity app, split across 16 Kotlin files in `com.calmyjane.spacebeam`
 - OpenGL ES 2.0, continuous rendering on `GLSurfaceView`, ping-pong FBOs at 1920x1080 (1280x720 in performance mode)
 - All UI is programmatic (no XML layouts except AndroidManifest)
-- Effect chain: Sources → Mixer → CamTransform → Color → Edge → Kaleidoscope → MasterTransform → Tunnel → Swirl → Screen
+- Effect chain: Sources → Mixer → CamTransform → Color → Edge → Kaleidoscope → Droste → MasterTransform → Tunnel → Swirl → Screen
 - Each effect is a `ShaderEffect` subclass with GLSL shaders as inline strings
 - Effects with no visible effect are skipped (`isBypassed`); Tunnel/Swirl at 0 still flip 180°, applied lazily by the chain. Mipmaps only built for passes with `needsMipmaps`
 - Parameters stored as `PropertyControl` instances with LFO modulation, sensor input, smoothing
@@ -36,7 +36,7 @@ Real-time kaleidoscope visual synthesizer for Android, meant for party/event use
 |------|--------|---------|
 | `MainActivity.kt` | 4055 | Activity lifecycle, onCreate, UI setup, HUD, presets, mask editor, RTSP dialog, recording, gestures, auto-play |
 | `PropertyControl.kt` | 1300 | Parameter sliders with LFO, modulation, sensor mapping, details menu, SliderBox |
-| `Effects.kt` | 1255 | ShaderEffect base, EffectChain, MaskManager, 7 effect classes (Mixer, Transform, Kaleidoscope, Tunnel, Swirl, Color, Edge) |
+| `Effects.kt` | 1345 | ShaderEffect base, EffectChain, MaskManager, 8 effect classes (Mixer, Transform, Kaleidoscope, Droste, Tunnel, Swirl, Color, Edge) |
 | `SettingsMenu.kt` | 1180 | Settings dialog, help system, markdown-to-HTML, MIDI scanner/mapping UI |
 | `KaleidoscopeRenderer.kt` | 1020 | GLSurfaceView.Renderer, SourceChannel, MediaLayer, onDrawFrame, shader setup |
 | `SourceControls.kt` | 846 | SourcePropertyControl + Camera/RTSP/Media/Shader/Feedback source controls |

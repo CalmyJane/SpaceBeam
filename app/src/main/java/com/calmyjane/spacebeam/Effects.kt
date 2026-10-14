@@ -783,6 +783,116 @@ class KaleidoscopeEffect(activity: MainActivity) : ShaderEffect("FX_KALEIDO", "K
     override fun release() { GLES20.glDeleteProgram(prog) }
 }
 
+/**
+ * Droste / Escher spiral: repeats one ring of the image endlessly towards the center (log-polar mapping).
+ * Rings are mirrored instead of cut, so any input tiles without seams (and without mip lines);
+ * that needs the spiral twist to shift by a whole number of mirror pairs per turn. In-between SPIRAL values
+ * blend the UVs of the two neighbouring whole arm counts, so the slider can be modulated smoothly.
+ */
+class DrosteEffect(activity: MainActivity) : ShaderEffect("FX_DROSTE", "DROSTE", activity) {
+    private var prog = 0
+    private var phaseAccum = 0.0f
+    private var locTex = -1; private var locRatio = -1; private var locMix = -1
+    private var locLogS = -1; private var locC = -1; private var locW = -1; private var locPhase = -1; private var locRing = -1; private var locLook = -1
+
+    init {
+        addControl(PropertyControl("D_MIX", "STRENGTH", defaultValue = 0, outMin = 0f, outMax = 1f, hasModulation = true))
+        // Size ratio between neighbouring rings (default 3x)
+        addControl(PropertyControl("D_SCALE", "SCALE", defaultValue = 143, outMin = 1.5f, outMax = 12f, hasModulation = true, logPower = 2))
+        // Number of spiral arms, 0..8 (1000 = 8), smooth in between
+        addControl(PropertyControl("D_ARMS", "SPIRAL", defaultValue = 125, outMin = 0f, outMax = 8f, hasModulation = true))
+        // Endless zoom, in rings per second
+        addControl(PropertyControl("D_SPEED", "SPEED", defaultValue = 500, outMin = -2f, outMax = 2f, hasModulation = true))
+        // Radius of the repeated ring in the source image (0.5 = half the screen height)
+        addControl(PropertyControl("D_RING", "RING SIZE", defaultValue = 444, outMin = 0.1f, outMax = 1f, hasModulation = true))
+        // Zoom offset into the spiral; one full turn of the slider = one mirrored ring pair, so it wraps seamlessly
+        addControl(PropertyControl("D_ZOOM", "ZOOM", defaultValue = 0, outMin = 0f, outMax = 1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        // Look around: moves the spiral center
+        addControl(PropertyControl("D_LOOK_X", "LOOK X", defaultValue = 500, outMin = -0.6f, outMax = 0.6f, hasModulation = true))
+        addControl(PropertyControl("D_LOOK_Y", "LOOK Y", defaultValue = 500, outMin = -0.6f, outMax = 0.6f, hasModulation = true))
+    }
+
+    override val needsMipmaps = true
+    override fun isBypassed() = ctrl("D_MIX", 0f) <= 0.001f
+
+    override fun reset() {
+        phaseAccum = 0.0f
+    }
+
+    override fun update(deltaTime: Float) {
+        val raw = ctrl("D_SPEED", 0f)
+        val curved = sign(raw) * abs(raw).pow(2f)
+        // Ring pattern repeats every 2 rings (mirrored pairs); positive speed zooms in
+        phaseAccum = ((phaseAccum - curved * deltaTime) % 2f + 2f) % 2f
+    }
+
+    override fun init() {
+        val fSrc = """
+        precision highp float; varying vec2 v; uniform sampler2D uTex;
+        uniform float uMix, uLogS, uC, uW, uPhase, uRing, uRatio;
+        uniform vec2 uLook;
+
+        // Mirror wrap that is the identity on 0..1
+        vec2 mirrorUV(vec2 x) { return abs(mod(x + 1.0, 2.0) - 1.0); }
+
+        // Complex log (u, th) multiplied by (1 - i*c): conformal spiral, one full turn shifts by 2*arms rings
+        vec2 drosteUV(float u, float th, float c) {
+            float x = u + c * th;
+            float a = th - c * u;
+
+            // Fold the log radius into one ring, mirrored at both edges
+            float t = x / uLogS + uPhase;
+            float f = abs(mod(t, 2.0) - 1.0);
+            float r = uRing * exp(-f * uLogS);
+
+            vec2 q = r * vec2(cos(a), sin(a));
+            q.x /= uRatio;
+            return q + 0.5;
+        }
+
+        void main() {
+            vec2 p = v - 0.5;
+            p.x *= uRatio;
+            p -= uLook; // look around: move the spiral center (the repeated ring stays centered in the source)
+            float len = length(p);
+            if (len < 1e-5) p = vec2(1e-5, 0.0);
+
+            float u = log(max(len, 1e-5));
+            float th = atan(p.y, p.x);
+            vec2 d = drosteUV(u, th, uC);
+            // Fractional arms: blend towards the next whole arm count (each one alone is seamless)
+            if (uW > 0.001) d = mix(d, drosteUV(u, th, uC + uLogS / 3.14159265), uW);
+            gl_FragColor = texture2D(uTex, mirrorUV(mix(v, d, uMix)));
+        }"""
+        prog = ShaderHelper.createProgram("attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }", fSrc)
+        locTex = GLES20.glGetUniformLocation(prog, "uTex"); locRatio = GLES20.glGetUniformLocation(prog, "uRatio")
+        locMix = GLES20.glGetUniformLocation(prog, "uMix"); locLogS = GLES20.glGetUniformLocation(prog, "uLogS")
+        locC = GLES20.glGetUniformLocation(prog, "uC"); locW = GLES20.glGetUniformLocation(prog, "uW"); locPhase = GLES20.glGetUniformLocation(prog, "uPhase")
+        locRing = GLES20.glGetUniformLocation(prog, "uRing"); locLook = GLES20.glGetUniformLocation(prog, "uLook")
+    }
+
+    override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outputFbo); GLES20.glViewport(0, 0, w, h); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        GLES20.glUseProgram(prog); GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
+        val logS = ln(ctrl("D_SCALE", 3f).coerceAtLeast(1.05f))
+        val arms = ctrl("D_ARMS", 1f).coerceAtLeast(0f)
+        val armsWhole = floor(arms)
+        GLES20.glUniform1i(locTex, 0)
+        GLES20.glUniform1f(locRatio, w.toFloat() / h.toFloat())
+        GLES20.glUniform1f(locMix, ctrl("D_MIX", 0f))
+        GLES20.glUniform1f(locLogS, logS)
+        // A turn of 2*pi must shift t by a multiple of 2 (one mirrored pair) to stay seamless: c = arms * L / pi,
+        // whole arms only; the shader blends towards armsWhole + 1 by the fraction
+        GLES20.glUniform1f(locC, armsWhole * logS / PI.toFloat())
+        GLES20.glUniform1f(locW, arms - armsWhole)
+        GLES20.glUniform1f(locPhase, phaseAccum + ctrl("D_ZOOM", 0f) * 2f)
+        GLES20.glUniform1f(locRing, ctrl("D_RING", 0.5f))
+        GLES20.glUniform2f(locLook, ctrl("D_LOOK_X", 0f), ctrl("D_LOOK_Y", 0f))
+        ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+    }
+    override fun release() { GLES20.glDeleteProgram(prog) }
+}
+
 class TunnelEffect(activity: MainActivity) : ShaderEffect("FX_TUNNEL", "3D TUNNEL", activity) {
     private var prog = 0
     private var scrollAccum = 0.0f
