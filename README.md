@@ -183,7 +183,7 @@ Escher-style spiral: one ring of the image repeats endlessly towards the center,
 |-----------|------------|
 | **Strength** | Blend between the flat image and the spiral (0 = off, no performance cost) |
 | **Scale** | Size ratio between neighbouring rings (1.5x to 12x) |
-| **Spiral** | Number of spiral arms (0 = plain rings) |
+| **Spiral** | Number of spiral arms, 0 to 8 (0 = plain rings); in-between values morph smoothly, so it can be modulated |
 | **Speed** | Endless zoom in (positive) or out (negative) |
 | **Ring Size** | Which ring of the image gets repeated (small = image center, large = outer parts) |
 | **Zoom** | Zoom into the spiral; wraps seamlessly, so a ramp LFO gives an endless zoom |

@@ -186,6 +186,8 @@ Escher-style spiral: one ring of the image repeats endlessly towards the center,
 | **Spiral** | Number of spiral arms (0 = plain rings) |
 | **Speed** | Endless zoom in (positive) or out (negative) |
 | **Ring Size** | Which ring of the image gets repeated (small = image center, large = outer parts) |
+| **Zoom** | Zoom into the spiral; wraps seamlessly, so a ramp LFO gives an endless zoom |
+| **Look X/Y** | Moves the spiral center |
 
 ### Master Transform
 
@@ -348,6 +350,8 @@ All nine factory presets come with mappings, so you can just switch a button on 
 | **Thumb-index, thumb-middle** | A color effect (edge detect, hue, glow, RGB shift, ...) | Rainbow, wave, fog color, tunnel shape |
 | **Mouth** | Another effect (glow, kaleidoscope zoom, hue, wobble, RGB shift) | Fisheye, flux, fog, activity |
 | **Gyro** | Tilting the phone tilts the image | Tilting the phone looks around in the tunnel |
+
+Preset 5 (Droste spiral) differs: head tilt rotates, hand distance zooms into the spiral, tilting the phone moves the spiral center, and the zoom pumps on every 1/4 beat.
 
 If you saved your own presets in earlier versions they stay as they are. Use **Reset Presets** in the Settings to get the new factory presets.
 
