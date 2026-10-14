@@ -27,6 +27,7 @@ Real-time kaleidoscope visual synthesizer for Android, meant for party/event use
 - Presets store/restore all PropertyControl snapshots with animated transitions
 - Sources: Camera (CameraX + Camera2 interop), RTSP (Media3/ExoPlayer), media playlists, generative shaders, feedback loops
 - Recording: `MediaCodec` H.264 encoder → `MediaMuxer`, orientation-aware
+- BPM: `BpmManager` (Utilities.kt) runs a global beat clock `beatPos` ticked per frame; a tap snaps it to the nearest beat. Beat-synced LFOs glide their phase onto it (clamped between standstill and double speed). The beat button toggles `syncEnabled`; `syncBlend` fades synced LFO depth
 - MIDI: BLE MIDI via Android MIDI API (`MidiHelper`)
 - Sensors: Accelerometer + gyroscope (`SensorHelper`). Sensor modulation is off until the gyro button enables it (`setEnabled`, fades via `blend`); values are relative to the orientation at switch-on (`relative(ch)`). Tunnel/Swirl have LOOK X/Y params (`T_LOOK_*`, `S_LOOK_*`) used by the factory presets for gyro look-around
 - Body tracking (MediaPipe tasks-vision, CPU): `VisionPipeline` owns the single CameraX ImageAnalysis next to the camera preview and feeds every enabled `Tracker`. `Tracker` base (Tracker.kt) holds the shared logic: `values[]` 0..1 smoothed per frame in `tick()` (strength in Settings, prefs `HAND_SMOOTH`/`FACE_SMOOTH`), spike filter `accept()` + adaptive smoothing, circular angle channel (`angleTurns`/`angleOffset`), and `blend` that eases modulation in/out on toggle. `HandTracker`: 6 channels (thumb-to-finger index/middle/ring/pinky, hand tilt wrist→middle knuckle, distance from palm size). `FaceTracker`: 3 channels (head roll on the eye line, distance from face width, mouth width). `PropertyControl.handAmount[6]` / `faceAmount[3]` are signed (0 = off, ±1000 = channel takes over the whole range, negative = inverted; angle on WRAP params is a relative offset), applied in `applyTracker()`, eased during preset transitions. Factory presets in `loadFactoryDefault` bake in hand + face mappings. Models (`app/src/main/assets/*.task`, Apache 2.0, from Google's MediaPipe model storage) are committed to the repo so the build needs no downloads (F-Droid builds from source without fetching extra files)
@@ -42,11 +43,11 @@ Real-time kaleidoscope visual synthesizer for Android, meant for party/event use
 | `SourceControls.kt` | 846 | SourcePropertyControl + Camera/RTSP/Media/Shader/Feedback source controls |
 | `MediaPickerDialog.kt` | 460 | Gallery file picker with grid view, folder navigation |
 | `MidiHelper.kt` | 398 | BLE MIDI scan, connect, CC processing, binding config import/export |
-| `HandTracker.kt` | 355 | HandTracker (MediaPipe hand), TrackingOverlayView (phone-only hand/face overlay + bars), button icons |
+| `HandTracker.kt` | 445 | HandTracker (MediaPipe hand), TrackingOverlayView (phone-only hand/face overlay + bars), button icons |
 | `Tracker.kt` | 235 | VisionPipeline (shared camera analysis stream), Tracker base (smoothing, spike filter, blend) |
 | `FaceTracker.kt` | 90 | FaceTracker (MediaPipe face: roll, distance, mouth width) |
 | `ShaderHelper.kt` | 384 | GL shader compile/link utility object + BUILTIN_SHADERS map |
-| `Utilities.kt` | 198 | BpmManager, UndoManager, PlaylistItem, BlendMode/SourceType enums |
+| `Utilities.kt` | 225 | BpmManager (tap tempo, beat clock, sync fade), UndoManager, PlaylistItem, BlendMode/SourceType enums |
 | `VideoRecorder.kt` | 185 | MediaCodec H.264 encoder + AudioRecord → MediaMuxer |
 | `ExternalDisplayHelper.kt` | 110 | Miracast/secondary display via Presentation |
 | `SensorHelper.kt` | 91 | Accelerometer + gyroscope via SensorManager |
