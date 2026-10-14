@@ -679,6 +679,7 @@ class MainActivity : AppCompatActivity() {
         effectChain.effects.add(ColorEffect(this))
         effectChain.effects.add(EdgeEffect(this))
         effectChain.effects.add(KaleidoscopeEffect(this))
+        effectChain.effects.add(DrosteEffect(this))
         effectChain.effects.add(TransformEffect("M", "MASTER TRANSFORM", this))
         effectChain.effects.add(TunnelEffect(this))
         effectChain.effects.add(SwirlEffect(this))
