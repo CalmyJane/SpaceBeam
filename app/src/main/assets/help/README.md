@@ -287,6 +287,10 @@ Each parameter can have its own LFO that oscillates the value automatically:
 
 LFOs can be **BPM-synced** -- turn syncing on and set the BPM in settings or with the Tap Tempo button and LFO speeds will quantize to musical divisions.
 
+All synced LFOs follow one shared beat clock, so they stay in step with each other. Every tap on **Tap BPM** marks a beat: the synced LFOs glide onto it (they speed up or slow down for a moment, they never jump or run backwards). Tap once to just re-align, tap 3+ times to also set the tempo.
+
+The **beat button** (two eighth notes, above the gyro button) switches all synced LFOs on and off. They fade out and back in smoothly instead of snapping. Long-press it to map it to a MIDI control.
+
 ### Gyroscope / Accelerometer
 
 Each parameter can also be modulated by phone motion. Sensor modulation is switched on and off with the **gyro button** (tilted phone icon) on the right side of the screen. Long-press the button to map it to a MIDI control.
@@ -446,7 +450,7 @@ Once connected, MIDI mapping options appear in the Settings menu:
   - in the **clear midi mappings** menu, move any midi control to see what parameters it is mapped to
   - remove single mappings or all
   - press "show all" to display all midi mappings for all parameters (useful for clearing all mappings)
-- Long-press any parameter slider name or button, then move a MIDI control to map it. This also works for the hand, face and gyro buttons
+- Long-press any parameter slider name or button, then move a MIDI control to map it. This also works for the hand, face, gyro and beat buttons
 
 ---
 

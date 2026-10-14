@@ -317,9 +317,10 @@ open class PropertyControl(
 
         if (hasModulation && (smoothedModRate > 1f || smoothedModDepth > 1f || isBeatSynced)) {
             val baseSpeed: Float
-            if (isBeatSynced && currentContext is MainActivity) {
-                val bpm = (currentContext as MainActivity).bpmManager.bpm
-                val targetHz = (bpm / 60f) * beatMultipliers[beatMultiplierIndex]
+            val bpmManager = (currentContext as? MainActivity)?.bpmManager
+            val synced = isBeatSynced && bpmManager != null
+            if (synced) {
+                val targetHz = (bpmManager!!.bpm / 60f) * beatMultipliers[beatMultiplierIndex]
                 smoothedFrequency += (targetHz - smoothedFrequency) * baseLerp
                 baseSpeed = smoothedFrequency
             } else {
@@ -327,7 +328,19 @@ open class PropertyControl(
                 smoothedFrequency = baseSpeed
             }
 
-            lfoPhase += baseSpeed * deltaTime * 2.0 * Math.PI
+            val phaseStep = baseSpeed * deltaTime * 2.0 * Math.PI
+            lfoPhase += phaseStep
+
+            if (synced) {
+                // Lock to the global beat clock: glide towards its phase, between standstill and double speed,
+                // so a tap (or switching sync on) re-aligns the wave without a jump
+                val target = 2.0 * Math.PI * ((bpmManager!!.beatPos * beatMultipliers[beatMultiplierIndex]) % 1.0)
+                var diff = (target - lfoPhase) % (2.0 * Math.PI)
+                if (diff > Math.PI) diff -= 2.0 * Math.PI
+                if (diff < -Math.PI) diff += 2.0 * Math.PI
+                lfoPhase += (diff * min(1.0, deltaTime / 0.3)).coerceIn(-phaseStep, phaseStep)
+                if (lfoPhase < 0.0) lfoPhase += 2.0 * Math.PI
+            }
 
             while (lfoPhase >= 2.0 * Math.PI) {
                 lfoPhase -= 2.0 * Math.PI
@@ -364,7 +377,9 @@ open class PropertyControl(
                 rawWave = oldWave + (rawWave - oldWave) * fadeEased
             }
 
-            val depthNorm = (smoothedModDepth / 1000f).toDouble().pow(2.0).toFloat()
+            // Beat button: synced LFOs fade in/out (a RAMP on a wrapping param slows to a stop instead)
+            val syncFade = if (synced) bpmManager!!.syncBlend else 1f
+            val depthNorm = (smoothedModDepth / 1000f).toDouble().pow(2.0).toFloat() * syncFade
 
             if (modMode == ModMode.WRAP) {
                 if (modShape == WaveShape.RAMP && oldModShape == null && rampAccumTarget == null) {

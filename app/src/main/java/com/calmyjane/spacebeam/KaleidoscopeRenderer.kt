@@ -767,6 +767,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
         ctx.handTracker.tick(deltaTime)
         ctx.faceTracker.tick(deltaTime)
         ctx.sensorHelper.tick(deltaTime)
+        ctx.bpmManager.tick(deltaTime)
         ctx.controls.forEach { it.update(deltaTime) }
         ctx.effectChain.effects.forEach { if(it.active) it.update(deltaTime) }
 

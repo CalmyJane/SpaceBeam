@@ -202,6 +202,7 @@ class MainActivity : AppCompatActivity() {
     private var handBtn: ImageButton? = null
     private var faceBtn: ImageButton? = null
     private var gyroBtn: ImageButton? = null
+    private var beatBtn: ImageButton? = null
     private var trackingOverlay: TrackingOverlayView? = null
     // A 180° turn (landscape <-> reverse landscape) triggers no onConfigurationChanged, only a display change:
     // without this the tracking image would stay upside down
@@ -540,6 +541,7 @@ class MainActivity : AppCompatActivity() {
                 "CMD_HAND" -> setTracking(handTracker, !handTracker.enabled)
                 "CMD_FACE" -> setTracking(faceTracker, !faceTracker.enabled)
                 "CMD_GYRO" -> setSensorModulation(!sensorHelper.enabled)
+                "CMD_BEAT" -> setBeatSync(!bpmManager.syncEnabled)
                 "CMD_FLIP_X" -> {
                     renderer.flipX = if (renderer.flipX == 1f) -1f else 1f
                     updateSidebarVisuals()
@@ -830,10 +832,17 @@ class MainActivity : AppCompatActivity() {
         updateTrackingButtons()
     }
 
+    /** Beat button: beat-synced LFOs on/off, faded by [BpmManager.syncBlend]. */
+    fun setBeatSync(on: Boolean) {
+        bpmManager.syncEnabled = on
+        updateTrackingButtons()
+    }
+
     private fun updateTrackingButtons() {
         handBtn?.alpha = if (handTracker.enabled) 1.0f else 0.45f
         faceBtn?.alpha = if (faceTracker.enabled) 1.0f else 0.45f
         gyroBtn?.alpha = if (sensorHelper.enabled) 1.0f else 0.45f
+        beatBtn?.alpha = if (bpmManager.syncEnabled) 1.0f else 0.45f
         trackingOverlay?.invalidate()
     }
 
@@ -1135,6 +1144,24 @@ class MainActivity : AppCompatActivity() {
                 } else false
             }
         }
+        beatBtn = ImageButton(this).apply {
+            setImageDrawable(BeatIconDrawable())
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(28, 28, 28, 28)
+            setBackgroundColor(Color.TRANSPARENT)
+            layoutParams = FrameLayout.LayoutParams(130, 130).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                bottomMargin = 630
+                rightMargin = 35
+            }
+            setOnClickListener { setBeatSync(!bpmManager.syncEnabled) }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_BEAT", "TOGGLE BEAT-SYNCED LFOS")
+                    true
+                } else false
+            }
+        }
         // Phone-only overlay: lives in the HUD, never in the GL output that goes to projector/recording
         trackingOverlay = TrackingOverlayView(this, this, handTracker, faceTracker, sensorHelper).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
         val overlay = trackingOverlay!!
@@ -1177,6 +1204,7 @@ class MainActivity : AppCompatActivity() {
         overlayHUD.addView(handBtn)
         overlayHUD.addView(faceBtn)
         overlayHUD.addView(gyroBtn)
+        overlayHUD.addView(beatBtn)
         updateTrackingButtons()
 
         updateSidebarVisuals()
@@ -3611,7 +3639,7 @@ class MainActivity : AppCompatActivity() {
         val getCircleBg = { alpha: Int -> getBg(alpha).apply { shape = GradientDrawable.OVAL } }
 
         val panels = listOf(controlBox, presetPanel)
-        val utils = listOfNotNull(menuBtn, settingsBtn, handBtn, faceBtn, gyroBtn)
+        val utils = listOfNotNull(menuBtn, settingsBtn, handBtn, faceBtn, gyroBtn, beatBtn)
 
         // Reset clip
         panels.forEach { it.clipToOutline = true }

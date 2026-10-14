@@ -390,6 +390,38 @@ class GyroIconDrawable : Drawable() {
     override fun getIntrinsicHeight(): Int = 90
 }
 
+/** Button icon: two beamed eighth notes (beat-synced LFOs). */
+class BeatIconDrawable : Drawable() {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeCap = Paint.Cap.ROUND }
+    private val oval = RectF()
+
+    override fun draw(canvas: Canvas) {
+        val w = bounds.width().toFloat(); val h = bounds.height().toFloat()
+        val ox = bounds.left.toFloat(); val oy = bounds.top.toFloat()
+        // Note heads: tilted ovals
+        paint.style = Paint.Style.FILL
+        for (x in floatArrayOf(0.30f, 0.66f)) {
+            canvas.save()
+            canvas.rotate(-20f, ox + w * x, oy + h * 0.74f)
+            oval.set(ox + w * (x - 0.12f), oy + h * 0.66f, ox + w * (x + 0.12f), oy + h * 0.82f)
+            canvas.drawOval(oval, paint)
+            canvas.restore()
+        }
+        // Stems and the beam joining them
+        paint.style = Paint.Style.STROKE; paint.strokeWidth = w * 0.06f
+        canvas.drawLine(ox + w * 0.40f, oy + h * 0.72f, ox + w * 0.40f, oy + h * 0.22f, paint)
+        canvas.drawLine(ox + w * 0.76f, oy + h * 0.72f, ox + w * 0.76f, oy + h * 0.16f, paint)
+        paint.strokeWidth = w * 0.11f
+        canvas.drawLine(ox + w * 0.40f, oy + h * 0.24f, ox + w * 0.76f, oy + h * 0.18f, paint)
+    }
+
+    override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+    override fun setColorFilter(colorFilter: ColorFilter?) { paint.colorFilter = colorFilter }
+    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+    override fun getIntrinsicWidth(): Int = 90
+    override fun getIntrinsicHeight(): Int = 90
+}
+
 /** Button icon: face outline with eyes and mouth. */
 class FaceIconDrawable : Drawable() {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeCap = Paint.Cap.ROUND }

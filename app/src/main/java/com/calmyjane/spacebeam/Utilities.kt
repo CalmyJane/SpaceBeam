@@ -22,7 +22,36 @@ class BpmManager {
     private val tapTimes = mutableListOf<Long>()
     private val MAX_TAPS = 8
 
+    /** Global beat clock in beats (GL thread). Beat-synced LFOs glide towards its phase; a tap puts a beat on the tap. */
+    var beatPos = 0.0; private set
+    @Volatile private var pendingTapNanos = 0L
+
+    // Beat-synced LFO switch (beat button). On by default; fades synced LFO depth in/out via [syncBlend].
+    @Volatile var syncEnabled = true
+    @Volatile var syncBlend = 1f; private set
+    private var syncBlendLinear = 1f
+
+    /** Called once per rendered frame on the GL thread. */
+    fun tick(deltaTime: Float) {
+        val bps = bpm / 60.0
+        beatPos += bps * deltaTime
+        val tapNanos = pendingTapNanos
+        if (tapNanos != 0L) {
+            pendingTapNanos = 0L
+            // The tap was a beat: snap the beat position at tap time to the nearest whole beat
+            val since = ((System.nanoTime() - tapNanos) / 1e9).coerceIn(0.0, 1.0) * bps
+            beatPos = Math.round(beatPos - since) + since
+        }
+        if (beatPos > 1e6) beatPos -= 1e6  // keep precision; 1e6 is divisible by every sync multiplier's period
+
+        val goal = if (syncEnabled) 1f else 0f
+        val step = deltaTime / 0.8f
+        syncBlendLinear = if (syncBlendLinear < goal) minOf(goal, syncBlendLinear + step) else maxOf(goal, syncBlendLinear - step)
+        syncBlend = syncBlendLinear * syncBlendLinear * (3f - 2f * syncBlendLinear)
+    }
+
     fun tap() {
+        pendingTapNanos = System.nanoTime()
         val now = System.currentTimeMillis()
 
         if (tapTimes.isNotEmpty() && now - tapTimes.last() > 2500) {
