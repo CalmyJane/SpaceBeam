@@ -341,7 +341,7 @@ Map them in the **FACE** section of a parameter's details menu. Hand and face tr
 
 All nine factory presets come with mappings, so you can just switch a button on and play:
 
-| Input | Presets 1-5 (kaleidoscope) | Presets 6-9 (tunnel / swirl) |
+| Input | Presets 1-5 (kaleidoscope, 5 = Droste spiral) | Presets 6-9 (tunnel / swirl) |
 |---|---|---|
 | **Hand angle / head rotation** | Rotates the image | Rotates the image, twists or bends the tunnel; in presets 7-9 the hand angle rolls the view inside the tunnel |
 | **Hand / head distance** | Zooms | Flight speed: close = fly in, middle = hover, far = fly back out |

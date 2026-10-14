@@ -113,14 +113,14 @@ Each source has these settings:
 SpaceBeam processes visuals through a chain of effects in this order:
 
 ```
-Sources --> Mixer --> Camera Transform --> Color --> Edge Detect --> Kaleidoscope --> Master Transform --> 3D Tunnel --> Swirl --> Screen
+Sources --> Mixer --> Camera Transform --> Color --> Edge Detect --> Kaleidoscope --> Droste --> Master Transform --> 3D Tunnel --> Swirl --> Screen
 ```
 
 Every Effect has multiple sliders for effect parameters.
 
 Some Effects have an **Amount** slider to completely disable them or slowly fade them in.
 
-Effects that currently change nothing (Edge Detect at Amount 0, Color at its default values, 3D Tunnel and Swirl at Strength 0) are skipped automatically and cost no performance. So if you never use the tunnels, just leave their Strength at 0.
+Effects that currently change nothing (Edge Detect at Amount 0, Color at its default values, Droste, 3D Tunnel and Swirl at Strength 0) are skipped automatically and cost no performance. So if you never use the tunnels, just leave their Strength at 0.
 
 
 ### Mixer
@@ -174,6 +174,18 @@ The core effect:
 | **Axis** | Number of symmetry axes (1-25). Even numbers = symmetric, odd = asymmetric. Has a **lock icon** -- when locked, preset changes won't override the axis count by default to avoid "jumps" |
 | **Amount** | Blend between original and kaleidoscope effect                                                                                                                                          |
 | **K-Zoom** | Zoom within the kaleidoscope pattern                                                                                                                                                    |
+
+### Droste
+
+Escher-style spiral: one ring of the image repeats endlessly towards the center, each ring smaller than the last. Neighbouring rings are mirrored, so any image tiles without visible seams. Rotating or zooming with the Master Transform afterwards looks like an endless zoom.
+
+| Parameter | Description |
+|-----------|------------|
+| **Strength** | Blend between the flat image and the spiral (0 = off, no performance cost) |
+| **Scale** | Size ratio between neighbouring rings (1.5x to 12x) |
+| **Spiral** | Number of spiral arms (0 = plain rings) |
+| **Speed** | Endless zoom in (positive) or out (negative) |
+| **Ring Size** | Which ring of the image gets repeated (small = image center, large = outer parts) |
 
 ### Master Transform
 
@@ -329,7 +341,7 @@ Map them in the **FACE** section of a parameter's details menu. Hand and face tr
 
 All nine factory presets come with mappings, so you can just switch a button on and play:
 
-| Input | Presets 1-5 (kaleidoscope) | Presets 6-9 (tunnel / swirl) |
+| Input | Presets 1-5 (kaleidoscope, 5 = Droste spiral) | Presets 6-9 (tunnel / swirl) |
 |---|---|---|
 | **Hand angle / head rotation** | Rotates the image | Rotates the image, twists or bends the tunnel; in presets 7-9 the hand angle rolls the view inside the tunnel |
 | **Hand / head distance** | Zooms | Flight speed: close = fly in, middle = hover, far = fly back out |
