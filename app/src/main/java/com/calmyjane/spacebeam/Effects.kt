@@ -792,7 +792,7 @@ class DrosteEffect(activity: MainActivity) : ShaderEffect("FX_DROSTE", "DROSTE",
     private var prog = 0
     private var phaseAccum = 0.0f
     private var locTex = -1; private var locRatio = -1; private var locMix = -1
-    private var locLogS = -1; private var locC = -1; private var locPhase = -1; private var locRing = -1
+    private var locLogS = -1; private var locC = -1; private var locPhase = -1; private var locRing = -1; private var locLook = -1
 
     init {
         addControl(PropertyControl("D_MIX", "STRENGTH", defaultValue = 0, outMin = 0f, outMax = 1f, hasModulation = true))
@@ -803,6 +803,11 @@ class DrosteEffect(activity: MainActivity) : ShaderEffect("FX_DROSTE", "DROSTE",
         addControl(PropertyControl("D_SPEED", "SPEED", defaultValue = 500, outMin = -2f, outMax = 2f, hasModulation = true))
         // Radius of the repeated ring in the source image (0.5 = half the screen height)
         addControl(PropertyControl("D_RING", "RING SIZE", defaultValue = 444, outMin = 0.1f, outMax = 1f, hasModulation = true))
+        // Zoom offset into the spiral; one full turn of the slider = one mirrored ring pair, so it wraps seamlessly
+        addControl(PropertyControl("D_ZOOM", "ZOOM", defaultValue = 0, outMin = 0f, outMax = 1f, hasModulation = true, modMode = PropertyControl.ModMode.WRAP))
+        // Look around: moves the spiral center
+        addControl(PropertyControl("D_LOOK_X", "LOOK X", defaultValue = 500, outMin = -0.6f, outMax = 0.6f, hasModulation = true))
+        addControl(PropertyControl("D_LOOK_Y", "LOOK Y", defaultValue = 500, outMin = -0.6f, outMax = 0.6f, hasModulation = true))
     }
 
     override val needsMipmaps = true
@@ -823,6 +828,7 @@ class DrosteEffect(activity: MainActivity) : ShaderEffect("FX_DROSTE", "DROSTE",
         val fSrc = """
         precision highp float; varying vec2 v; uniform sampler2D uTex;
         uniform float uMix, uLogS, uC, uPhase, uRing, uRatio;
+        uniform vec2 uLook;
 
         // Mirror wrap that is the identity on 0..1
         vec2 mirrorUV(vec2 x) { return abs(mod(x + 1.0, 2.0) - 1.0); }
@@ -830,6 +836,7 @@ class DrosteEffect(activity: MainActivity) : ShaderEffect("FX_DROSTE", "DROSTE",
         void main() {
             vec2 p = v - 0.5;
             p.x *= uRatio;
+            p -= uLook; // look around: move the spiral center (the repeated ring stays centered in the source)
             float len = length(p);
             if (len < 1e-5) p = vec2(1e-5, 0.0);
 
@@ -852,7 +859,7 @@ class DrosteEffect(activity: MainActivity) : ShaderEffect("FX_DROSTE", "DROSTE",
         locTex = GLES20.glGetUniformLocation(prog, "uTex"); locRatio = GLES20.glGetUniformLocation(prog, "uRatio")
         locMix = GLES20.glGetUniformLocation(prog, "uMix"); locLogS = GLES20.glGetUniformLocation(prog, "uLogS")
         locC = GLES20.glGetUniformLocation(prog, "uC"); locPhase = GLES20.glGetUniformLocation(prog, "uPhase")
-        locRing = GLES20.glGetUniformLocation(prog, "uRing")
+        locRing = GLES20.glGetUniformLocation(prog, "uRing"); locLook = GLES20.glGetUniformLocation(prog, "uLook")
     }
 
     override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
@@ -866,8 +873,9 @@ class DrosteEffect(activity: MainActivity) : ShaderEffect("FX_DROSTE", "DROSTE",
         GLES20.glUniform1f(locLogS, logS)
         // A turn of 2*pi must shift t by a multiple of 2 (one mirrored pair) to stay seamless: c = arms * L / pi
         GLES20.glUniform1f(locC, arms * logS / PI.toFloat())
-        GLES20.glUniform1f(locPhase, phaseAccum)
+        GLES20.glUniform1f(locPhase, phaseAccum + ctrl("D_ZOOM", 0f) * 2f)
         GLES20.glUniform1f(locRing, ctrl("D_RING", 0.5f))
+        GLES20.glUniform2f(locLook, ctrl("D_LOOK_X", 0f), ctrl("D_LOOK_Y", 0f))
         ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
     }
     override fun release() { GLES20.glDeleteProgram(prog) }

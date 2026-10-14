@@ -4026,7 +4026,7 @@ class MainActivity : AppCompatActivity() {
             2 -> pFunc(2, base + arrayOf("M_TX", 725, "M_TY", 628, "M_ANGLE", 0, 122, 758, "M_ZOOM", 345, 400, 478, "WOBBLE_SINE"))
             3 -> pFunc(2, base + arrayOf("M_ANGLE", 0, 169, 1000, "RAMP", "M_ZOOM", 366, "M_TX", 500, 480, 378, "M_TY", 546, 340, 698, "M_TILTX", 500, 268, 788, "M_TILTY", 500, 241, 732, "M_RGB", 0, 200, 1000, "WOBBLE_SINE"))
             4 -> pFunc(2, base + arrayOf("M_ANGLE", 172, 262, 287, "M_ZOOM", 161, 531, 316, "M_TX", 500, 235, 184, "M_TY", 500, 217, 218, "M_TILTX", 500, 242, 305, "M_TILTY", 500, 318, 343, "C_ZOOM", 1000, 583, 365, "HUE", 184, 298, 505, "RAMP", "GLOW", 172, "CONTRAST", 718, "VIBRANCE", 899))
-            5 -> pFunc(2, base + arrayOf("K_AMT", 0, "D_MIX", 1000, "D_SCALE", 213, "D_ARMS", 6, "D_SPEED", 659, "D_RING", 1000, "M_ANGLE", 0, 200, 1000, "RAMP"))
+            5 -> pFunc(2, base + arrayOf("K_AMT", 0, "D_MIX", 1000, "D_SCALE", 213, "D_ARMS", 6, "D_SPEED", 659, "D_RING", 1000, "M_ANGLE", 0, 200, 1000, "RAMP", "M_ZOOM", 700, 200, 450, "SINE"))
             6 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_FOV", 675, 553, 453, "WOBBLE_SINE", "S_SPEED", 775, "T_FOG", 13, "M_ANGLE", 172, 262, 287, "M_ZOOM", 597, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 345, "RANDOM_SMOOTH", "C_ZOOM", 1000, 583, 365, "TWIST", 465, 351, 842, "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
             7 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_SPEED", 206, "S_FOV", 481, "T_WAVE_STR", 454, "T_WAVE_POS", 20, 375, 1000, "RAMP", "M_ANGLE", 870, "M_ZOOM", 168, "M_TX", 500, 320, 328, "M_TY", 500, 323, 343, "CURVE", 332, 200, 718, "WOBBLE_SINE", "FLUX", 0, 389, 358, "WOBBLE_SINE", "GLOW", 178, "CONTRAST", 522, "VIBRANCE", 853))
             8 -> pFunc(2, base + arrayOf("3D_MIX", 1000, "S_SHAPE", 1000, 343, 785, "S_FOV", 481, 496, 704, "S_SPEED", 1000, "T_FOG", 12, "T_FOG_H", 0, 200, 1000, "RAMP", "T_FOG_S", 1000, "M_ANGLE", 172, 262, 287, "M_ZOOM", 349, "M_TX", 500, 431, 40, "M_TY", 500, 217, 34, "M_TILTX", 500, 498, 303, "M_TILTY", 500, 318, 469, "C_ZOOM", 1000, 583, 365, "GLOW", 285, "CONTRAST", 786, "VIBRANCE", 828))
@@ -4043,7 +4043,7 @@ class MainActivity : AppCompatActivity() {
             2 -> listOf(Triple("M_ANGLE", A, 1000), Triple("M_ZOOM", D, 900), Triple("HUE", I, 1000), Triple("M_RGB", M, 600))
             3 -> listOf(Triple("M_ANGLE", A, 1000), Triple("M_ZOOM", D, -1000), Triple("M_RGB", I, 800), Triple("K_ZOOM", M, 600))
             4 -> listOf(Triple("M_ANGLE", A, 1000), Triple("M_ZOOM", D, 1000), Triple("GLOW", I, 800), Triple("E_AMT", M, 1000))
-            5 -> listOf(Triple("M_ANGLE", A, 1000), Triple("M_ZOOM", D, -900), Triple("E_AMT", I, 1000))
+            5 -> listOf(Triple("D_ZOOM", D, 1000), Triple("E_AMT", I, 1000))
             6 -> listOf(Triple("S_SPEED", D, -1000), Triple("TWIST", A, 1000), Triple("T_HUE_STR", I, 1000))
             7 -> listOf(Triple("S_SPEED", D, -1000), Triple("T_ROLL", A, 1000), Triple("T_WAVE_STR", I, 1000))
             8 -> listOf(Triple("S_SPEED", D, -1000), Triple("T_ROLL", A, 1000), Triple("T_FOG_H", I, 1000), Triple("S_SHAPE", M, 1000))
@@ -4056,7 +4056,7 @@ class MainActivity : AppCompatActivity() {
             2 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("M_ZOOM", FaceTracker.DIST, 900), Triple("K_ZOOM", FaceTracker.MOUTH, 700))
             3 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("M_ZOOM", FaceTracker.DIST, -1000), Triple("HUE", FaceTracker.MOUTH, 1000))
             4 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("M_ZOOM", FaceTracker.DIST, 1000), Triple("M_WOBBLE", FaceTracker.MOUTH, 800))
-            5 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("M_ZOOM", FaceTracker.DIST, -900), Triple("GLOW", FaceTracker.MOUTH, 900))
+            5 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("GLOW", FaceTracker.MOUTH, 900))
             6 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("S_SPEED", FaceTracker.DIST, -1000), Triple("S_FOV", FaceTracker.MOUTH, 800))
             7 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("S_SPEED", FaceTracker.DIST, -1000), Triple("FLUX", FaceTracker.MOUTH, 900))
             8 -> listOf(Triple("M_ANGLE", FaceTracker.ROT, 1000), Triple("S_SPEED", FaceTracker.DIST, -1000), Triple("T_FOG", FaceTracker.MOUTH, 600))
@@ -4068,13 +4068,23 @@ class MainActivity : AppCompatActivity() {
         // Flat presets: tilting the phone tilts the image, a push toward the screen punches the zoom.
         // Tunnel/Swirl presets: tilting the phone looks around inside the tunnel.
         val sensors: List<Triple<String, Int, Int>> = when (idx) {
-            1, 2, 3, 4, 5 -> listOf(Triple("M_TILTX", 1, 900), Triple("M_TILTY", 0, 900), Triple("M_ZOOM", 5, 720))
+            1, 2, 3, 4 -> listOf(Triple("M_TILTX", 1, 900), Triple("M_TILTY", 0, 900), Triple("M_ZOOM", 5, 720))
+            5 -> listOf(Triple("D_LOOK_X", 1, 950), Triple("D_LOOK_Y", 0, 950))
             6, 7, 8 -> listOf(Triple("T_LOOK_X", 1, 950), Triple("T_LOOK_Y", 0, 950), Triple("S_FOV", 5, 700))
             9 -> listOf(Triple("S_LOOK_X", 1, 950), Triple("S_LOOK_Y", 0, 950))
             else -> emptyList()
         }
+        // Beat-synced LFOs: control id, beat multiplier index (0 = 8 beats ... 5 = 1/4 beat)
+        val beatSync: List<Pair<String, Int>> = when (idx) {
+            5 -> listOf("M_ZOOM" to 5)  // zoom pumps on every 1/4 beat
+            else -> emptyList()
+        }
         val preset = presets[idx] ?: return
         val snaps = preset.controlSnapshots.toMutableMap()
+        for ((id, syncIdx) in beatSync) {
+            val s = snaps[id] ?: continue
+            snaps[id] = s.copy(isSynced = true, syncIndex = syncIdx)
+        }
         for ((id, ch, value) in sensors) {
             val s = snaps[id] ?: continue
             snaps[id] = when (ch) {
