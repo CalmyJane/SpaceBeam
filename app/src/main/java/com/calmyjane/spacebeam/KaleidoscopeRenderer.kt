@@ -601,7 +601,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
 
         val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
 
-        // UV math in these source shaders must be highp: mediump (fp16 on Mali) snaps UVs to ~1 texel
+        // UV math in these source shaders must be highp: mediump (fp16 on Adreno/Mali) snaps UVs to ~1 texel
         // at 1920 px, so zoomed-in video looks blocky instead of smoothly filtered
         val fSrcCopyOes = """#extension GL_OES_EGL_image_external : require
         precision highp float; varying vec2 v;
