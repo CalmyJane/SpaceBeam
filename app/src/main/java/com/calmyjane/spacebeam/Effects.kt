@@ -534,7 +534,7 @@ class MixerEffect(val activity: MainActivity) : ShaderEffect("FX_MIXER", "MIXER"
     private val locMode = IntArray(8)
     override fun init() {
         val fSrc = """
-        precision mediump float; varying vec2 v;
+        precision highp float; varying vec2 v;
         uniform sampler2D uTex[8]; uniform float uMix[8]; uniform int uMode[8]; uniform int uCount;
         vec3 blendOp(vec3 a, vec3 b, int mode) {
             if (mode == 1) return vec3(1.0) - (vec3(1.0) - a) * (vec3(1.0) - b);
@@ -1345,7 +1345,7 @@ class EdgeEffect(activity: MainActivity) : ShaderEffect("FX_EDGE", "EDGE DETECT"
 
     override fun init() {
         val fSrc = """
-        precision mediump float; varying vec2 v; uniform sampler2D uTex;
+        precision highp float; varying vec2 v; uniform sampler2D uTex;
         uniform float uAmt, uThresh, uHue, uSat, uBrit;
         uniform vec2 uRes;
 
