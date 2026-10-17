@@ -601,8 +601,10 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
 
         val vSrc = "attribute vec4 p; attribute vec2 t; varying vec2 v; void main() { gl_Position = p; v = t; }"
 
+        // UV math in these source shaders must be highp: mediump (fp16 on Adreno/Mali) snaps UVs to ~1 texel
+        // at 1920 px, so zoomed-in video looks blocky instead of smoothly filtered
         val fSrcCopyOes = """#extension GL_OES_EGL_image_external : require
-        precision mediump float; varying vec2 v; 
+        precision highp float; varying vec2 v;
         uniform samplerExternalOES uTex; 
         uniform vec2 uScale; 
         uniform float uRotation;
@@ -631,7 +633,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
         locOesST = GLES20.glGetUniformLocation(copyOesProgram, "uSTMatrix")
 
         val fSrcCopy2d = """
-        precision mediump float; varying vec2 v; 
+        precision highp float; varying vec2 v;
         uniform sampler2D uTex; 
         uniform vec2 uScale; 
         uniform float uRotation;
@@ -663,7 +665,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
 
         // Per-source transform shader (zoom, rotate, move with mirror repeat)
         val fSrcTr = """
-        precision mediump float; varying vec2 v;
+        precision highp float; varying vec2 v;
         uniform sampler2D uTex; uniform float uZoom, uAngle; uniform vec2 uMove; uniform float uRatio;
         uniform int uWrap;
         void main() {
