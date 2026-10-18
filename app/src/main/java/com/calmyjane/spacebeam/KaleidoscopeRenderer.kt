@@ -20,6 +20,9 @@ import androidx.camera.core.SurfaceRequest
 import androidx.core.content.ContextCompat
 import kotlin.math.*
 
+/** Longest frame step (s) fed to animation; longer gaps (hitch, resume) are treated as this. */
+private const val MAX_FRAME_DELTA = 0.1f
+
 class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
     private var fpsFrameCount = 0
     private var fpsLastCalcTime = System.currentTimeMillis()
@@ -739,7 +742,9 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
         sources.forEach { if (!it.isReady) it.init() }
 
         val now = System.nanoTime()
-        deltaTime = (now - lastTime) / 1e9f
+        val realDelta = (now - lastTime) / 1e9f
+        // Clamp so a hitch or resume doesn't jump LFOs, transitions and playlists in one frame
+        deltaTime = realDelta.coerceIn(0f, MAX_FRAME_DELTA)
         globalTime += deltaTime
         lastTime = now
 
@@ -769,7 +774,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
         ctx.handTracker.tick(deltaTime)
         ctx.faceTracker.tick(deltaTime)
         ctx.sensorHelper.tick(deltaTime)
-        ctx.bpmManager.tick(deltaTime)
+        ctx.bpmManager.tick(realDelta) // beat clock must keep real time to stay on the music
         ctx.controls.forEach { it.update(deltaTime) }
         ctx.effectChain.effects.forEach { if(it.active) it.update(deltaTime) }
 
