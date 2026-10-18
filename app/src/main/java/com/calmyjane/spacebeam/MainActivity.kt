@@ -902,6 +902,13 @@ class MainActivity : AppCompatActivity() {
         restoreScreenTimeout()
     }
 
+    override fun onStop() {
+        super.onStop()
+        // Surface is gone, no more frames: finalize now so the MP4 stays playable even if the process gets killed.
+        // (Not in onPause: pulling down the notification shade would cut a concert recording.)
+        if (isRecording) stopRecordingAndSave()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
@@ -3703,7 +3710,11 @@ class MainActivity : AppCompatActivity() {
         if (!isRecording) {
             val fileName = "SB_${System.currentTimeMillis()}.mp4"
             val tempFile = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), fileName)
-            renderer.startRecording(tempFile); isRecording = true; recordingSeconds = 0; recordBtn.alpha = 1.0f
+            renderer.startRecording(tempFile) {
+                resetRecordUi()
+                Toast.makeText(this, "Recording failed to start", Toast.LENGTH_LONG).show()
+            }
+            isRecording = true; recordingSeconds = 0; recordBtn.alpha = 1.0f
             recordTicker = object : Runnable {
                 override fun run() {
                     recordingSeconds++; val h = recordingSeconds / 3600; val m = (recordingSeconds % 3600) / 60; val s = recordingSeconds % 60
@@ -3712,30 +3723,49 @@ class MainActivity : AppCompatActivity() {
                 }
             }; handler.post(recordTicker!!)
         } else {
-            renderer.stopRecording { savedFile ->
-                isRecording = false; recordTicker?.let { handler.removeCallbacks(it) }
-                runOnUiThread {
-                    recordBtn.setImageDrawable(ContextCompat.getDrawable(this, android.R.drawable.presence_video_online)); recordBtn.alpha = 0.5f; if (savedFile != null && savedFile.exists()) saveVideoToGallery(savedFile)
-                }
-            }
+            stopRecordingAndSave()
         }
     }
 
-    private fun saveVideoToGallery(file: File) {
-        if (file.length() == 0L) return
-        val values = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, file.name); put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) { put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SpaceBeam"); put(MediaStore.Video.Media.IS_PENDING, 1) }
+    private fun stopRecordingAndSave() {
+        resetRecordUi()
+        renderer.stopRecording { savedFile ->
+            runOnUiThread { if (savedFile != null && savedFile.exists()) saveVideoToGallery(savedFile) }
         }
-        try {
-            val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-            uri?.let {
-                contentResolver.openOutputStream(it)?.use { out -> file.inputStream().use { it.copyTo(out) } }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) { values.clear(); values.put(MediaStore.Video.Media.IS_PENDING, 0); contentResolver.update(it, values, null, null) }
-                MediaScannerConnection.scanFile(this, arrayOf(file.absolutePath), arrayOf("video/mp4"), null)
-                file.delete(); Toast.makeText(this, "Video Saved", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun resetRecordUi() {
+        isRecording = false; recordTicker?.let { handler.removeCallbacks(it) }
+        recordBtn.setImageDrawable(ContextCompat.getDrawable(this, android.R.drawable.presence_video_online)); recordBtn.alpha = 0.5f
+    }
+
+    /** Copies the finished MP4 into MediaStore on a background thread (GBs for long sets would freeze the UI). */
+    private fun saveVideoToGallery(file: File) {
+        if (file.length() == 0L) { file.delete(); return }
+        val app = applicationContext
+        val resolver = app.contentResolver
+        Toast.makeText(this, "Saving video...", Toast.LENGTH_SHORT).show()
+        Thread {
+            val values = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, file.name); put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/SpaceBeam"); put(MediaStore.Video.Media.IS_PENDING, 1)
             }
-        } catch (e: Exception) {}
+            var uri: android.net.Uri? = null
+            val ok = try {
+                uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: throw java.io.IOException("MediaStore insert failed")
+                resolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } } ?: throw java.io.IOException("No output stream")
+                values.clear(); values.put(MediaStore.Video.Media.IS_PENDING, 0); resolver.update(uri, values, null, null)
+                file.delete()
+                true
+            } catch (e: Exception) {
+                Log.e("SpaceBeam", "Saving video failed", e)
+                // Drop the half-written gallery entry; keep the recording in the app folder so nothing is lost
+                uri?.let { try { resolver.delete(it, null, null) } catch (_: Exception) {} }
+                false
+            }
+            val msg = if (ok) "Video Saved" else "Saving failed, kept in ${file.absolutePath}"
+            handler.post { Toast.makeText(app, msg, Toast.LENGTH_LONG).show() }
+        }.start()
     }
 
     public fun globalReset() {
