@@ -27,7 +27,7 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
     private var audioRecord: AudioRecord? = null
     private var audioTrackIndex = -1
     private var audioThread: Thread? = null
-    private var isRecording = true
+    @Volatile private var isRecording = true // read by the audio thread
 
     private val sampleRate = 44100
     private val channelCount = 1
@@ -49,9 +49,14 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
         }
 
         videoEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        videoEncoder.configure(vFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        inputSurface = videoEncoder.createInputSurface()
-        videoEncoder.start()
+        try {
+            videoEncoder.configure(vFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            inputSurface = videoEncoder.createInputSurface()
+            videoEncoder.start()
+        } catch (e: Exception) {
+            videoEncoder.release(); muxer.release()
+            throw e
+        }
 
         setupAudio()
     }
@@ -180,19 +185,26 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
         }
     }
 
-    fun release() {
+    /** Stops the audio thread and frees everything; each step on its own so one failure can't keep the mic open.
+     *  Returns true if the MP4 was finalized (playable). */
+    fun release(): Boolean {
         isRecording = false
-        try { audioThread?.join(500) } catch (e: Exception) {}
-        try {
-            if (muxerStarted) muxer.stop()
-            muxer.release()
-            videoEncoder.stop()
-            videoEncoder.release()
-            inputSurface.release()
-            audioEncoder?.stop()
-            audioEncoder?.release()
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (e: Exception) { Log.w("SpaceBeam", "VideoRecorder release error", e) }
+        step("audioRecord.stop") { audioRecord?.stop() } // also unblocks a pending read()
+        try { audioThread?.join(1000) } catch (e: Exception) {}
+        var finalized = false
+        // Under the muxer lock: if join() timed out the audio thread may still be writing samples
+        step("muxer.stop") { synchronized(this) { if (muxerStarted) { muxerStarted = false; muxer.stop(); finalized = true } } }
+        step("muxer.release") { muxer.release() }
+        step("videoEncoder.stop") { videoEncoder.stop() }
+        step("videoEncoder.release") { videoEncoder.release() }
+        step("inputSurface.release") { inputSurface.release() }
+        step("audioEncoder.stop") { audioEncoder?.stop() }
+        step("audioEncoder.release") { audioEncoder?.release() }
+        step("audioRecord.release") { audioRecord?.release() }
+        return finalized
+    }
+
+    private inline fun step(what: String, block: () -> Unit) {
+        try { block() } catch (e: Exception) { Log.w("SpaceBeam", "VideoRecorder $what failed", e) }
     }
 }
