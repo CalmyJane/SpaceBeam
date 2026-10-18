@@ -17,7 +17,7 @@ Real-time kaleidoscope visual synthesizer for Android, meant for party/event use
 - README.md is copied to app assets at build time (Gradle `copyHelpAssets` task) and shown as in-app help via WebView — no manual copy needed, just rebuild
 
 ## Architecture
-- Single-activity app, split across 16 Kotlin files in `com.calmyjane.spacebeam`
+- Single-activity app, split across 17 Kotlin files in `com.calmyjane.spacebeam`
 - OpenGL ES 2.0, continuous rendering on `GLSurfaceView`, ping-pong FBOs at 1920x1080 (1280x720 in performance mode)
 - All UI is programmatic (no XML layouts except AndroidManifest)
 - Effect chain: Sources → Mixer → CamTransform → Color → Edge → Kaleidoscope → Droste → MasterTransform → Tunnel → Swirl → Screen
@@ -32,10 +32,16 @@ Real-time kaleidoscope visual synthesizer for Android, meant for party/event use
 - Sensors: Accelerometer + gyroscope (`SensorHelper`). Sensor modulation is off until the gyro button enables it (`setEnabled`, fades via `blend`); values are relative to the orientation at switch-on (`relative(ch)`). Tunnel/Swirl have LOOK X/Y params (`T_LOOK_*`, `S_LOOK_*`) used by the factory presets for gyro look-around
 - Body tracking (MediaPipe tasks-vision, CPU): `VisionPipeline` owns the single CameraX ImageAnalysis next to the camera preview and feeds every enabled `Tracker`. `Tracker` base (Tracker.kt) holds the shared logic: `values[]` 0..1 smoothed per frame in `tick()` (strength in Settings, prefs `HAND_SMOOTH`/`FACE_SMOOTH`), spike filter `accept()` + adaptive smoothing, circular angle channel (`angleTurns`/`angleOffset`), and `blend` that eases modulation in/out on toggle. `HandTracker`: 6 channels (thumb-to-finger index/middle/ring/pinky, hand tilt wrist→middle knuckle, distance from palm size). `FaceTracker`: 3 channels (head roll on the eye line, distance from face width, mouth width). `PropertyControl.handAmount[6]` / `faceAmount[3]` are signed (0 = off, ±1000 = channel takes over the whole range, negative = inverted; angle on WRAP params is a relative offset), applied in `applyTracker()`, eased during preset transitions. Factory presets in `loadFactoryDefault` bake in hand + face mappings. Models (`app/src/main/assets/*.task`, Apache 2.0, from Google's MediaPipe model storage) are committed to the repo so the build needs no downloads (F-Droid builds from source without fetching extra files)
 
+## Testing
+- JVM unit tests (`app/src/test`, no phone): `./gradlew testDebugUnitTest` — BpmManager, UndoManager, PresetCodec (stored key names + old-format presets), PropertyControl (transitions, angle wrap, smoothing, LFO ranges, snapshot round-trip). Run before every commit
+- Device tests (`app/src/androidTest`): ShaderCompileTest compiles all effect + builtin shaders offscreen on the phone's GPU. Run them WITHOUT `connectedAndroidTest` (that task uninstalls the app = wipes presets): `./gradlew assembleDebug assembleDebugAndroidTest`, `adb install -r` both APKs, then `adb shell am instrument -w com.calmyjane.spacebeam.test/androidx.test.runner.AndroidJUnitRunner`
+- Gradle needs Java 11+: use Android Studio's JBR (`JAVA_HOME="C:/Program Files/Android/Android Studio/jbr"`), the system Java is 8
+- Planned: golden-image tests (deterministic clock/seed + test pattern, compare renders per effect/factory preset), then PropertyControl logic/UI split
+
 ## File map — UPDATE WHEN FILES/STRUCTURE CHANGE
 | File | ~Lines | Content |
 |------|--------|---------|
-| `MainActivity.kt` | 4055 | Activity lifecycle, onCreate, UI setup, HUD, presets, mask editor, RTSP dialog, recording, gestures, auto-play |
+| `MainActivity.kt` | 4115 | Activity lifecycle, onCreate, UI setup, HUD, presets, mask editor, RTSP dialog, recording, gestures, auto-play |
 | `PropertyControl.kt` | 1300 | Parameter sliders with LFO, modulation, sensor mapping, details menu, SliderBox |
 | `Effects.kt` | 1345 | ShaderEffect base, EffectChain, MaskManager, 8 effect classes (Mixer, Transform, Kaleidoscope, Droste, Tunnel, Swirl, Color, Edge) |
 | `SettingsMenu.kt` | 1180 | Settings dialog, help system, markdown-to-HTML, MIDI scanner/mapping UI |
@@ -46,8 +52,9 @@ Real-time kaleidoscope visual synthesizer for Android, meant for party/event use
 | `HandTracker.kt` | 445 | HandTracker (MediaPipe hand), TrackingOverlayView (phone-only hand/face overlay + bars), button icons |
 | `Tracker.kt` | 235 | VisionPipeline (shared camera analysis stream), Tracker base (smoothing, spike filter, blend) |
 | `FaceTracker.kt` | 90 | FaceTracker (MediaPipe face: roll, distance, mouth width) |
-| `ShaderHelper.kt` | 384 | GL shader compile/link utility object + BUILTIN_SHADERS map |
-| `Utilities.kt` | 225 | BpmManager (tap tempo, beat clock, sync fade), UndoManager, PlaylistItem, BlendMode/SourceType enums |
+| `ShaderHelper.kt` | 437 | GL shader compile/link utility object (records `failures`), `wrapShaderCode`, BUILTIN_SHADERS map |
+| `Presets.kt` | 99 | Preset data class + PresetCodec (preset JSON in SharedPreferences, backward-compatible keys) |
+| `Utilities.kt` | 229 | BpmManager (tap tempo, beat clock, sync fade), UndoManager, PlaylistItem, BlendMode/SourceType enums |
 | `VideoRecorder.kt` | 185 | MediaCodec H.264 encoder + AudioRecord → MediaMuxer |
 | `ExternalDisplayHelper.kt` | 110 | Miracast/secondary display via Presentation |
 | `SensorHelper.kt` | 91 | Accelerometer + gyroscope via SensorManager |

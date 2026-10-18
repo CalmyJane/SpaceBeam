@@ -67,6 +67,10 @@ android {
     kotlinOptions {
         jvmTarget = "11"
     }
+    testOptions {
+        // JVM unit tests: android.* stubs (Log etc.) return defaults instead of throwing
+        unitTests.isReturnDefaultValues = true
+    }
     androidResources {
         noCompress += "task"  // MediaPipe models (assets/*.task) are memory-mapped
     }
@@ -80,6 +84,7 @@ dependencies {
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.remote.creation.core)
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303")  // real org.json for the JVM (android.jar only has stubs)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     val camerax_version = "1.3.0"

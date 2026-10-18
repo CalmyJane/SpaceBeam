@@ -17,7 +17,8 @@ data class PlaylistItem(
     var crossfade: Float    // Seconds (0.0 to 15.0)
 )
 
-class BpmManager {
+/** [nanoClock] is injectable so tests can drive taps without real waiting. */
+class BpmManager(private val nanoClock: () -> Long = System::nanoTime) {
     var bpm = 120f
     private val tapTimes = mutableListOf<Long>()
     private val MAX_TAPS = 8
@@ -39,7 +40,7 @@ class BpmManager {
         if (tapNanos != 0L) {
             pendingTapNanos = 0L
             // The tap was a beat: snap the beat position at tap time to the nearest whole beat
-            val since = ((System.nanoTime() - tapNanos) / 1e9).coerceIn(0.0, 1.0) * bps
+            val since = ((nanoClock() - tapNanos) / 1e9).coerceIn(0.0, 1.0) * bps
             beatPos = Math.round(beatPos - since) + since
         }
         if (beatPos > 1e6) beatPos -= 1e6  // keep precision; 1e6 is divisible by every sync multiplier's period
@@ -51,8 +52,9 @@ class BpmManager {
     }
 
     fun tap() {
-        pendingTapNanos = System.nanoTime()
-        val now = System.currentTimeMillis()
+        val nanos = nanoClock()
+        pendingTapNanos = nanos
+        val now = nanos / 1_000_000
 
         if (tapTimes.isNotEmpty() && now - tapTimes.last() > 2500) {
             tapTimes.clear()
