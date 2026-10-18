@@ -577,9 +577,6 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
     private var captureRequested = false
     private var videoRecorder: VideoRecorder? = null
     private var recordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
-    private var pendingRecordFile: File? = null
-    private var onStopCallback: ((File?) -> Unit)? = null
-    private var isStopRequested = false
     private var recordStartTimeNs: Long = 0
     private var mSavedDisplay = EGL14.EGL_NO_DISPLAY
     private var mSavedContext = EGL14.eglGetCurrentContext()
@@ -600,8 +597,11 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
     fun stopRotationAnim() { isRotAnimating = false }
     fun resetPhases() { ctx.controls.forEach { it.lfoPhase = 0.0; it.resetRampAccum() }; mRotAccum = 0.0; cRotAccum = 0.0; lRotAccum = 0.0 }
     fun capturePhoto() { captureRequested = true }
-    fun stopRecording(callback: (File?) -> Unit) { onStopCallback = callback; isStopRequested = true }
-    fun startRecording(file: File) { pendingRecordFile = file; recordStartTimeNs = 0 }
+    // Start/stop run as GL-thread events, so a stop also works while no frames are drawn (app in background)
+    /** [onFail] runs on the UI thread if the encoder can't start. */
+    fun startRecording(file: File, onFail: () -> Unit) { ctx.glView.queueEvent { beginRecording(file, onFail) } }
+    /** [callback] gets the finalized file, or null; called on the GL thread. */
+    fun stopRecording(callback: (File?) -> Unit) { ctx.glView.queueEvent { callback(finishRecording()) } }
     fun setExternalSurface(s: Surface, w: Int, h: Int) { extSurfaceArgs = Triple(s, w, h) }
     fun removeExternalSurface() { extSurfaceArgs = null }
 
@@ -958,7 +958,6 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
                 videoRecorder?.drain(false)
             }
             EGL14.eglMakeCurrent(mSavedDisplay, oldDraw, oldRead, mSavedContext)
-            handleStopRecording()
         }
     }
 
@@ -996,26 +995,38 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
             EGL14.eglDestroySurface(mSavedDisplay, extEglSurface)
             extEglSurface = EGL14.EGL_NO_SURFACE
         }
-        if (pendingRecordFile != null) {
-            videoRecorder = VideoRecorder(ctx, viewWidth, viewHeight, pendingRecordFile!!)
-            recordSurface = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, videoRecorder!!.inputSurface, intArrayOf(EGL14.EGL_NONE), 0)
-            pendingRecordFile = null
+    }
+
+    private fun beginRecording(file: File, onFail: () -> Unit) {
+        if (videoRecorder != null) return
+        var rec: VideoRecorder? = null
+        try {
+            rec = VideoRecorder(ctx, viewWidth, viewHeight, file)
+            val surf = EGL14.eglCreateWindowSurface(mSavedDisplay, mEglConfig, rec.inputSurface, intArrayOf(EGL14.EGL_NONE), 0)
+            if (surf == null || surf == EGL14.EGL_NO_SURFACE) throw IllegalStateException("eglCreateWindowSurface failed: 0x${Integer.toHexString(EGL14.eglGetError())}")
+            recordStartTimeNs = 0
+            recordSurface = surf
+            videoRecorder = rec
+        } catch (e: Exception) {
+            // Codec busy, file error...: free whatever started (mic!) instead of crashing the GL thread
+            Log.e("SpaceBeam", "Recording start failed", e)
+            rec?.release()
+            file.delete()
+            ctx.runOnUiThread(onFail)
         }
     }
 
-    private fun handleStopRecording() {
-        if (isStopRequested) {
-            videoRecorder?.drain(true)
-            val out = videoRecorder?.file
-            if (recordSurface != EGL14.EGL_NO_SURFACE) {
-                EGL14.eglDestroySurface(mSavedDisplay, recordSurface)
-                recordSurface = EGL14.EGL_NO_SURFACE
-            }
-            videoRecorder?.release()
-            videoRecorder = null
-            isStopRequested = false
-            onStopCallback?.invoke(out)
+    private fun finishRecording(): File? {
+        val rec = videoRecorder ?: return null
+        videoRecorder = null
+        rec.drain(true)
+        if (recordSurface != EGL14.EGL_NO_SURFACE) {
+            EGL14.eglDestroySurface(mSavedDisplay, recordSurface)
+            recordSurface = EGL14.EGL_NO_SURFACE
         }
+        if (rec.release()) return rec.file
+        rec.file.delete() // never got a frame / not playable
+        return null
     }
 
     private fun handleCapture() {

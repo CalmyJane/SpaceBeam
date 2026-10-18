@@ -902,6 +902,13 @@ class MainActivity : AppCompatActivity() {
         restoreScreenTimeout()
     }
 
+    override fun onStop() {
+        super.onStop()
+        // Surface is gone, no more frames: finalize now so the MP4 stays playable even if the process gets killed.
+        // (Not in onPause: pulling down the notification shade would cut a concert recording.)
+        if (isRecording) stopRecordingAndSave()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
@@ -3703,7 +3710,11 @@ class MainActivity : AppCompatActivity() {
         if (!isRecording) {
             val fileName = "SB_${System.currentTimeMillis()}.mp4"
             val tempFile = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), fileName)
-            renderer.startRecording(tempFile); isRecording = true; recordingSeconds = 0; recordBtn.alpha = 1.0f
+            renderer.startRecording(tempFile) {
+                resetRecordUi()
+                Toast.makeText(this, "Recording failed to start", Toast.LENGTH_LONG).show()
+            }
+            isRecording = true; recordingSeconds = 0; recordBtn.alpha = 1.0f
             recordTicker = object : Runnable {
                 override fun run() {
                     recordingSeconds++; val h = recordingSeconds / 3600; val m = (recordingSeconds % 3600) / 60; val s = recordingSeconds % 60
@@ -3712,13 +3723,20 @@ class MainActivity : AppCompatActivity() {
                 }
             }; handler.post(recordTicker!!)
         } else {
-            renderer.stopRecording { savedFile ->
-                isRecording = false; recordTicker?.let { handler.removeCallbacks(it) }
-                runOnUiThread {
-                    recordBtn.setImageDrawable(ContextCompat.getDrawable(this, android.R.drawable.presence_video_online)); recordBtn.alpha = 0.5f; if (savedFile != null && savedFile.exists()) saveVideoToGallery(savedFile)
-                }
-            }
+            stopRecordingAndSave()
         }
+    }
+
+    private fun stopRecordingAndSave() {
+        resetRecordUi()
+        renderer.stopRecording { savedFile ->
+            runOnUiThread { if (savedFile != null && savedFile.exists()) saveVideoToGallery(savedFile) }
+        }
+    }
+
+    private fun resetRecordUi() {
+        isRecording = false; recordTicker?.let { handler.removeCallbacks(it) }
+        recordBtn.setImageDrawable(ContextCompat.getDrawable(this, android.R.drawable.presence_video_online)); recordBtn.alpha = 0.5f
     }
 
     /** Copies the finished MP4 into MediaStore on a background thread (GBs for long sets would freeze the UI). */
