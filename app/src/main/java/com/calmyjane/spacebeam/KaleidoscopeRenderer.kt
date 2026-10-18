@@ -314,23 +314,7 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
             }
 
             if (type == SourceType.SHADER) {
-                val vSrc = """
-                    attribute vec4 p; attribute vec2 t; varying vec2 v;
-                    uniform vec2 uFlip; uniform float uRotation;
-                    void main() {
-                        gl_Position = p; vec2 uv = t - 0.5; uv = uv * uFlip;
-                        float c = cos(uRotation); float s = sin(uRotation);
-                        uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
-                        v = uv + 0.5;
-                    }
-                """.trimIndent()
-                val fSrc = ctx.wrapShaderCode(customShaderCode ?: "void main(){ gl_FragColor=vec4(0.0); }")
-                customProgram = ShaderHelper.createProgram(vSrc, fSrc)
-                customLocITime = GLES20.glGetUniformLocation(customProgram, "iTime")
-                customLocUTime = GLES20.glGetUniformLocation(customProgram, "uTime")
-                customLocIResolution = GLES20.glGetUniformLocation(customProgram, "iResolution")
-                customLocUFlip = GLES20.glGetUniformLocation(customProgram, "uFlip")
-                customLocURotation = GLES20.glGetUniformLocation(customProgram, "uRotation")
+                buildCustomProgram()
                 isReady = true
                 return
             }
@@ -345,6 +329,40 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
                 android.os.Handler(android.os.Looper.getMainLooper()).post { onSurfaceReady?.invoke(s) }
             }
             isReady = true
+        }
+
+        /** Returns false (keeping the current program) if the code doesn't compile and [keepOnFail]. */
+        private fun buildCustomProgram(keepOnFail: Boolean = false): Boolean {
+            val vSrc = """
+                attribute vec4 p; attribute vec2 t; varying vec2 v;
+                uniform vec2 uFlip; uniform float uRotation;
+                void main() {
+                    gl_Position = p; vec2 uv = t - 0.5; uv = uv * uFlip;
+                    float c = cos(uRotation); float s = sin(uRotation);
+                    uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+                    v = uv + 0.5;
+                }
+            """.trimIndent()
+            val fSrc = ctx.wrapShaderCode(customShaderCode ?: "void main(){ gl_FragColor=vec4(0.0); }")
+            val prog = ShaderHelper.createProgram(vSrc, fSrc)
+            if (prog == 0 && keepOnFail) return false
+            if (customProgram != 0) GLES20.glDeleteProgram(customProgram)
+            customProgram = prog
+            customLocITime = GLES20.glGetUniformLocation(customProgram, "iTime")
+            customLocUTime = GLES20.glGetUniformLocation(customProgram, "uTime")
+            customLocIResolution = GLES20.glGetUniformLocation(customProgram, "iResolution")
+            customLocUFlip = GLES20.glGetUniformLocation(customProgram, "uFlip")
+            customLocURotation = GLES20.glGetUniformLocation(customProgram, "uRotation")
+            return true
+        }
+
+        /** GL thread: swap in [customShaderCode] without re-creating the FBO (the old one leaked ~8 MB per edit). */
+        fun recompileShader() {
+            if (!isReady) return // init() will build it
+            // A typo mid-show keeps the last working shader running instead of going black
+            if (!buildCustomProgram(keepOnFail = true)) {
+                ctx.runOnUiThread { android.widget.Toast.makeText(ctx, "Shader error, kept previous version", android.widget.Toast.LENGTH_SHORT).show() }
+            }
         }
 
         fun getSurfaceForInput(): Surface? {

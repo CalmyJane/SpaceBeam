@@ -32,9 +32,18 @@ object ShaderHelper {
         fun createProgram(vSrc: String, fSrc: String): Int {
             val v = compile(GLES20.GL_VERTEX_SHADER, vSrc)
             val f = compile(GLES20.GL_FRAGMENT_SHADER, fSrc)
-            if (v == 0 || f == 0) return 0
+            if (v == 0 || f == 0) {
+                if (v != 0) GLES20.glDeleteShader(v)
+                if (f != 0) GLES20.glDeleteShader(f)
+                return 0
+            }
             val p = GLES20.glCreateProgram()
             GLES20.glAttachShader(p, v); GLES20.glAttachShader(p, f); GLES20.glLinkProgram(p)
+            // The linked program keeps what it needs; free the shader objects
+            GLES20.glDetachShader(p, v); GLES20.glDetachShader(p, f)
+            GLES20.glDeleteShader(v); GLES20.glDeleteShader(f)
+            // GL reuses ids of deleted programs: drop attrib locations cached for an old one
+            attribCache.remove(p)
             val linkStatus = IntArray(1)
             GLES20.glGetProgramiv(p, GLES20.GL_LINK_STATUS, linkStatus, 0)
             if (linkStatus[0] == 0) {
