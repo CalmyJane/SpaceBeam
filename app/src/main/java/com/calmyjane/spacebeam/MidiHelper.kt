@@ -23,9 +23,15 @@ class MidiHelper(private val activity: MainActivity) {
     private val CCCD_UUID         = java.util.UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     private val bluetoothAdapter: BluetoothAdapter? = (activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
-    private var activeGatt: BluetoothGatt? = null
-    var isConnected = false
+    @Volatile private var activeGatt: BluetoothGatt? = null
+    @Volatile var isConnected = false
         private set
+
+    // Device the user chose; while set, a dropped link is retried with backoff
+    @Volatile private var targetDevice: BluetoothDevice? = null
+    private var reconnectAttempts = 0
+    private val reconnectHandler = Handler(Looper.getMainLooper())
+    private val reconnectRunnable = Runnable { targetDevice?.let { openGatt(it) } }
 
     // --- MAPPING CONFIGURATION ---
     private val DEFAULT_MAPPING_JSON = """
@@ -257,26 +263,53 @@ class MidiHelper(private val activity: MainActivity) {
             return
         }
         close()
+        targetDevice = device
+        reconnectAttempts = 0
+        openGatt(device)
+        activity.runOnUiThread { Toast.makeText(activity, "Connecting...", Toast.LENGTH_SHORT).show() }
+    }
+
+    private fun openGatt(device: BluetoothDevice) {
         try {
-            activeGatt = device.connectGatt(activity, false, gattCallback)
-            activity.runOnUiThread { Toast.makeText(activity, "Connecting...", Toast.LENGTH_SHORT).show() }
+            activeGatt = device.connectGatt(activity, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         } catch (e: SecurityException) { }
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            // Ignore late callbacks from a connection we already replaced or closed
+            // (activeGatt can still be null if the callback beats connectGatt's return)
+            val current = activeGatt
+            if (current != null && gatt !== current) {
+                if (newState == BluetoothProfile.STATE_DISCONNECTED) try { gatt.close() } catch (e: SecurityException) {}
+                return
+            }
+            activeGatt = gatt
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 isConnected = true
+                val wasReconnect = reconnectAttempts > 0
+                reconnectAttempts = 0
                 try {
                     if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
                         if (!gatt.requestMtu(512)) gatt.discoverServices()
                     }
                 } catch (e: SecurityException) { gatt.discoverServices() }
-                activity.runOnUiThread { Toast.makeText(activity, "Connected!", Toast.LENGTH_SHORT).show() }
+                val msg = if (wasReconnect) "MIDI reconnected" else "Connected!"
+                activity.runOnUiThread { Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show() }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 isConnected = false
                 activeGatt = null
-                activity.runOnUiThread { Toast.makeText(activity, "Disconnected", Toast.LENGTH_SHORT).show() }
+                // Must close, or the client interface leaks and later connects fail with status 133
+                try { gatt.close() } catch (e: SecurityException) {}
+                if (targetDevice != null) {
+                    // Mixer out of range / battery: keep retrying (1, 2, 4, 8, 8... s)
+                    val delay = 1000L shl reconnectAttempts.coerceAtMost(3)
+                    if (reconnectAttempts == 0) activity.runOnUiThread { Toast.makeText(activity, "MIDI lost, reconnecting...", Toast.LENGTH_SHORT).show() }
+                    reconnectAttempts++
+                    reconnectHandler.postDelayed(reconnectRunnable, delay)
+                } else {
+                    activity.runOnUiThread { Toast.makeText(activity, "Disconnected", Toast.LENGTH_SHORT).show() }
+                }
             }
         }
         override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
@@ -310,14 +343,48 @@ class MidiHelper(private val activity: MainActivity) {
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) { handleRawPacket(characteristic.value) }
     }
 
+    /**
+     * BLE MIDI packet: header byte, then messages. Each message may start with a timestamp byte
+     * (bit 7 set) followed by a status byte, or reuse the running status (data bytes only).
+     * One notification can carry many messages, e.g. fast fader moves.
+     */
     private fun handleRawPacket(value: ByteArray) {
-        if (value.size > 2) {
-            val status = value[2].toInt() and 0xFF
-            if ((status and 0xF0) == 0xB0 && value.size > 4) {
-                processCC(value[3].toInt() and 0x7F, value[4].toInt() and 0x7F)
-            } else if ((status and 0xF0) == 0x90 && value.size > 4) {
-                val velocity = value[4].toInt() and 0x7F
-                processCC(value[3].toInt() and 0x7F, if (velocity > 0) 127 else 0)
+        val n = value.size
+        var i = 1
+        var running = 0
+        while (i < n) {
+            var b = value[i].toInt() and 0xFF
+            if (b and 0x80 != 0) {
+                // Timestamp byte; a status byte or running-status data follows
+                i++
+                if (i >= n) break
+                b = value[i].toInt() and 0xFF
+                if (b and 0x80 != 0) {
+                    i++
+                    when {
+                        b >= 0xF8 -> continue // realtime, leaves running status alone
+                        b >= 0xF0 -> { // SysEx / system common: skip payload
+                            running = 0
+                            while (i < n && value[i].toInt() and 0x80 == 0) i++
+                            continue
+                        }
+                        else -> running = b
+                    }
+                }
+            }
+            if (running == 0) { i++; continue }
+            val len = if ((running and 0xE0) == 0xC0) 1 else 2 // program change / channel pressure
+            if (i + len > n) break
+            val d1 = value[i].toInt() and 0xFF
+            val d2 = if (len == 2) value[i + 1].toInt() and 0xFF else 0
+            // Truncated message: resync on the next timestamp byte
+            if (d1 and 0x80 != 0) continue
+            if (d2 and 0x80 != 0) { i++; continue }
+            i += len
+            when (running and 0xF0) {
+                0xB0 -> processCC(d1, d2)
+                0x90 -> processCC(d1, if (d2 > 0) 127 else 0)
+                0x80 -> processCC(d1, 0)
             }
         }
     }
@@ -387,6 +454,8 @@ class MidiHelper(private val activity: MainActivity) {
     }
 
     fun close() {
+        targetDevice = null
+        reconnectHandler.removeCallbacks(reconnectRunnable)
         try {
             if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
                 activeGatt?.disconnect(); activeGatt?.close()

@@ -248,11 +248,14 @@ open class PropertyControl(
         val t = if (isAnimating && animDuration > 0) (animTime / animDuration).coerceIn(0f, 1f) else 1f
         val ease = t * t * (3.0f - 2.0f * t)
 
-        if (isAnimating && animTarget != null) {
+        // update() runs on the GL thread while setProgress()/stopAnimation() can null these
+        // fields from the UI thread (MIDI, touch): read each once, never re-read with !!
+        val animTgt = animTarget
+        if (isAnimating && animTgt != null) {
             animTime += deltaTime
             val newValueInt: Int
             if (animTime >= animDuration) {
-                preciseValue = animTarget!!
+                preciseValue = animTgt
                 newValueInt = preciseValue.toInt()
                 modRateTarget?.let { preciseModRate = it; modRate = it.toInt() }
                 modDepthTarget?.let { preciseModDepth = it; modDepth = it.toInt() }
@@ -260,11 +263,11 @@ open class PropertyControl(
                 isAnimating = false
             } else {
                 if (id.endsWith("_ANGLE")) {
-                    val diff = animTarget!! - animStart
+                    val diff = animTgt - animStart
                     val modDiff = ((diff + 500f) % 1000f + 1000f) % 1000f - 500f
                     preciseValue = (animStart + modDiff * ease + 1000f) % 1000f
                 } else {
-                    preciseValue = animStart + (animTarget!! - animStart) * ease
+                    preciseValue = animStart + (animTgt - animStart) * ease
                 }
                 newValueInt = preciseValue.toInt()
                 modRateTarget?.let { preciseModRate = modRateStart + (it - modRateStart) * ease }
@@ -302,14 +305,15 @@ open class PropertyControl(
         var currentCalculatedOutput = smoothedNormalized
 
         // Animate rampAccum toward nearest full revolution during preset transitions
-        if (rampAccumTarget != null && modMode == ModMode.WRAP) {
+        val rampTgt = rampAccumTarget
+        if (rampTgt != null && modMode == ModMode.WRAP) {
             if (isAnimating && animDuration > 0) {
                 val at = (animTime / animDuration).coerceIn(0f, 1f)
                 val ae = at * at * (3f - 2f * at)
-                rampAccum = rampAccumStart + (rampAccumTarget!! - rampAccumStart) * ae
+                rampAccum = rampAccumStart + (rampTgt - rampAccumStart) * ae
             }
             if (!isAnimating) {
-                rampAccum = rampAccumTarget!!
+                rampAccum = rampTgt
                 rampAccumTarget = null
                 rampAccum -= Math.floor(rampAccum) // normalize to [0, 1)
             }
@@ -367,11 +371,12 @@ open class PropertyControl(
                 getWaveValue(modShape, lfoPhase)
             }
 
-            if (oldModShape != null && shapeFadeProgress < 1f) {
-                val oldWave = if (oldModShape == WaveShape.RAMP && modMode == ModMode.WRAP) {
+            val oldShape = oldModShape
+            if (oldShape != null && shapeFadeProgress < 1f) {
+                val oldWave = if (oldShape == WaveShape.RAMP && modMode == ModMode.WRAP) {
                     ((rampAccum % 1.0) + 1.0) % 1.0
                 } else {
-                    getWaveValue(oldModShape!!, lfoPhase)
+                    getWaveValue(oldShape, lfoPhase)
                 }
                 val fadeEased = shapeFadeProgress * shapeFadeProgress * (3.0f - 2.0f * shapeFadeProgress)
                 rawWave = oldWave + (rawWave - oldWave) * fadeEased
@@ -469,10 +474,11 @@ open class PropertyControl(
     }
 
     private fun syncUiElements() {
-        if (sliderView != null) {
+        val slider = sliderView // detach() can null it from the UI thread
+        if (slider != null) {
             val visualT = if (logPower > 1) smoothedNormalized.toDouble().pow(1.0/logPower).toFloat() else smoothedNormalized
             // setVisualState uses postInvalidate() internally, so it is inherently thread-safe
-            sliderView!!.setVisualState(visualT, formatValue(value))
+            slider.setVisualState(visualT, formatValue(value))
         }
 
         if (activeControl == this) {

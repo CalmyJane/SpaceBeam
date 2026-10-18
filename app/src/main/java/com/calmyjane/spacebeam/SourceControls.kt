@@ -160,7 +160,7 @@ class ShaderSourceControl(
                     channel?.let {
                         it.customShaderCode = newCode
                         // Signal the renderer to re-compile the program on next frame
-                        mainActivity.glView.queueEvent { it.isReady = false }
+                        mainActivity.glView.queueEvent { it.recompileShader() }
                     }
                 }
             }
