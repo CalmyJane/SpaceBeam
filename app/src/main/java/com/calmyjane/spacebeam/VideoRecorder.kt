@@ -89,9 +89,12 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
     fun drain(endOfStream: Boolean) {
         if (endOfStream) {
             try { videoEncoder.signalEndOfInputStream() } catch (e: Exception) { Log.w("SpaceBeam", "signalEndOfInputStream failed", e) }
+            // Wait for the frames still inside the encoder, otherwise the last ones are lost
+            drainEncoder(videoEncoder, isVideo = true, timeoutUs = 10_000L, untilEos = true)
+        } else {
+            // Use 0 timeout for video to ensure we don't block the GL thread
+            drainEncoder(videoEncoder, isVideo = true, timeoutUs = 0L)
         }
-        // Use 0 timeout for video to ensure we don't block the GL thread
-        drainEncoder(videoEncoder, isVideo = true, timeoutUs = 0L)
     }
 
     private fun audioLoop() {
@@ -120,12 +123,17 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
     private val videoBufferInfo = MediaCodec.BufferInfo()
     private val audioBufferInfo = MediaCodec.BufferInfo()
 
-    private fun drainEncoder(encoder: MediaCodec, isVideo: Boolean, timeoutUs: Long) {
+    // Video written before the first keyframe is undecodable (green smear at the start)
+    private var sawVideoKeyframe = false
+
+    private fun drainEncoder(encoder: MediaCodec, isVideo: Boolean, timeoutUs: Long, untilEos: Boolean = false) {
         val bufferInfo = if (isVideo) videoBufferInfo else audioBufferInfo
+        val deadline = System.nanoTime() + 1_000_000_000L // untilEos: give up after 1 s
 
         while (true) {
-            val idx = try { encoder.dequeueOutputBuffer(bufferInfo, timeoutUs) } catch (e: Exception) { Log.w("SpaceBeam", "dequeueOutputBuffer failed", e); -1 }
+            val idx = try { encoder.dequeueOutputBuffer(bufferInfo, timeoutUs) } catch (e: Exception) { Log.w("SpaceBeam", "dequeueOutputBuffer failed", e); MediaCodec.INFO_TRY_AGAIN_LATER }
             if (idx == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (untilEos && System.nanoTime() < deadline) continue
                 break
             } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 synchronized(this) {
@@ -142,7 +150,10 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
 
                 if (bufferInfo.size != 0) {
                     synchronized(this) {
-                        if (muxerStarted) {
+                        if (isVideo && muxerStarted && !sawVideoKeyframe) {
+                            sawVideoKeyframe = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                        }
+                        if (muxerStarted && (!isVideo || sawVideoKeyframe)) {
                             val trackIndex = if (isVideo) videoTrackIndex else audioTrackIndex
                             if (trackIndex >= 0) {
                                 encodedData.position(bufferInfo.offset)
@@ -164,6 +175,8 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
         if (videoReady && audioReady && !muxerStarted) {
             muxer.start()
             muxerStarted = true
+            // Frames encoded while waiting for the audio track were dropped (incl. the first keyframe): ask for a new one
+            try { videoEncoder.setParameters(android.os.Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) } catch (e: Exception) {}
         }
     }
 
