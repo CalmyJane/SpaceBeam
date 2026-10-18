@@ -3599,8 +3599,19 @@ class MainActivity : AppCompatActivity() {
                     player.play()
 
                     player.addListener(object : Player.Listener {
+                        // After the first connect, a dropped stream (phone screen off, WiFi blip)
+                        // keeps its control and is retried with backoff until it comes back or is removed
+                        var retries = 0
+                        val retry = Runnable {
+                            if (controlsMap.containsKey(uniqueId)) { player.prepare(); player.play() }
+                        }
+
                         override fun onPlaybackStateChanged(playbackState: Int) {
                             if (playbackState == Player.STATE_READY) {
+                                if (retries > 0) {
+                                    retries = 0
+                                    Toast.makeText(this@MainActivity, "Stream reconnected", Toast.LENGTH_SHORT).show()
+                                }
                                 if (!controlsMap.containsKey(uniqueId)) {
                                     val ctrl = RtspSourceControl(uniqueId, "STREAM", uniqueId, this@MainActivity, player)
                                     ctrl.subtitle = url
@@ -3616,6 +3627,14 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                            if (controlsMap.containsKey(uniqueId)) {
+                                if (retries == 0) Toast.makeText(this@MainActivity, "Stream lost, reconnecting...", Toast.LENGTH_SHORT).show()
+                                val delay = 1000L shl retries.coerceAtMost(3) // 1, 2, 4, 8, 8... s
+                                retries++
+                                handler.removeCallbacks(retry)
+                                handler.postDelayed(retry, delay)
+                                return
+                            }
                             Toast.makeText(this@MainActivity, "Connection Failed", Toast.LENGTH_LONG).show()
                             renderer.removeSource(uniqueId)
                             player.release()
