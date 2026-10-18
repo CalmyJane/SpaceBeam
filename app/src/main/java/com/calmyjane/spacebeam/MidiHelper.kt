@@ -23,9 +23,15 @@ class MidiHelper(private val activity: MainActivity) {
     private val CCCD_UUID         = java.util.UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     private val bluetoothAdapter: BluetoothAdapter? = (activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
-    private var activeGatt: BluetoothGatt? = null
-    var isConnected = false
+    @Volatile private var activeGatt: BluetoothGatt? = null
+    @Volatile var isConnected = false
         private set
+
+    // Device the user chose; while set, a dropped link is retried with backoff
+    @Volatile private var targetDevice: BluetoothDevice? = null
+    private var reconnectAttempts = 0
+    private val reconnectHandler = Handler(Looper.getMainLooper())
+    private val reconnectRunnable = Runnable { targetDevice?.let { openGatt(it) } }
 
     // --- MAPPING CONFIGURATION ---
     private val DEFAULT_MAPPING_JSON = """
@@ -257,26 +263,53 @@ class MidiHelper(private val activity: MainActivity) {
             return
         }
         close()
+        targetDevice = device
+        reconnectAttempts = 0
+        openGatt(device)
+        activity.runOnUiThread { Toast.makeText(activity, "Connecting...", Toast.LENGTH_SHORT).show() }
+    }
+
+    private fun openGatt(device: BluetoothDevice) {
         try {
-            activeGatt = device.connectGatt(activity, false, gattCallback)
-            activity.runOnUiThread { Toast.makeText(activity, "Connecting...", Toast.LENGTH_SHORT).show() }
+            activeGatt = device.connectGatt(activity, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         } catch (e: SecurityException) { }
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            // Ignore late callbacks from a connection we already replaced or closed
+            // (activeGatt can still be null if the callback beats connectGatt's return)
+            val current = activeGatt
+            if (current != null && gatt !== current) {
+                if (newState == BluetoothProfile.STATE_DISCONNECTED) try { gatt.close() } catch (e: SecurityException) {}
+                return
+            }
+            activeGatt = gatt
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 isConnected = true
+                val wasReconnect = reconnectAttempts > 0
+                reconnectAttempts = 0
                 try {
                     if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
                         if (!gatt.requestMtu(512)) gatt.discoverServices()
                     }
                 } catch (e: SecurityException) { gatt.discoverServices() }
-                activity.runOnUiThread { Toast.makeText(activity, "Connected!", Toast.LENGTH_SHORT).show() }
+                val msg = if (wasReconnect) "MIDI reconnected" else "Connected!"
+                activity.runOnUiThread { Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show() }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 isConnected = false
                 activeGatt = null
-                activity.runOnUiThread { Toast.makeText(activity, "Disconnected", Toast.LENGTH_SHORT).show() }
+                // Must close, or the client interface leaks and later connects fail with status 133
+                try { gatt.close() } catch (e: SecurityException) {}
+                if (targetDevice != null) {
+                    // Mixer out of range / battery: keep retrying (1, 2, 4, 8, 8... s)
+                    val delay = 1000L shl reconnectAttempts.coerceAtMost(3)
+                    if (reconnectAttempts == 0) activity.runOnUiThread { Toast.makeText(activity, "MIDI lost, reconnecting...", Toast.LENGTH_SHORT).show() }
+                    reconnectAttempts++
+                    reconnectHandler.postDelayed(reconnectRunnable, delay)
+                } else {
+                    activity.runOnUiThread { Toast.makeText(activity, "Disconnected", Toast.LENGTH_SHORT).show() }
+                }
             }
         }
         override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
@@ -421,6 +454,8 @@ class MidiHelper(private val activity: MainActivity) {
     }
 
     fun close() {
+        targetDevice = null
+        reconnectHandler.removeCallbacks(reconnectRunnable)
         try {
             if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
                 activeGatt?.disconnect(); activeGatt?.close()
