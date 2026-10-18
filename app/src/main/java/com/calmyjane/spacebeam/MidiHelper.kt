@@ -310,14 +310,48 @@ class MidiHelper(private val activity: MainActivity) {
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) { handleRawPacket(characteristic.value) }
     }
 
+    /**
+     * BLE MIDI packet: header byte, then messages. Each message may start with a timestamp byte
+     * (bit 7 set) followed by a status byte, or reuse the running status (data bytes only).
+     * One notification can carry many messages, e.g. fast fader moves.
+     */
     private fun handleRawPacket(value: ByteArray) {
-        if (value.size > 2) {
-            val status = value[2].toInt() and 0xFF
-            if ((status and 0xF0) == 0xB0 && value.size > 4) {
-                processCC(value[3].toInt() and 0x7F, value[4].toInt() and 0x7F)
-            } else if ((status and 0xF0) == 0x90 && value.size > 4) {
-                val velocity = value[4].toInt() and 0x7F
-                processCC(value[3].toInt() and 0x7F, if (velocity > 0) 127 else 0)
+        val n = value.size
+        var i = 1
+        var running = 0
+        while (i < n) {
+            var b = value[i].toInt() and 0xFF
+            if (b and 0x80 != 0) {
+                // Timestamp byte; a status byte or running-status data follows
+                i++
+                if (i >= n) break
+                b = value[i].toInt() and 0xFF
+                if (b and 0x80 != 0) {
+                    i++
+                    when {
+                        b >= 0xF8 -> continue // realtime, leaves running status alone
+                        b >= 0xF0 -> { // SysEx / system common: skip payload
+                            running = 0
+                            while (i < n && value[i].toInt() and 0x80 == 0) i++
+                            continue
+                        }
+                        else -> running = b
+                    }
+                }
+            }
+            if (running == 0) { i++; continue }
+            val len = if ((running and 0xE0) == 0xC0) 1 else 2 // program change / channel pressure
+            if (i + len > n) break
+            val d1 = value[i].toInt() and 0xFF
+            val d2 = if (len == 2) value[i + 1].toInt() and 0xFF else 0
+            // Truncated message: resync on the next timestamp byte
+            if (d1 and 0x80 != 0) continue
+            if (d2 and 0x80 != 0) { i++; continue }
+            i += len
+            when (running and 0xF0) {
+                0xB0 -> processCC(d1, d2)
+                0x90 -> processCC(d1, if (d2 > 0) 127 else 0)
+                0x80 -> processCC(d1, 0)
             }
         }
     }
