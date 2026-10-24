@@ -2,7 +2,7 @@
     to be shared over miracast or hdmi.
     
     Features:
-    * kaleidoscope effects
+    * kaleidoscope, Droste spiral, 3D tunnel and swirl effects
     * Front/Back Camera as Input source
     * RTSP as input-source
     * Image/Video (playlists) as input-source

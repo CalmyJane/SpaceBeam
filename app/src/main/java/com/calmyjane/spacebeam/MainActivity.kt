@@ -24,7 +24,6 @@ import android.animation.ValueAnimator
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
-import org.json.JSONObject
 import android.graphics.*
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.GradientDrawable
@@ -343,13 +342,6 @@ class MainActivity : AppCompatActivity() {
     private var lastFingerFocusY = 0f
     private var exoPlayer: ExoPlayer? = null
 
-    private data class Preset(
-        val controlSnapshots: Map<String, PropertyControl.Snapshot>,
-        val flipX: Float,
-        val flipY: Float,
-        val rot180: Boolean,
-        val axis: Int
-    )
     private val presets = mutableMapOf<Int, Preset>()
     private var pendingSaveIndex: Int? = null
     private var transitionMs: Long = 2500L
@@ -1939,28 +1931,6 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
-    }
-
-    fun wrapShaderCode(rawCode: String): String {
-        val isShadertoy = rawCode.contains("mainImage")
-        val prefix = """
-            precision highp float;
-            varying vec2 v;
-            uniform float iTime;
-            uniform float uTime;
-            uniform vec2 iResolution;
-        """.trimIndent()
-
-        return if (isShadertoy) {
-            prefix + "\n" + rawCode + "\n" + """
-                void main() {
-                    mainImage(gl_FragColor, v * iResolution);
-                }
-            """.trimIndent()
-        } else {
-            val needsPrecision = !rawCode.contains("precision")
-            (if (needsPrecision) prefix + "\n" else "") + rawCode
-        }
     }
 
     private fun attemptAddShaderSource(code: String, shaderName: String) {
@@ -3950,47 +3920,12 @@ class MainActivity : AppCompatActivity() {
         activePreset = idx
 
         try {
-            val rootObj = JSONObject()
-            rootObj.put("axis", newPreset.axis)
-            rootObj.put("flipX", newPreset.flipX.toDouble())
-            rootObj.put("flipY", newPreset.flipY.toDouble())
-            rootObj.put("rot180", newPreset.rot180)
-
-            val controlsObj = JSONObject()
-            newPreset.controlSnapshots.forEach { (key, snap) ->
-                val snapObj = JSONObject()
-                snapObj.put("v", snap.value)
-                snapObj.put("r", snap.rate)
-                snapObj.put("d", snap.depth)
-                snapObj.put("shape", snap.shape)
-                snapObj.put("s", snap.smoothing)
-                snapObj.put("synced", snap.isSynced)
-                snapObj.put("syncIdx", snap.syncIndex)
-                snapObj.put("sax", snap.sensorAccelX)
-                snapObj.put("say", snap.sensorAccelY)
-                snapObj.put("saz", snap.sensorAccelZ)
-                snapObj.put("sp",  snap.sensorPitch)
-                snapObj.put("sro", snap.sensorRoll)
-                snapObj.put("sy",  snap.sensorYaw)
-                snapObj.put("hi", snap.handIndex)
-                snapObj.put("hm", snap.handMiddle)
-                snapObj.put("hr", snap.handRing)
-                snapObj.put("hp", snap.handPinky)
-                snapObj.put("ha", snap.handAngle)
-                snapObj.put("hd", snap.handDist)
-                snapObj.put("fr", snap.faceRot)
-                snapObj.put("fd", snap.faceDist)
-                snapObj.put("fm", snap.faceMouth)
-                controlsObj.put(key, snapObj)
-            }
-            rootObj.put("controls", controlsObj)
-            val jsonOutput = rootObj.toString()
-            // LOGGING LINE ADDED HERE
+            val jsonOutput = PresetCodec.encode(newPreset)
             Log.d("SpaceBeamPreset", "SAVED PRESET $idx: $jsonOutput")
 
             getSharedPreferences("SpaceBeam_Presets", Context.MODE_PRIVATE)
                 .edit()
-                .putString("PRESET_$idx", rootObj.toString())
+                .putString("PRESET_$idx", jsonOutput)
                 .apply()
 
             updatePresetHighlights()
@@ -4045,45 +3980,7 @@ class MainActivity : AppCompatActivity() {
             val savedJson = prefs.getString("PRESET_$idx", null)
             if (savedJson != null) {
                 try {
-                    val obj = JSONObject(savedJson)
-                    val ax = obj.optInt("axis", 2)
-                    val fx = obj.optDouble("flipX", 1.0).toFloat()
-                    val fy = obj.optDouble("flipY", -1.0).toFloat()
-                    val r180 = obj.optBoolean("rot180", false)
-
-                    val snapshots = mutableMapOf<String, PropertyControl.Snapshot>()
-                    val controlsObj = obj.getJSONObject("controls")
-                    val keys = controlsObj.keys()
-                    while (keys.hasNext()) {
-                        val k = keys.next()
-                        val s = controlsObj.getJSONObject(k)
-                        snapshots[k] = PropertyControl.Snapshot(
-                            s.getInt("v"),
-                            s.optInt("d", 0) > 0,
-                            s.optInt("r", 200),
-                            s.optInt("d", 0),
-                            s.optString("shape", "SINE"),
-                            s.optInt("s", 500),
-                            s.optBoolean("synced", false),
-                            s.optInt("syncIdx", 3),
-                            s.optInt("sax", 500),
-                            s.optInt("say", 500),
-                            s.optInt("saz", 500),
-                            s.optInt("sp",  500),
-                            s.optInt("sro", 500),
-                            s.optInt("sy",  500),
-                            s.optInt("hi", 0),
-                            s.optInt("hm", 0),
-                            s.optInt("hr", 0),
-                            s.optInt("hp", 0),
-                            s.optInt("ha", 0),
-                            s.optInt("hd", 0),
-                            s.optInt("fr", 0),
-                            s.optInt("fd", 0),
-                            s.optInt("fm", 0)
-                        )
-                    }
-                    presets[idx] = Preset(snapshots, fx, fy, r180, ax)
+                    presets[idx] = PresetCodec.decode(savedJson)
                 } catch (e: Exception) {
                     Log.e("SpaceBeam", "Failed to load preset $idx, using factory default", e)
                     // Fallback inside the loop if JSON is corrupted

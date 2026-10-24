@@ -15,6 +15,15 @@ object ShaderHelper {
         }
         private val attribCache = HashMap<Int, Pair<Int, Int>>()
 
+        /** Every compile/link error since start (info log + start of the source); the device tests assert it stays empty. */
+        val failures: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
+
+        private fun recordFailure(kind: String, log: String, src: String) {
+            val msg = "$kind: $log\n--- ${src.trim().lineSequence().take(3).joinToString(" | ")}"
+            Log.e("GL", msg)
+            failures.add(msg)
+        }
+
         fun compile(type: Int, src: String): Int {
             val shader = GLES20.glCreateShader(type)
             GLES20.glShaderSource(shader, src)
@@ -22,7 +31,7 @@ object ShaderHelper {
             val compiled = IntArray(1)
             GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
             if (compiled[0] == 0) {
-                Log.e("GL", "Compile Failed: ${GLES20.glGetShaderInfoLog(shader)}")
+                recordFailure("Compile Failed", GLES20.glGetShaderInfoLog(shader), src)
                 GLES20.glDeleteShader(shader)
                 return 0
             }
@@ -47,7 +56,7 @@ object ShaderHelper {
             val linkStatus = IntArray(1)
             GLES20.glGetProgramiv(p, GLES20.GL_LINK_STATUS, linkStatus, 0)
             if (linkStatus[0] == 0) {
-                Log.e("GL", "Link Failed: ${GLES20.glGetProgramInfoLog(p)}")
+                recordFailure("Link Failed", GLES20.glGetProgramInfoLog(p), fSrc)
                 GLES20.glDeleteProgram(p)
                 return 0
             }
@@ -63,6 +72,41 @@ object ShaderHelper {
         }
 
         fun clearAttribCache() { attribCache.clear() }
+
+        /** Vertex shader for shader sources: flip + rotation of the generated image. */
+        val CUSTOM_VERTEX = """
+            attribute vec4 p; attribute vec2 t; varying vec2 v;
+            uniform vec2 uFlip; uniform float uRotation;
+            void main() {
+                gl_Position = p; vec2 uv = t - 0.5; uv = uv * uFlip;
+                float c = cos(uRotation); float s = sin(uRotation);
+                uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+                v = uv + 0.5;
+            }
+        """.trimIndent()
+
+        /** Turns user/builtin shader code (Shadertoy `mainImage` or plain GLSL) into a full fragment shader. */
+        fun wrapShaderCode(rawCode: String): String {
+            val isShadertoy = rawCode.contains("mainImage")
+            val prefix = """
+                precision highp float;
+                varying vec2 v;
+                uniform float iTime;
+                uniform float uTime;
+                uniform vec2 iResolution;
+            """.trimIndent()
+
+            return if (isShadertoy) {
+                prefix + "\n" + rawCode + "\n" + """
+                    void main() {
+                        mainImage(gl_FragColor, v * iResolution);
+                    }
+                """.trimIndent()
+            } else {
+                val needsPrecision = !rawCode.contains("precision")
+                (if (needsPrecision) prefix + "\n" else "") + rawCode
+            }
+        }
 }
 
 val BUILTIN_SHADERS = mapOf(

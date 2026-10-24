@@ -1,0 +1,7 @@
+-Droste spiral effect, preset 5 is now a Droste spiral
+-Beat button: switch all beat-synced LFOs on and off, shared beat clock
+-Roll parameter for 3D Tunnel and Swirl, hand angle rolls the view
+-No more pixelation when zooming in
+-MIDI reconnects automatically, RTSP streams reconnect when dropped
+-Recordings keep their last frames and are saved when the app goes to background
+-Stability fixes
