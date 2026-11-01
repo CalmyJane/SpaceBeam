@@ -246,6 +246,8 @@ Tap any preset slot to load it. Parameters **smoothly transition** from current 
 
 The slider above the preset slots controls how long transitions take. Short = snappy cuts, long = slow morphs.
 
+Tap **TIME** to open its menu. **SYNC: BEATS** switches the slider to musical lengths (0, 1/2 beat, 1 beat, 2 beats, 1, 2, 4, 8 or 16 bars) that follow the BPM. In sync, a new preset waits for the next beat before it starts, so changes land on the beat. A press just after a beat starts right away.
+
 ### Parameter Lock
 
 When opening the **details menu** of any parameter, there's a lock/unlock icon in the top right. When a parameter is locked, it will not be changed by any preset.
@@ -396,7 +398,7 @@ Configure in the Settings menu:
 
 | Setting | Description |
 |---------|------------|
-| **Duration** | How long each preset plays before switching |
+| **Duration** | How long each preset plays before switching. Tap **DURATION** for **SYNC: BEATS** to count in beats and bars instead of seconds |
 | **Random Order** | Shuffle vs. sequential preset cycling |
 | **Include Presets** | Checkboxes to include/exclude specific preset slots |
 
