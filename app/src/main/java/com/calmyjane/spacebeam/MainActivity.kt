@@ -185,6 +185,8 @@ class MainActivity : AppCompatActivity() {
     lateinit var glView: GLSurfaceView
     private val sourceControls = mutableListOf<PropertyControl>()
     private var mixerGroupContainer: LinearLayout? = null
+    // The camera source is created once at startup; after the user removes it, menu rebuilds must not bring it back
+    private var cameraSourceCreated = false
     private lateinit var saveConfirmBtn: View
     internal lateinit var renderer: KaleidoscopeRenderer
     private data class CameraEntry(val id: String, val name: String, val isFront: Boolean)
@@ -759,18 +761,44 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    fun startCamera() {
+    /**
+     * (Re)binds the camera for what needs it: preview + analysis while the mixer has the camera source,
+     * analysis alone while only hand/face tracking needs it, nothing otherwise (camera off, saves power).
+     * [afterUnbind] runs once the camera is unbound (e.g. to release the old preview surface safely).
+     */
+    fun startCamera(afterUnbind: (() -> Unit)? = null) {
         if (allCameras.isEmpty()) enumerateCameras()
         val cpFuture = ProcessCameraProvider.getInstance(this)
         cpFuture.addListener({
             val provider = cpFuture.get()
             provider.unbindAll()
+            afterUnbind?.invoke()
             val cam = allCameras.getOrNull(currentCameraIndex) ?: return@addListener
+            val hasPreview = renderer.getSource("CAM_MAIN") != null
+            if (!hasPreview && !handTracker.enabled && !faceTracker.enabled) {
+                vision.stop()
+                return@addListener
+            }
             currentSelector = CameraSelector.Builder()
                 .addCameraFilter { cameras -> cameras.filter { Camera2CameraInfo.from(it).cameraId == cam.id } }
                 .build()
             glView.queueEvent {
                 runOnUiThread {
+                    if (!hasPreview) {
+                        // No camera in the mixer: run the analysis stream alone for tracking
+                        val analysis = vision.createAnalysis(cam.isFront, glView.display?.rotation ?: Surface.ROTATION_0)
+                        try {
+                            provider.unbindAll()
+                            provider.bindToLifecycle(this, currentSelector, analysis)
+                        } catch (e: Exception) {
+                            Log.e("Camera", "Bind analysis failed", e)
+                            vision.dropAnalysis()
+                            handTracker.disable(); faceTracker.disable()
+                            updateTrackingButtons()
+                            Toast.makeText(this, "Hand/face tracking not supported on this camera", Toast.LENGTH_SHORT).show()
+                        }
+                        return@runOnUiThread
+                    }
                     val preview = Preview.Builder()
                         .setTargetRotation(Surface.ROTATION_90)
                         .build()
@@ -799,6 +827,22 @@ class MainActivity : AppCompatActivity() {
 
     fun setTracking(tracker: Tracker, on: Boolean) {
         if (on == tracker.enabled) return
+        if (renderer.getSource("CAM_MAIN") == null) {
+            // Camera not in the mixer: it only runs while tracking needs it, so (re)bind on every toggle
+            if (on) {
+                tracker.enable { ok ->
+                    if (ok) startCamera()
+                    else Toast.makeText(this, "Tracking model missing (${tracker.modelAsset})", Toast.LENGTH_LONG).show()
+                    updateTrackingButtons()
+                }
+            } else {
+                tracker.disable()
+                vision.updateAnalyzer()
+                startCamera()
+                updateTrackingButtons()
+            }
+            return
+        }
         if (on) {
             if (!vision.available) {
                 val msg = if (vision.unsupported) "Hand/face tracking not supported on this camera"
@@ -1859,10 +1903,12 @@ class MainActivity : AppCompatActivity() {
 
             // Special case for Mixer to add Source Controls
             if (effect is MixerEffect) {
-                // 1. Main Camera (Ensure it exists)
-                if (controlsMap.containsKey("CAM_MAIN")) {
-                    currentGroupContent?.let { controlsMap["CAM_MAIN"]!!.attachTo(this, it) }
-                } else {
+                // 1. Main Camera (created once; the user can remove it and add it back from the + menu)
+                val existingCam = controlsMap["CAM_MAIN"]
+                if (existingCam != null) {
+                    currentGroupContent?.let { existingCam.attachTo(this, it) }
+                } else if (!cameraSourceCreated) {
+                    cameraSourceCreated = true
                     val camCtrl = CameraSourceControl(this)
                     controls.add(camCtrl); controlsMap[camCtrl.id] = camCtrl
                     renderer.addSource(SourceType.CAMERA, "CAM_MAIN")
@@ -1913,11 +1959,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val items = arrayOf("Media (Image/Video)", "RTSP Stream", "Generative Shader", "Feedback Loop")
+        val items = mutableListOf("Media (Image/Video)", "RTSP Stream", "Generative Shader", "Feedback Loop")
+        if (renderer.getSource("CAM_MAIN") == null) items.add("Camera")
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Add Source")
-            .setItems(items) { _, which ->
+            .setItems(items.toTypedArray()) { _, which ->
                 when (which) {
+                    4 -> addCameraSource()
                     0 -> {
                         // Launch the new custom in-app Media Browser
                         MediaPickerDialog(this) { uris ->
@@ -1946,6 +1994,38 @@ class MainActivity : AppCompatActivity() {
         } else {
             Toast.makeText(this, "Mixer Full", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun addCameraSource() {
+        if (controlsMap.containsKey("CAM_MAIN")) return
+        val container = mixerGroupContainer ?: return
+        if (renderer.addSource(SourceType.CAMERA, "CAM_MAIN") == null) {
+            Toast.makeText(this, "Mixer Full", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val camCtrl = CameraSourceControl(this)
+        // Alone it is the picture; on top of other sources it starts at 0 like every added source
+        if (renderer.sources.size > 1) camCtrl.setProgress(0)
+        controls.add(camCtrl); controlsMap[camCtrl.id] = camCtrl
+        camCtrl.attachTo(this, container)
+        // Move the new row above the '+' button
+        val view = container.getChildAt(container.childCount - 1)
+        container.removeView(view)
+        container.addView(view, container.childCount - 1)
+        startCamera()
+        Toast.makeText(this, "Camera Added", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Removes the camera from the mixer and switches the camera off (unless hand/face tracking still needs it). */
+    fun removeCameraSource() {
+        val ctrl = controlsMap["CAM_MAIN"] ?: return
+        ctrl.closeMenu()
+        controls.remove(ctrl)
+        controlsMap.remove(ctrl.id)
+        ctrl.removeFromParent()
+        // Release the preview surface only after the camera stopped writing into it
+        startCamera { renderer.removeSource("CAM_MAIN") }
+        Toast.makeText(this, "Camera Removed", Toast.LENGTH_SHORT).show()
     }
 
     private fun attemptAddFeedbackSource() {

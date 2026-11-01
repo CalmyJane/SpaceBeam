@@ -232,6 +232,22 @@ class CameraSourceControl(val mainActivity: MainActivity) : PropertyControl(
             }
         }
         panel.addView(injectSpinner)
+
+        panel.addView(Button(context).apply {
+            text = "REMOVE CAMERA"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#882222"))
+                cornerRadius = 10f
+                setStroke(1, Color.RED)
+            }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 100).apply {
+                topMargin = 10
+                bottomMargin = 10
+            }
+            setOnClickListener { mainActivity.removeCameraSource() }
+        })
     }
 }
 
