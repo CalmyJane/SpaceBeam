@@ -77,4 +77,41 @@ class BpmManagerTest {
         }
         assertEquals(1f, bpm.syncBlend, 0f)
     }
+
+    @Test fun msToNextBeat() {
+        bpm.bpm = 120f  // 500 ms per beat
+        bpm.tick(0.125f)  // beatPos 0.25
+        assertEquals(375L, bpm.msToNextBeat())
+        bpm.tick(0.235f)  // beatPos 0.72
+        assertEquals(140L, bpm.msToNextBeat())
+        bpm.tick(0.17f)  // beatPos 1.06: just after a beat counts as on it
+        assertEquals(0L, bpm.msToNextBeat())
+    }
+
+    @Test fun beatDurationFollowsTempoWhenSynced() {
+        bpm.bpm = 120f
+        val d = BeatDuration({ bpm.bpm }, 30000, 2, 2500L)
+        assertEquals(2500L, d.ms)  // free: the slider's ms
+        d.synced = true
+        d.rawMs = 30000L
+        assertEquals("16 BARS", d.label(30000))
+        assertEquals(32000L, d.ms)  // 64 beats at 120 BPM
+        bpm.bpm = 60f
+        assertEquals(64000L, d.ms)
+        d.rawMs = 0L
+        assertEquals("0", d.label(0))
+        assertEquals(0L, d.ms)
+    }
+
+    @Test fun beatDurationStepsAreMonotonic() {
+        val d = BeatDuration({ 120f }, 30000, 2, 0L)
+        d.synced = true
+        var last = -1f
+        for (v in 0..30000 step 100) {
+            d.rawMs = v.toLong()
+            assertTrue(d.beats >= last)
+            last = d.beats
+        }
+        assertEquals(BeatDuration.BEATS.last(), last, 0f)
+    }
 }

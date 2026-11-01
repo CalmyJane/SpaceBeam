@@ -344,7 +344,10 @@ class MainActivity : AppCompatActivity() {
 
     private val presets = mutableMapOf<Int, Preset>()
     private var pendingSaveIndex: Int? = null
-    private var transitionMs: Long = 2500L
+    // TIME slider; in beat sync the length follows the tempo and preset changes start on the next beat
+    val transitionDuration = BeatDuration({ bpmManager.bpm }, 30000, 2, 2500L)
+    private val transitionMs: Long get() = transitionDuration.ms
+    private var pendingPresetStart: Runnable? = null
     private var transitionStartTime: Long = 0L
     private var isHudVisible = true
     private var isMenuExpanded = true
@@ -366,7 +369,8 @@ class MainActivity : AppCompatActivity() {
 
     private var isAutoPlaying = false
     var autoPlayRandom = false
-    var autoPlayDurationMs = 3000L // 3 seconds hold time by default
+    val autoPlayDuration = BeatDuration({ bpmManager.bpm }, 60000, 2, 3000L) // hold time between auto-play changes
+    val autoPlayDurationMs: Long get() = autoPlayDuration.ms
     private val autoPlayRunnable = Runnable { triggerNextAutoPlay() }
     private lateinit var playBtn: ImageButton
 
@@ -702,6 +706,8 @@ class MainActivity : AppCompatActivity() {
         initDefaultPresets()
         val prefs = getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
         autoPlayRandom = prefs.getBoolean("AP_RANDOM", false)
+        transitionDuration.synced = prefs.getBoolean("TRANS_SYNC", false)
+        autoPlayDuration.synced = prefs.getBoolean("AUTO_DUR_SYNC", false)
         undoHistorySize = prefs.getInt("UNDO_HISTORY", 20)
         undoManager.maxHistory = undoHistorySize
         forceScreenOn = prefs.getBoolean("FORCE_SCREEN_ON", false)
@@ -2939,19 +2945,10 @@ class MainActivity : AppCompatActivity() {
         val transId = "TRANS_TIME"
         var transCtrl = controlsMap[transId]
         if (transCtrl == null) {
-            transCtrl = PropertyControl(
-                transId, "TIME",
-                min = 0, max = 30000, sliderMax = 30000,
-                defaultValue = 2500,
-                layoutStyle = PropertyControl.LayoutStyle.ROW,
-                iconResId = android.R.drawable.ic_menu_recent_history,
-                includeInPreset = false,
-                hasModulation = false,
-                logPower = 2,
-                showValue = true,
-                allowSmoothing = false,
-                valueFormatter = { "%.1fs".format(it / 1000f) }
-            ) { transitionMs = it.toLong() }
+            transCtrl = BeatDurationControl(
+                transId, "TIME", maxMs = 30000, sliderMaxMs = 30000, duration = transitionDuration,
+                iconResId = android.R.drawable.ic_menu_recent_history
+            ) { saveSyncSetting("TRANS_SYNC", it) }
             controls.add(transCtrl)
             controlsMap[transId] = transCtrl
         }
@@ -3817,7 +3814,23 @@ class MainActivity : AppCompatActivity() {
                 or View.SYSTEM_UI_FLAG_FULLSCREEN)
     }
 
+    fun saveSyncSetting(key: String, on: Boolean) {
+        getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE).edit().putBoolean(key, on).apply()
+    }
+
+    /** In beat sync the change waits for the next beat (a press just after a beat counts as on it). */
     private fun applyPreset(idx: Int) {
+        pendingPresetStart?.let { handler.removeCallbacks(it) }
+        pendingPresetStart = null
+        if (presets[idx] == null) return
+        val wait = if (transitionDuration.synced) bpmManager.msToNextBeat() else 0L
+        if (wait <= 0L) { startPreset(idx); return }
+        val start = Runnable { pendingPresetStart = null; startPreset(idx) }
+        pendingPresetStart = start
+        handler.postDelayed(start, wait)
+    }
+
+    private fun startPreset(idx: Int) {
         val p = presets[idx] ?: return
 
         undoManager.pushStateDirectly(controls, activePreset)
@@ -3906,7 +3919,13 @@ class MainActivity : AppCompatActivity() {
 
         if (isAutoPlaying) {
             handler.removeCallbacks(autoPlayRunnable)
-            handler.postDelayed(autoPlayRunnable, transitionMs + autoPlayDurationMs)
+            var delay = transitionMs + autoPlayDurationMs
+            if (transitionDuration.synced) {
+                // At least one beat, fired half a beat early: applyPreset then waits for the exact beat
+                val beatMs = (60000f / bpmManager.bpm).toLong()
+                delay = maxOf(delay, beatMs) - beatMs / 2
+            }
+            handler.postDelayed(autoPlayRunnable, delay)
         }
     }
 

@@ -535,6 +535,13 @@ open class PropertyControl(
         }
     }
 
+    /** Redraws the value text, e.g. when the formatter's output changed for the same value. */
+    fun refreshValueDisplay() {
+        lastDisplayedValue = -Int.MAX_VALUE
+        updateLiveValueUI(value)
+        syncUiElements()
+    }
+
     private fun formatValue(v: Int): String {
         return if (valueFormatter != null) valueFormatter!!(v) else "$v$valueSuffix"
     }
@@ -1324,5 +1331,44 @@ open class PropertyControl(
             canvas.drawText(displayText, cx, cy, textPaint)
             canvas.restore()
         }
+    }
+}
+
+/** Duration slider (ms) whose menu has a SYNC button: in sync it steps through beat/bar lengths at the current BPM. */
+class BeatDurationControl(
+    id: String,
+    label: String,
+    maxMs: Int,
+    sliderMaxMs: Int,
+    val duration: BeatDuration,
+    layoutStyle: LayoutStyle = LayoutStyle.ROW,
+    iconResId: Int? = null,
+    private val onSyncChanged: (Boolean) -> Unit = {}
+) : PropertyControl(
+    id = id, label = label, min = 0, max = maxMs, sliderMax = sliderMaxMs, defaultValue = duration.rawMs.toInt(),
+    layoutStyle = layoutStyle, iconResId = iconResId, includeInPreset = false, hasModulation = false,
+    logPower = 2, showValue = true, allowSmoothing = false,
+    valueFormatter = { duration.label(it) },
+    onValueChanged = { duration.rawMs = it.toLong() }
+) {
+    override fun addExtraControls(panel: LinearLayout, context: Context) {
+        panel.addView(Button(context).apply {
+            fun styleSync() {
+                text = if (duration.synced) "SYNC: BEATS" else "SYNC: OFF"
+                background = GradientDrawable().apply {
+                    setColor(if (duration.synced) Color.parseColor("#0066CC") else Color.parseColor("#444444"))
+                    cornerRadius = 10f; setStroke(1, Color.GRAY)
+                }
+            }
+            textSize = 14f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; includeFontPadding = false; setPadding(0, 0, 0, 0)
+            layoutParams = LinearLayout.LayoutParams(-1, 100).apply { topMargin = 10; bottomMargin = 10 }
+            styleSync()
+            setOnClickListener {
+                duration.synced = !duration.synced
+                styleSync()
+                refreshValueDisplay()
+                onSyncChanged(duration.synced)
+            }
+        })
     }
 }

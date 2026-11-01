@@ -411,14 +411,9 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         contentLayout.addView(filterContainer)
 
         // Auto-Play Duration
-        autoPlayDurationControl = PropertyControl(
-            "AUTO_DUR", "DURATION",
-            min = 0, max = 300000, sliderMax = 60000,
-            defaultValue = activity.autoPlayDurationMs.toInt(),
-            layoutStyle = PropertyControl.LayoutStyle.ROW,
-            includeInPreset = false, hasModulation = false, logPower = 2, showValue = true,
-            valueFormatter = { "%.1fs".format(it / 1000f) }
-        ) { activity.autoPlayDurationMs = it.toLong() }
+        autoPlayDurationControl = BeatDurationControl(
+            "AUTO_DUR", "DURATION", maxMs = 300000, sliderMaxMs = 60000, duration = activity.autoPlayDuration
+        ) { activity.saveSyncSetting("AUTO_DUR_SYNC", it) }
 
         autoPlayDurationControl?.popupElevation = 600f
         autoPlayDurationControl?.attachTo(activity, contentLayout)
