@@ -433,5 +433,91 @@ val BUILTIN_SHADERS = mapOf(
             
             O = vec4(col, 1.0);
         }
+    """.trimIndent(),
+
+        "Droste Pupil" to """
+        // CalmyJane - Droste pupil, minimal (black & white)
+        // Infinite 1-bit Droste zoom: every right eye is a black pupil that holds the whole
+        // mark again, slightly rotated. Square-cornered distances keep every corner pointy.
+        // Seamless: zooms exactly two levels per LOOP_SECONDS, so it repeats forever.
+
+        #define LOOP_SECONDS 12.0   // seconds per loop (smaller = faster zoom)
+        #define ZOOM 3.2            // view size; larger shows more of the parent around the mark
+        #define SWIRL 0.22          // log-polar swirl of the view (0 = straight)
+        #define INVERT 0            // 1 = white mark on black
+        #define HARD_EDGES 0        // 1 = pure 1-bit pixels (no edge smoothing, more shimmer)
+
+        const float K = 0.09;       // child scale (fits the mark inside the eye)
+        const float TH = 0.4;       // child rotation (radians)
+        const float LEVELS = 2.0;   // levels zoomed per loop
+        const float S = 2.0 / 126.0;
+
+        mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+        // mark geometry (150 x 126 SVG units scaled to 2 units tall), Chebyshev box distance
+        float boxSq(vec2 p, vec2 c, vec2 h) { vec2 d = abs(p - c * S) - h * S; return max(d.x, d.y); }
+        float solidSq(vec2 p) { return boxSq(p, vec2(0.0), vec2(75.0, 63.0)); }
+        float frameSq(vec2 p) { return max(solidSq(p), -boxSq(p, vec2(0.225, 0.0), vec2(69.475, 57.5))); }
+        float eyeLSq(vec2 p)  { return boxSq(p, vec2(-29.843, 21.043), vec2(9.31)); }
+        float eyeRSq(vec2 p)  { return boxSq(p, vec2(32.737, 21.043), vec2(9.31)); }
+        float mouthSq(vec2 p) {
+            return min(boxSq(p, vec2(-47.741, -16.586), vec2(8.957, 15.668)),
+                       boxSq(p, vec2(-0.065, -23.343), vec2(56.633, 8.911)));
+        }
+        float markSq(vec2 p) { return min(frameSq(p), min(min(eyeLSq(p), eyeRSq(p)), mouthSq(p))); }
+
+        vec2 F;   // fixed point of the self-similarity (inside the right eye)
+        vec2 toParent(vec2 p) { return F + K * (rot(TH) * (p - F)); }
+        vec2 toChild(vec2 p)  { return F + (rot(-TH) * (p - F)) / K; }
+
+        float fillw(float d, float w) {
+        #if HARD_EDGES
+            return step(d, 0.0);
+        #else
+            return clamp(0.5 - d / w, 0.0, 1.0);
+        #endif
+        }
+
+        void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+            float phase = fract(iTime / LOOP_SECONDS);
+            float res = min(iResolution.x, iResolution.y);
+            vec2 uv = (2.0 * fragCoord - iResolution.xy) / res;
+
+            // F solves (I - K*R) F = eyeCentre, so the child mark sits centred in the right eye
+            vec2 eye = vec2(32.737, 21.043) * S;
+            float c = cos(TH), s = sin(TH);
+            mat2 m = mat2(1.0 - K * c, K * s, -K * s, 1.0 - K * c);       // I - K*rot(TH)
+            float det = m[0][0] * m[1][1] - m[1][0] * m[0][1];
+            mat2 mi = mat2(m[1][1], -m[0][1], -m[1][0], m[0][0]) / det;   // its inverse
+            F = mi * eye;
+
+            vec2 q = uv * ZOOM;
+            q = rot(SWIRL * log(max(length(q), 1e-4))) * q;
+            float zoom = pow(K, LEVELS * phase);
+            vec2 p = F + zoom * (rot(TH * LEVELS * phase) * q);
+
+            // pixel footprint in mark units, before the level jump
+            float px = ZOOM * 2.0 / res * zoom * 1.03 * 0.75;
+
+            float level = 0.0;
+            for (int i = 0; i < 12; i++) { if (solidSq(p) <= 0.0) break; p = toParent(p); level -= 1.0; }
+            for (int i = 0; i < 30; i++) { if (solidSq(toChild(p)) > 0.0) break; p = toChild(p); level += 1.0; }
+            px *= pow(K, -level);
+
+            float dM = markSq(p);
+            float dE = eyeRSq(p);
+            float dChild = solidSq(toChild(p)) * K;
+
+            float pupil = fillw(dE, px);
+            float v = 1.0 - fillw(dM, px) * (1.0 - pupil);                     // white face, black mark
+            // white hairline around the child; fades out once it is thinner than a pixel
+            // (one sample per pixel would otherwise sprinkle it into stray dots)
+            float hair = fillw(abs(dChild - 0.012) - 0.004, px) * clamp(0.008 / px - 0.5, 0.0, 1.0);
+            v = mix(v, hair, pupil);                                           // black pupil
+        #if INVERT
+            v = 1.0 - v;
+        #endif
+            fragColor = vec4(vec3(v), 1.0);
+        }
     """.trimIndent()
 )
