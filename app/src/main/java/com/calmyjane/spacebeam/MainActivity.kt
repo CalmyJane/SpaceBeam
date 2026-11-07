@@ -369,8 +369,11 @@ class MainActivity : AppCompatActivity() {
 
     private var isAutoPlaying = false
     var autoPlayRandom = false
-    val autoPlayDuration = BeatDuration({ bpmManager.bpm }, 60000, 2, 3000L) // hold time between auto-play changes
-    val autoPlayDurationMs: Long get() = autoPlayDuration.ms
+    // Free: hold time after each transition. Synced: the whole cycle in beats/bars, transition included
+    // (a longer transition wins), so the changes stay on the bar grid
+    val autoPlayDuration = BeatDuration({ bpmManager.bpm }, 60000, 2, 3000L, maxBeats = 512f)
+    private val autoPlayCycleMs: Long get() =
+        if (autoPlayDuration.synced) maxOf(autoPlayDuration.ms, transitionMs) else transitionMs + autoPlayDuration.ms
     private val autoPlayRunnable = Runnable { triggerNextAutoPlay() }
     private lateinit var playBtn: ImageButton
 
@@ -3133,7 +3136,7 @@ class MainActivity : AppCompatActivity() {
             sortedFilter.firstOrNull { it > activePreset } ?: sortedFilter.first()
         }
 
-        applyPreset(nextIdx)
+        applyPreset(nextIdx, fromAutoPlay = true)
     }
 
 
@@ -3281,7 +3284,7 @@ class MainActivity : AppCompatActivity() {
         playBtnDrawable.progress = 0f
         playBtnDrawable.invalidateSelf()
         playBtnAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = autoPlayDurationMs
+            duration = (autoPlayCycleMs - transitionMs).coerceAtLeast(0L)
             interpolator = android.view.animation.LinearInterpolator()
             addUpdateListener {
                 playBtnDrawable.progress = it.animatedValue as Float
@@ -3818,12 +3821,16 @@ class MainActivity : AppCompatActivity() {
         getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE).edit().putBoolean(key, on).apply()
     }
 
+    /** Preset changes start on a beat when TIME is synced, auto-play changes also when its DURATION is synced. */
+    private fun beatSnapped(fromAutoPlay: Boolean) =
+        transitionDuration.synced || (fromAutoPlay && autoPlayDuration.synced)
+
     /** In beat sync the change waits for the next beat (a press just after a beat counts as on it). */
-    private fun applyPreset(idx: Int) {
+    private fun applyPreset(idx: Int, fromAutoPlay: Boolean = false) {
         pendingPresetStart?.let { handler.removeCallbacks(it) }
         pendingPresetStart = null
         if (presets[idx] == null) return
-        val wait = if (transitionDuration.synced) bpmManager.msToNextBeat() else 0L
+        val wait = if (beatSnapped(fromAutoPlay)) bpmManager.msToNextBeat() else 0L
         if (wait <= 0L) { startPreset(idx); return }
         val start = Runnable { pendingPresetStart = null; startPreset(idx) }
         pendingPresetStart = start
@@ -3919,8 +3926,8 @@ class MainActivity : AppCompatActivity() {
 
         if (isAutoPlaying) {
             handler.removeCallbacks(autoPlayRunnable)
-            var delay = transitionMs + autoPlayDurationMs
-            if (transitionDuration.synced) {
+            var delay = autoPlayCycleMs
+            if (beatSnapped(fromAutoPlay = true)) {
                 // At least one beat, fired half a beat early: applyPreset then waits for the exact beat
                 val beatMs = (60000f / bpmManager.bpm).toLong()
                 delay = maxOf(delay, beatMs) - beatMs / 2

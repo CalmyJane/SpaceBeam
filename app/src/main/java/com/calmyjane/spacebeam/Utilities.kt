@@ -91,15 +91,21 @@ class BpmManager(private val nanoClock: () -> Long = System::nanoTime) {
 
 /**
  * A duration from a slider in ms that can be switched to musical lengths: while [synced], the slider position
- * (same [sliderMax]/[logPower] curve as the slider) picks one of [BEATS] and the length follows the current tempo.
+ * (same [sliderMax]/[logPower] curve as the slider) picks one of [BEATS] up to [maxBeats] and the length follows
+ * the current tempo.
  */
-class BeatDuration(private val bpm: () -> Float, private val sliderMax: Int, private val logPower: Int, initialMs: Long) {
+class BeatDuration(
+    private val bpm: () -> Float, private val sliderMax: Int, private val logPower: Int, initialMs: Long,
+    maxBeats: Float = 64f
+) {
     @Volatile var rawMs = initialMs
     @Volatile var synced = false
 
+    private val steps = BEATS.count { it <= maxBeats }
+
     fun beatIndex(sliderValue: Long = rawMs): Int {
         val t = (sliderValue.toDouble() / sliderMax).coerceIn(0.0, 1.0).pow(1.0 / logPower)
-        return (t * (BEATS.size - 1)).roundToInt()
+        return (t * (steps - 1)).roundToInt()
     }
 
     val beats: Float get() = BEATS[beatIndex()]
@@ -109,8 +115,9 @@ class BeatDuration(private val bpm: () -> Float, private val sliderMax: Int, pri
         if (synced) LABELS[beatIndex(sliderValue.toLong())] else "%.1fs".format(sliderValue / 1000f)
 
     companion object {
-        val BEATS = floatArrayOf(0f, 0.5f, 1f, 2f, 4f, 8f, 16f, 32f, 64f)
-        val LABELS = arrayOf("0", "1/2 BEAT", "1 BEAT", "2 BEATS", "1 BAR", "2 BARS", "4 BARS", "8 BARS", "16 BARS")
+        val BEATS = floatArrayOf(0f, 0.5f, 1f, 2f, 4f, 8f, 16f, 32f, 64f, 128f, 256f, 512f)
+        val LABELS = arrayOf("0", "1/2 BEAT", "1 BEAT", "2 BEATS", "1 BAR", "2 BARS", "4 BARS", "8 BARS", "16 BARS",
+            "32 BARS", "64 BARS", "128 BARS")
     }
 }
 

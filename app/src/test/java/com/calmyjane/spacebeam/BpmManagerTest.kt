@@ -112,6 +112,14 @@ class BpmManagerTest {
             assertTrue(d.beats >= last)
             last = d.beats
         }
-        assertEquals(BeatDuration.BEATS.last(), last, 0f)
+        assertEquals(64f, last, 0f)  // default range ends at 16 bars
+    }
+
+    @Test fun beatDurationLongerRange() {
+        val d = BeatDuration({ 120f }, 60000, 2, 60000L, maxBeats = 512f)
+        d.synced = true
+        assertEquals("128 BARS", d.label(60000))
+        assertEquals(256000L, d.ms)  // 512 beats at 120 BPM
+        assertEquals("0", d.label(0))
     }
 }
