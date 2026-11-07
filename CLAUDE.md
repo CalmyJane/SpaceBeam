@@ -52,7 +52,7 @@ Real-time kaleidoscope visual synthesizer for Android, meant for party/event use
 | `HandTracker.kt` | 445 | HandTracker (MediaPipe hand), TrackingOverlayView (phone-only hand/face overlay + bars), button icons |
 | `Tracker.kt` | 235 | VisionPipeline (shared camera analysis stream), Tracker base (smoothing, spike filter, blend) |
 | `FaceTracker.kt` | 90 | FaceTracker (MediaPipe face: roll, distance, mouth width) |
-| `ShaderHelper.kt` | 437 | GL shader compile/link utility object (records `failures`), `wrapShaderCode`, BUILTIN_SHADERS map |
+| `ShaderHelper.kt` | 768 | GL shader compile/link utility object (records `failures`), `wrapShaderCode`, BUILTIN_SHADERS map |
 | `Presets.kt` | 99 | Preset data class + PresetCodec (preset JSON in SharedPreferences, backward-compatible keys) |
 | `Utilities.kt` | 229 | BpmManager (tap tempo, beat clock, sync fade), UndoManager, PlaylistItem, BlendMode/SourceType enums |
 | `VideoRecorder.kt` | 185 | MediaCodec H.264 encoder + AudioRecord → MediaMuxer |

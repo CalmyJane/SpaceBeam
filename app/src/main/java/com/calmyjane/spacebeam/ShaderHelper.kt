@@ -519,5 +519,250 @@ val BUILTIN_SHADERS = mapOf(
         #endif
             fragColor = vec4(vec3(v), 1.0);
         }
+    """.trimIndent(),
+
+        "Logo Ripples" to """
+        // CalmyJane - Logo Ripples (black & white)
+        // Square-cornered ripples flow out of the mark and out of its face, op-art style.
+
+        #define SPEED 0.6       // rings per second
+        #define RINGS 7.0       // rings per unit (higher = thinner rings)
+        #define SCALE 1.7       // view size; larger = smaller mark
+        #define WOBBLE 0.06     // wave distortion of the rings (0 = straight)
+        #define SWAY 0.3        // slow rotation sway (radians)
+        #define INVERT 0        // 1 = white on black
+
+        const float S = 2.0 / 126.0;
+        mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+        float boxSq(vec2 p, vec2 c, vec2 h) { vec2 d = abs(p - c * S) - h * S; return max(d.x, d.y); }
+        float markSq(vec2 p) {
+            float frame = max(boxSq(p, vec2(0.0), vec2(75.0, 63.0)), -boxSq(p, vec2(0.225, 0.0), vec2(69.475, 57.5)));
+            float eyes = min(boxSq(p, vec2(-29.843, 21.043), vec2(9.31)), boxSq(p, vec2(32.737, 21.043), vec2(9.31)));
+            float mouth = min(boxSq(p, vec2(-47.741, -16.586), vec2(8.957, 15.668)),
+                              boxSq(p, vec2(-0.065, -23.343), vec2(56.633, 8.911)));
+            return min(min(frame, eyes), mouth);
+        }
+        float fillw(float d, float w) { return clamp(0.5 - d / w, 0.0, 1.0); }
+
+        void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+            float res = min(iResolution.x, iResolution.y);
+            float px = 2.0 / res * SCALE;
+            vec2 uv = (2.0 * fragCoord - iResolution.xy) / res * SCALE;
+            uv = rot(SWAY * sin(iTime * 0.21)) * uv;
+
+            float d = markSq(uv);
+            float w = d + WOBBLE * sin(d * 6.0 - iTime * 1.3) * smoothstep(0.0, 0.3, d);
+            float tri = abs(fract(w * RINGS - mod(iTime * SPEED, 1.0)) - 0.5) * 2.0;
+            float v = clamp((tri - 0.5) / (px * RINGS * 2.0) + 0.5, 0.0, 1.0);   // rings
+            v = max(v, fillw(d - 0.06, px));                                      // white gap around the mark
+            v *= 1.0 - fillw(d, px);                                              // black mark
+        #if INVERT
+            v = 1.0 - v;
+        #endif
+            fragColor = vec4(vec3(v), 1.0);
+        }
+    """.trimIndent(),
+
+        "Logo Spiral" to """
+        // CalmyJane - Logo Spiral (black & white)
+        // Log-polar spiral of marks flowing out of the centre forever, checker-inverted.
+
+        #define PER_TURN 12.0   // marks around one turn
+        #define ARMS 2.0        // spiral arms (0 = rings); ARMS + PER_TURN must be even
+        #define SPEED 0.5       // marks per second along the spiral (negative = inward)
+        #define INVERT 0        // 1 = swap black and white
+
+        const float S = 2.0 / 126.0;
+        float boxSq(vec2 p, vec2 c, vec2 h) { vec2 d = abs(p - c * S) - h * S; return max(d.x, d.y); }
+        float markSq(vec2 p) {
+            float frame = max(boxSq(p, vec2(0.0), vec2(75.0, 63.0)), -boxSq(p, vec2(0.225, 0.0), vec2(69.475, 57.5)));
+            float eyes = min(boxSq(p, vec2(-29.843, 21.043), vec2(9.31)), boxSq(p, vec2(32.737, 21.043), vec2(9.31)));
+            float mouth = min(boxSq(p, vec2(-47.741, -16.586), vec2(8.957, 15.668)),
+                              boxSq(p, vec2(-0.065, -23.343), vec2(56.633, 8.911)));
+            return min(min(frame, eyes), mouth);
+        }
+        float fillw(float d, float w) { return clamp(0.5 - d / w, 0.0, 1.0); }
+
+        void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+            float res = min(iResolution.x, iResolution.y);
+            vec2 uv = (2.0 * fragCoord - iResolution.xy) / res;
+            float r = max(length(uv), 1e-4);
+            vec2 lp = vec2(log(r), atan(uv.y, uv.x));       // conformal log-polar view
+
+            // lattice rotated so one turn (0, 2pi) lands exactly on lattice vector (ARMS, PER_TURN)
+            float L = length(vec2(ARMS, PER_TURN));
+            float ca = PER_TURN / L, sa = ARMS / L;
+            float k = L / 6.2831853;
+            vec2 g = vec2(lp.x * ca + lp.y * sa, -lp.x * sa + lp.y * ca) * k;
+            g.x -= mod(iTime * SPEED, 2.0);
+
+            vec2 cell = floor(g);
+            vec2 f = fract(g) - 0.5;
+            vec2 p = vec2(-f.y, f.x) * 3.0;                 // mark upright, top pointing outward
+            float px = 3.0 * k * 2.0 / (res * r);
+
+            float m = fillw(markSq(p), px);
+            float v = mod(cell.x + cell.y, 2.0) < 0.5 ? 1.0 - m : m;
+            v = mix(v, 0.5, smoothstep(0.3, 1.0, px));      // marks smaller than a pixel fade to grey
+        #if INVERT
+            v = 1.0 - v;
+        #endif
+            fragColor = vec4(vec3(v), 1.0);
+        }
+    """.trimIndent(),
+
+        "Logo Grid" to """
+        // CalmyJane - Logo Grid (black & white)
+        // A wall of marks; waves roll out from the centre, snapping each mark a quarter
+        // turn and flipping its colours as they pass.
+
+        #define CELLS 6.0       // marks across the short side of the screen
+        #define SPEED 0.5       // waves per second
+        #define SPREAD 0.18     // delay per cell away from the centre (0 = all at once)
+        #define INVERT 0        // 1 = swap black and white
+
+        const float S = 2.0 / 126.0;
+        mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+        float boxSq(vec2 p, vec2 c, vec2 h) { vec2 d = abs(p - c * S) - h * S; return max(d.x, d.y); }
+        float markSq(vec2 p) {
+            float frame = max(boxSq(p, vec2(0.0), vec2(75.0, 63.0)), -boxSq(p, vec2(0.225, 0.0), vec2(69.475, 57.5)));
+            float eyes = min(boxSq(p, vec2(-29.843, 21.043), vec2(9.31)), boxSq(p, vec2(32.737, 21.043), vec2(9.31)));
+            float mouth = min(boxSq(p, vec2(-47.741, -16.586), vec2(8.957, 15.668)),
+                              boxSq(p, vec2(-0.065, -23.343), vec2(56.633, 8.911)));
+            return min(min(frame, eyes), mouth);
+        }
+        float fillw(float d, float w) { return clamp(0.5 - d / w, 0.0, 1.0); }
+
+        void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+            float res = min(iResolution.x, iResolution.y);
+            vec2 g = (2.0 * fragCoord - iResolution.xy) / res * CELLS * 0.5;
+            vec2 cell = floor(g);
+            vec2 f = fract(g) - 0.5;
+
+            float ph = mod(iTime * SPEED, 4.0) - length(cell + 0.5) * SPREAD;
+            float k = floor(ph);
+            float e = smoothstep(0.55, 1.0, fract(ph));     // hold, then a quick quarter turn
+            float pop = 1.0 + 0.3 * sin(e * 3.1415927);     // shrinks a little while turning
+            vec2 p = rot((k + e) * 1.5707963) * f * 3.2 * pop;
+            float px = 2.0 / res * CELLS * 0.5 * 3.2 * pop;
+
+            float m = fillw(markSq(p), px);
+            float v = mod(cell.x + cell.y + k, 2.0) < 0.5 ? 1.0 - m : m;
+        #if INVERT
+            v = 1.0 - v;
+        #endif
+            fragColor = vec4(vec3(v), 1.0);
+        }
+    """.trimIndent(),
+
+        "Logo Tunnel" to """
+        // CalmyJane - Logo Tunnel (black & white)
+        // Fly down a square corridor whose walls are tiled with the mark.
+
+        #define SPEED 1.2       // flight speed
+        #define PER_WALL 3.0    // marks across each wall
+        #define SPIN 0.15       // corridor roll, radians per second
+        #define FOG 0.35        // fade into the dark distance (0 = none)
+        #define INVERT 0        // 1 = swap black and white
+
+        const float S = 2.0 / 126.0;
+        mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+        float boxSq(vec2 p, vec2 c, vec2 h) { vec2 d = abs(p - c * S) - h * S; return max(d.x, d.y); }
+        float markSq(vec2 p) {
+            float frame = max(boxSq(p, vec2(0.0), vec2(75.0, 63.0)), -boxSq(p, vec2(0.225, 0.0), vec2(69.475, 57.5)));
+            float eyes = min(boxSq(p, vec2(-29.843, 21.043), vec2(9.31)), boxSq(p, vec2(32.737, 21.043), vec2(9.31)));
+            float mouth = min(boxSq(p, vec2(-47.741, -16.586), vec2(8.957, 15.668)),
+                              boxSq(p, vec2(-0.065, -23.343), vec2(56.633, 8.911)));
+            return min(min(frame, eyes), mouth);
+        }
+        float fillw(float d, float w) { return clamp(0.5 - d / w, 0.0, 1.0); }
+
+        void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+            float res = min(iResolution.x, iResolution.y);
+            vec2 uv = (2.0 * fragCoord - iResolution.xy) / res;
+            uv = rot(mod(iTime * SPIN, 6.2831853)) * uv;
+
+            // square corridor: each wall is a plane, so depth = 1 / distance to the nearest wall
+            vec2 a = abs(uv);
+            float r = max(max(a.x, a.y), 1e-4);
+            float u, side;
+            if (a.x > a.y) { u = uv.y / a.x; side = uv.x > 0.0 ? 0.0 : 2.0; }
+            else           { u = uv.x / a.y; side = uv.y > 0.0 ? 1.0 : 3.0; }
+            float z = 1.0 / r;
+
+            vec2 g = vec2((u + 1.0) * 0.5 * PER_WALL, z * PER_WALL * 0.5 + mod(iTime * SPEED * PER_WALL * 0.5, 2.0));
+            vec2 cell = floor(g);
+            vec2 p = (fract(g) - 0.5) * 3.0;
+            float px = 1.5 * PER_WALL * 2.0 / res * max(1.0 / r, 1.0 / (r * r));
+
+            float m = fillw(markSq(p), px);
+            float v = mod(cell.x + cell.y + side, 2.0) < 0.5 ? 1.0 - m : m;
+            v = mix(v, 0.5, smoothstep(0.3, 1.0, px));      // marks smaller than a pixel fade to grey
+        #if INVERT
+            v = 1.0 - v;
+        #endif
+            v *= clamp(exp(-FOG * (z - 1.0)), 0.0, 1.0);
+            fragColor = vec4(vec3(v), 1.0);
+        }
+    """.trimIndent(),
+
+        "Logo Face" to """
+        // CalmyJane - Logo Face (black & white)
+        // The mark comes alive: eyes look around and blink, the face hops to the tempo
+        // in front of drifting stripes, with a hard retro drop shadow.
+
+        #define BPM 120.0       // hop tempo, one hop per beat
+        #define HOP 1.0         // hop and squash amount (0 = still)
+        #define LOOK 1.0        // how far the eyes wander (0 = fixed)
+        #define SIZE 0.75       // mark height on screen (1 = full height)
+        #define STRIPES 14.0    // background stripes across the screen
+        #define INVERT 0        // 1 = swap black and white
+
+        const float S = 2.0 / 126.0;
+        float boxSq(vec2 p, vec2 c, vec2 h) { vec2 d = abs(p - c * S) - h * S; return max(d.x, d.y); }
+        float fillw(float d, float w) { return clamp(0.5 - d / w, 0.0, 1.0); }
+        float hash(float n) { return fract(sin(mod(n, 1000.0) * 12.9898) * 43758.5453); }
+
+        void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+            float res = min(iResolution.x, iResolution.y);
+            float px0 = 2.0 / res;
+            vec2 uv = (2.0 * fragCoord - iResolution.xy) / res;
+
+            // background: thin diagonal stripes drifting
+            float tri = abs(fract((uv.x + uv.y) * STRIPES * 0.5 - mod(iTime * 0.5, 1.0)) - 0.5) * 2.0;
+            float v = clamp((tri - 0.3) / (px0 * STRIPES * 1.5) + 0.5, 0.0, 1.0);
+
+            // hop with squash & stretch
+            float hop = abs(sin(mod(iTime * BPM / 60.0, 2.0) * 3.1415927)) * HOP;
+            float squash = 0.07 * HOP - 0.07 * hop;
+            vec2 p = uv / SIZE;
+            p.y -= hop * 0.12 - 0.05 * HOP;
+            p /= vec2(1.0 + squash, 1.0 - squash);
+            float px = px0 / SIZE * 1.1;
+
+            // eyes glance to a new random spot every 1.6 s and blink every 3.3 s
+            float seg = floor(iTime / 1.6);
+            vec2 from = vec2(hash(seg), hash(seg + 7.1)) - 0.5;
+            vec2 to = vec2(hash(seg + 1.0), hash(seg + 8.1)) - 0.5;
+            vec2 look = mix(from, to, smoothstep(0.0, 0.2, fract(iTime / 1.6))) * vec2(16.0, 10.0) * LOOK;
+            float blink = 1.0 - 0.9 * (1.0 - smoothstep(0.0, 0.03, abs(fract(iTime / 3.3) - 0.5)));
+
+            float solid = boxSq(p, vec2(0.0), vec2(75.0, 63.0));
+            float frame = max(solid, -boxSq(p, vec2(0.225, 0.0), vec2(69.475, 57.5)));
+            vec2 eyeH = vec2(9.31, 9.31 * blink);
+            float eyes = min(boxSq(p, vec2(-29.843, 21.043) + look, eyeH), boxSq(p, vec2(32.737, 21.043) + look, eyeH));
+            float mouth = min(boxSq(p, vec2(-47.741, -16.586), vec2(8.957, 15.668)),
+                              boxSq(p, vec2(-0.065, -23.343), vec2(56.633, 8.911)));
+            float d = min(min(frame, eyes), mouth);
+            float shadow = boxSq(p - vec2(0.12, -0.12), vec2(0.0), vec2(75.0, 63.0));
+
+            v *= 1.0 - fillw(shadow - 0.06, px);       // hard drop shadow
+            v = max(v, fillw(solid - 0.06, px));       // white face with a halo
+            v *= 1.0 - fillw(d, px);                   // black mark
+        #if INVERT
+            v = 1.0 - v;
+        #endif
+            fragColor = vec4(vec3(v), 1.0);
+        }
     """.trimIndent()
 )
