@@ -398,7 +398,7 @@ Configure in the Settings menu:
 
 | Setting | Description |
 |---------|------------|
-| **Duration** | How long each preset plays before switching. Tap **DURATION** for **SYNC: BEATS** to count in beats and bars instead of seconds |
+| **Duration** | How long each preset holds after its transition before switching. Tap **DURATION** for **SYNC: BEATS** to count in beats and bars (up to 128 bars) instead of seconds. In sync, Duration is the whole cycle with the transition included, so 4 bars means a new preset every 4 bars, on the beat. If the transition is longer, it sets the cycle |
 | **Random Order** | Shuffle vs. sequential preset cycling |
 | **Include Presets** | Checkboxes to include/exclude specific preset slots |
 
