@@ -8,6 +8,9 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import kotlin.math.floor
+import kotlin.math.pow
+import kotlin.math.roundToInt
 
 data class PlaylistItem(
     val uri: android.net.Uri,
@@ -24,7 +27,7 @@ class BpmManager(private val nanoClock: () -> Long = System::nanoTime) {
     private val MAX_TAPS = 8
 
     /** Global beat clock in beats (GL thread). Beat-synced LFOs glide towards its phase; a tap puts a beat on the tap. */
-    var beatPos = 0.0; private set
+    @Volatile var beatPos = 0.0; private set
     @Volatile private var pendingTapNanos = 0L
 
     // Beat-synced LFO switch (beat button). On by default; fades synced LFO depth in/out via [syncBlend].
@@ -49,6 +52,13 @@ class BpmManager(private val nanoClock: () -> Long = System::nanoTime) {
         val step = deltaTime / 0.8f
         syncBlendLinear = if (syncBlendLinear < goal) minOf(goal, syncBlendLinear + step) else maxOf(goal, syncBlendLinear - step)
         syncBlend = syncBlendLinear * syncBlendLinear * (3f - 2f * syncBlendLinear)
+    }
+
+    /** Milliseconds until the next whole beat; a beat that passed less than [grace] beats ago counts as now (0). */
+    fun msToNextBeat(grace: Double = 0.08): Long {
+        val frac = beatPos - floor(beatPos)
+        if (frac < grace) return 0L
+        return ((1.0 - frac) * 60000.0 / bpm).toLong()
     }
 
     fun tap() {
@@ -76,6 +86,38 @@ class BpmManager(private val nanoClock: () -> Long = System::nanoTime) {
                 bpm = (60000.0 / avgInterval).toFloat().coerceIn(30f, 300f)
             }
         }
+    }
+}
+
+/**
+ * A duration from a slider in ms that can be switched to musical lengths: while [synced], the slider position
+ * (same [sliderMax]/[logPower] curve as the slider) picks one of [BEATS] up to [maxBeats] and the length follows
+ * the current tempo.
+ */
+class BeatDuration(
+    private val bpm: () -> Float, private val sliderMax: Int, private val logPower: Int, initialMs: Long,
+    maxBeats: Float = 64f
+) {
+    @Volatile var rawMs = initialMs
+    @Volatile var synced = false
+
+    private val steps = BEATS.count { it <= maxBeats }
+
+    fun beatIndex(sliderValue: Long = rawMs): Int {
+        val t = (sliderValue.toDouble() / sliderMax).coerceIn(0.0, 1.0).pow(1.0 / logPower)
+        return (t * (steps - 1)).roundToInt()
+    }
+
+    val beats: Float get() = BEATS[beatIndex()]
+    val ms: Long get() = if (synced) (beats * 60000f / bpm()).toLong() else rawMs
+
+    fun label(sliderValue: Int): String =
+        if (synced) LABELS[beatIndex(sliderValue.toLong())] else "%.1fs".format(sliderValue / 1000f)
+
+    companion object {
+        val BEATS = floatArrayOf(0f, 0.5f, 1f, 2f, 4f, 8f, 16f, 32f, 64f, 128f, 256f, 512f)
+        val LABELS = arrayOf("0", "1/2 BEAT", "1 BEAT", "2 BEATS", "1 BAR", "2 BARS", "4 BARS", "8 BARS", "16 BARS",
+            "32 BARS", "64 BARS", "128 BARS")
     }
 }
 
