@@ -285,6 +285,8 @@ Each parameter can have its own LFO that oscillates the value automatically:
 | **Depth** | How far from center the oscillation reaches |
 | **Shape** | Waveform: Sine, Triangle, Ramp, Wobble Sine, Random Smooth, Random Step |
 
+Changing the shape glides to the new waveform instead of jumping. The glide takes as long as the slider's **smooth** setting (short when smooth is 0).
+
 LFOs can be **BPM-synced** -- turn syncing on and set the BPM in settings or with the Tap Tempo button and LFO speeds will quantize to musical divisions.
 
 All synced LFOs follow one shared beat clock, so they stay in step with each other. Every tap on **Tap BPM** marks a beat: the synced LFOs glide onto it (they speed up or slow down for a moment, they never jump or run backwards). Tap once to just re-align, tap 3+ times to also set the tempo.

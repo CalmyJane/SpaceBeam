@@ -118,6 +118,26 @@ class PropertyControlTest {
         }
     }
 
+    /** Shape button sets modShape directly: the output glides over the slider's smoothing time instead of jumping. */
+    @Test fun shapeButtonGlidesWithoutJump() {
+        for ((mode, from, to) in listOf(
+            Triple(PropertyControl.ModMode.CLAMP, PropertyControl.WaveShape.SINE, PropertyControl.WaveShape.RANDOM_STEP),
+            Triple(PropertyControl.ModMode.WRAP, PropertyControl.WaveShape.RAMP, PropertyControl.WaveShape.SINE))) {
+            val c = PropertyControl("X", "X", hasModulation = true, modMode = mode)
+            c.restore(lfoSnapshot(500, from), 0f)
+            c.smoothing = 500
+            c.run(1f)
+            c.modShape = to
+            var last = c.computedValue
+            c.run(2f) {
+                var d = kotlin.math.abs(it.computedValue - last)
+                if (mode == PropertyControl.ModMode.WRAP) d = minOf(d, 1f - d)
+                assertTrue("$mode $from->$to jumped by $d", d < 0.05f)
+                last = it.computedValue
+            }
+        }
+    }
+
     @Test fun restoreThenSnapshotRoundTrips() {
         val c = PropertyControl("X", "X", hasModulation = true)
         val s = PropertyControl.Snapshot(420, true, 333, 666, "TRIANGLE", 250, isSynced = false, syncIndex = 2,

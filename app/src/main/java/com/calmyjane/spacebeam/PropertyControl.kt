@@ -118,6 +118,13 @@ open class PropertyControl(
     private var oldModShape: WaveShape? = null
     private var shapeFadeProgress: Float = 1f
 
+    // Shape changed outside a preset crossfade (shape button): the output glides from where it was to the new wave
+    private var lastLfoShape: WaveShape? = null
+    private var shapeGlideOffset = 0f
+    private var shapeGlideTime = 0f
+    private var shapeGlideDuration = 0f
+    private var lastLfoOutput = -1f
+
     private var sliderView: SliderBox? = null
     private var modIndicator: View? = null
     private var mainRowLayout: LinearLayout? = null
@@ -400,6 +407,31 @@ open class PropertyControl(
                 currentCalculatedOutput = (smoothedNormalized * (1.0f - depthNorm)) + (rawWave.toFloat() * depthNorm)
             }
         }
+
+        val shapeNow = modShape
+        if (shapeNow != lastLfoShape) {
+            if (lastLfoShape != null && oldModShape == null && lastLfoOutput >= 0f) {
+                var diff = lastLfoOutput - currentCalculatedOutput
+                if (modMode == ModMode.WRAP) diff = ((diff + 0.5f) % 1f + 1f) % 1f - 0.5f
+                shapeGlideOffset = diff
+                shapeGlideTime = 0f
+                // Same time scale as the slider smoothing (baseLerp), never a hard cut
+                val s = if (allowSmoothing) smoothing / 1000f else 0f
+                shapeGlideDuration = (3f / (10.0f * (1.0f - s) * (1.0f - s) + 0.1f)).coerceIn(0.15f, 8f)
+            }
+            lastLfoShape = shapeNow
+        }
+        if (shapeGlideOffset != 0f) {
+            shapeGlideTime += deltaTime
+            val g = (shapeGlideTime / shapeGlideDuration).coerceIn(0f, 1f)
+            if (g >= 1f) {
+                shapeGlideOffset = 0f
+            } else {
+                val glided = currentCalculatedOutput + shapeGlideOffset * (1f - g * g * (3f - 2f * g))
+                currentCalculatedOutput = if (modMode == ModMode.WRAP) ((glided % 1f) + 1f) % 1f else glided.coerceIn(0f, 1f)
+            }
+        }
+        lastLfoOutput = currentCalculatedOutput
 
         val act = currentContext as? MainActivity
         val sh = act?.sensorHelper
