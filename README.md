@@ -66,6 +66,8 @@ Each source has additional options when tapping it's name to open the **details 
 
 The built-in camera is the default source. Tap the camera switch button to cycle through all available cameras (front wide, back wide, back ultrawide, back telephoto, etc.).
 
+Don't need the camera? Tap **REMOVE CAMERA** in its details menu. The camera then switches off completely, which saves battery and keeps the phone cooler. If hand or face tracking is on, only a small tracking stream keeps running. Add it back any time with **+** -> **Camera**. With no sources at all the output is black.
+
 ### RTSP Stream
 
 Stream video from another device over the local network. Enter the RTSP URL (shown in the streaming app on the remote device):

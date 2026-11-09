@@ -91,6 +91,14 @@ class VisionPipeline {
         }
     }
 
+    /** The camera was switched off (no camera source and no tracking): no stream until the next bind. */
+    fun stop() {
+        analysis?.clearAnalyzer()
+        analysis = null
+        available = false
+        unsupported = false
+    }
+
     fun setDisplayRotation(rotation: Int) {
         analysis?.targetRotation = rotation
     }
