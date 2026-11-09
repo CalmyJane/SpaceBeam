@@ -134,7 +134,8 @@ Transforms the image before the kaleidoscope effect:
 | Parameter | Description                                                         |
 |-----------|---------------------------------------------------------------------|
 | **Angle** | Rotate the image (wraps around, great with **ramp** LFO modulation) |
-| **Zoom** | Scale in/out while mirroring the image as it repeats                |
+| **Zoom** | Scale in/out; when zoomed out, **Edge** decides what fills the border |
+| **Edge** | Mirror (image repeats mirrored), Hold (edge pixels are stretched outwards) or Repeat (image tiles without mirroring) |
 | **Move X/Y** | Pan the image horizontally/vertically                               |
 | **Tilt X/Y** | Perspective tilt                                                    |
 | **Bend** | Bends the corners of the image towards you or away from you         |
@@ -191,7 +192,7 @@ Escher-style spiral: one ring of the image repeats endlessly towards the center,
 
 ### Master Transform
 
-Same parameters as Camera Transform (Angle, Zoom, Move, Tilt, Bend, Wobble, RGB Shift) but applied after the kaleidoscope. Rotating here spins the entire kaleidoscope pattern.
+Same parameters as Camera Transform (Angle, Zoom, Edge, Move, Tilt, Bend, Wobble, RGB Shift) but applied after the kaleidoscope. Rotating here spins the entire kaleidoscope pattern.
 
 ### 3D Tunnel
 

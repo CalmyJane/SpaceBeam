@@ -595,7 +595,7 @@ class TransformEffect(idPrefix: String, title: String, activity: MainActivity) :
     private var prog = 0
     private var locTex = -1; private var locRatio = -1; private var locZ = -1; private var locR = -1
     private var locTx = -1; private var locTy = -1; private var locTiX = -1; private var locTiY = -1
-    private var locWarp = -1; private var locRGB = -1; private var locBend = -1; private var locWobble = -1
+    private var locWarp = -1; private var locRGB = -1; private var locBend = -1; private var locWobble = -1; private var locWrap = -1
     private val pZoom = "${idPrefix}_ZOOM"
     private val pAngle = "${idPrefix}_ANGLE"
     private val pTx = "${idPrefix}_TX"
@@ -605,6 +605,7 @@ class TransformEffect(idPrefix: String, title: String, activity: MainActivity) :
     private val pRgb = "${idPrefix}_RGB"
     private val pBend = "${idPrefix}_BEND"
     private val pWobble = "${idPrefix}_WOBBLE"
+    private val pEdge = "${idPrefix}_EDGE"
 
     override val needsMipmaps = true
 
@@ -619,12 +620,18 @@ class TransformEffect(idPrefix: String, title: String, activity: MainActivity) :
         addControl(PropertyControl(pWobble, "WOBBLE", defaultValue = 0, outMin=0f, outMax=1.0f, hasModulation = true))
         if(idPrefix == "C") addControl(PropertyControl("WARP", "DISTORT", defaultValue = 0, outMin=0f, outMax=1f, hasModulation = true))
         addControl(PropertyControl(pRgb, "RGB SHIFT", defaultValue = 0, outMin=0f, outMax=0.1f, hasModulation = true))
+        // What fills the screen outside the image when zoomed out: 0 = mirror, 1 = hold (edge pixels), 2 = repeat
+        addControl(PropertyControl(pEdge, "EDGE", max = 2, defaultValue = 0, showValue = true, allowSmoothing = false,
+            valueFormatter = { EDGE_LABELS[it.coerceIn(0, 2)] }))
     }
+
+    companion object { val EDGE_LABELS = arrayOf("MIRROR", "HOLD", "REPEAT") }
 
     override fun init() {
         val fSrc = """
         precision highp float; varying vec2 v; uniform sampler2D uTex;
         uniform float uZ, uA, uR, uTx, uTy, uTiX, uTiY, uWarp, uRGB, uRatio, uBend, uWobble;
+        uniform int uWrap;
 
         float hash(vec2 p) {
             return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
@@ -659,6 +666,8 @@ class TransformEffect(idPrefix: String, title: String, activity: MainActivity) :
             uv.x /= af;
             uv += vec2(uTx + xOff, uTy);
             
+            // Hold and repeat come from the texture wrap mode (GL_REPEAT keeps mipmaps seamless, fract() would not)
+            if (uWrap != 0) return 0.5 - uv;
             return abs(mod(uv + 0.5, 2.0) - 1.0);
         }
         
@@ -680,6 +689,7 @@ class TransformEffect(idPrefix: String, title: String, activity: MainActivity) :
         locTiX = GLES20.glGetUniformLocation(prog, "uTiX"); locTiY = GLES20.glGetUniformLocation(prog, "uTiY")
         locWarp = GLES20.glGetUniformLocation(prog, "uWarp"); locRGB = GLES20.glGetUniformLocation(prog, "uRGB")
         locBend = GLES20.glGetUniformLocation(prog, "uBend"); locWobble = GLES20.glGetUniformLocation(prog, "uWobble")
+        locWrap = GLES20.glGetUniformLocation(prog, "uWrap")
     }
 
     override fun render(inputTexId: Int, outputFbo: Int, w: Int, h: Int) {
@@ -703,8 +713,19 @@ class TransformEffect(idPrefix: String, title: String, activity: MainActivity) :
         GLES20.glUniform1f(locRGB, mainActivity.controlsMap[pRgb]?.computedValue ?: 0f)
         GLES20.glUniform1f(locBend, mainActivity.controlsMap[pBend]?.computedValue ?: 0f)
         GLES20.glUniform1f(locWobble, mainActivity.controlsMap[pWobble]?.computedValue ?: 0f)
+        val edge = (mainActivity.controlsMap[pEdge]?.value ?: 0).coerceIn(0, 2)
+        GLES20.glUniform1i(locWrap, edge)
 
+        // The chain's textures are CLAMP_TO_EDGE; repeat switches the input to GL_REPEAT for this pass only
+        if (edge == 2) {
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_REPEAT)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_REPEAT)
+        }
         ShaderHelper.bindQuad(prog); GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        if (edge == 2) {
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        }
     }
     override fun release() { GLES20.glDeleteProgram(prog) }
 }
