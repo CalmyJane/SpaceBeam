@@ -270,6 +270,7 @@ class MediaSourceControl(
     @Volatile private var isTransitioning = false
     @Volatile private var currentCrossfadeDuration = 1f
     @Volatile private var crossfadeProgress = 0f
+    private val layerLoading = BooleanArray(2) // UI thread only: video load queued but not set on the player yet
 
     var onPlaylistUpdated: (() -> Unit)? = null
 
@@ -277,8 +278,13 @@ class MediaSourceControl(
     private val playbackChecker = object : Runnable {
         override fun run() {
             checkPlayback()
-            mainHandler.postDelayed(this, 50)
+            mainHandler.postDelayed(this, CHECK_INTERVAL_MS)
         }
+    }
+
+    private companion object {
+        const val CHECK_INTERVAL_MS = 50L
+        const val HARD_CUT_LEAD_S = CHECK_INTERVAL_MS / 1000f
     }
 
     init {
@@ -374,14 +380,17 @@ class MediaSourceControl(
 
             layer.isVideo = item.isVideo
             if (item.isVideo) {
+                layerLoading[targetLayer] = true
                 mainActivity.glView.queueEvent {
                     if (!ch.isReady) ch.init()
                     mainActivity.runOnUiThread {
+                        layerLoading[targetLayer] = false
                         player?.setVideoSurface(layer.surface)
 
                         // FIX: Unconditionally force a fresh 'prepare' to fully reset the decoder buffer.
                         // This prevents ExoPlayer from holding onto the last frame from a previous loop.
                         player?.setMediaItem(MediaItem.fromUri(item.uri))
+                        player?.repeatMode = Player.REPEAT_MODE_OFF // checkPlayback enables looping when it applies
                         player?.prepare()
                         player?.seekTo(0)
 
@@ -440,21 +449,36 @@ class MediaSourceControl(
                 safeCrossfade = min(currentItem.crossfade, currentItem.durationVal - 0.1f).coerceAtLeast(0f)
             }
 
-            if (playlist.size == 1 && safeCrossfade == 0f) {
-                if (timeRemaining <= 0f) {
-                    if (currentItem.isVideo) {
-                        player?.seekTo(0)
-                        player?.play()
-                    }
-                    timeInCurrentItem = 0f
-                }
+            // A full-length single video without crossfade loops inside ExoPlayer (REPEAT_MODE_ONE
+            // buffers the next pass ahead = gapless). Everything else ends and hands over to the other layer.
+            val loopInPlayer = playlist.size == 1 && currentItem.isVideo && safeCrossfade == 0f &&
+                    currentItem.durationVal >= 0.999f
+            val wantedRepeat = if (loopInPlayer) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+            if (player != null && player.repeatMode != wantedRepeat) player.repeatMode = wantedRepeat
+            if (loopInPlayer) return
+
+            if (playlist.size == 1 && safeCrossfade == 0f && !currentItem.isVideo) {
+                if (timeRemaining <= 0f) timeInCurrentItem = 0f
                 return
             }
 
-            // Normal layer transition logic
+            // Single item that hands over to itself (crossfade or clipped loop): the other layer may not
+            // be loaded yet if crossfade/duration was changed after the item was added
+            if (playlist.size == 1 && currentItem.isVideo) {
+                val otherLayer = if (activeLayerIndex == 0) 1 else 0
+                if (layerLoading[otherLayer]) return
+                val other = if (otherLayer == 1) playerB else playerA
+                if (other?.currentMediaItem?.localConfiguration?.uri != currentItem.uri) {
+                    preloadItem(nextIndex, otherLayer, autoPlay = false)
+                    return
+                }
+            }
+
+            // Normal layer transition logic. Hard cuts fire one poll early so the last frame never freezes
+            // while waiting for the next check; the next layer already shows its first frame.
             if (timeRemaining <= safeCrossfade && safeCrossfade > 0f) {
                 startTransition(safeCrossfade)
-            } else if (timeRemaining <= 0f) {
+            } else if (timeRemaining <= HARD_CUT_LEAD_S) {
                 startTransition(0f)
             }
         }

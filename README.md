@@ -87,6 +87,8 @@ Load images and videos from your gallery. Multiple files become a playlist with 
 
 Useful for party/DJ logos, pre-made visuals, or concert footage.
 
+**Tip:** for seamless loop clips, set the item's crossfade to 0 — a single video then loops gaplessly, without a pause or blend at the loop point.
+
 ### Generative Shader
 
 Procedurally generated visuals that don't need any camera input. Add one and it produces animated patterns on its own.
