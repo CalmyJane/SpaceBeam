@@ -1,0 +1,6 @@
+-6 new black & white CalmyJane logo shaders (Droste Pupil, Ripples, Spiral, Grid, Tunnel, Face)
+-Beat-synced preset transitions and auto-play (TIME/DURATION in beats and bars, up to 128 bars)
+-Seamless looping of single playlist videos
+-Camera source can be removed, camera turns off when unused
+-EDGE option (mirror/hold/repeat) for CAM and MASTER transform
+-Smooth glide when switching LFO shape

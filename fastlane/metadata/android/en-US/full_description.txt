@@ -6,16 +6,16 @@
     * Front/Back Camera as Input source
     * RTSP as input-source
     * Image/Video (playlists) as input-source
-    * Generative Shaders as input-source
+    * Generative Shaders as input-source, built-in shaders include CalmyJane logo animations
     * Feedback as input-source
     * Different merge modes (add, subtract, multiply ...)
     * Hand tracking: control parameters with finger pinch, hand tilt and hand distance
     * Face tracking: control parameters with head tilt, distance and mouth width
     * Accelerometer/Gyroscope as modulation for parameters, look around in the tunnel effects
     * Bluetooth MIDI controller as modulation source
-    * BPM tap and beat synced LFOs
+    * BPM tap, beat synced LFOs and beat synced preset transitions
     * 9 presets slots with smooth transitions between presets
-    * Auto-Play mode
+    * Auto-Play mode, timed in seconds or in beats and bars
     * Undo/Redo buttons
 
     Recommended Setup:
