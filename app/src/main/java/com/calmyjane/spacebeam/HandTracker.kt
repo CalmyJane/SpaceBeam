@@ -35,6 +35,15 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
         // Distance to camera from apparent palm size (fraction of the image's short side): close / far
         private const val PALM_SIZE_NEAR = 0.5f
         private const val PALM_SIZE_FAR = 0.08f
+        // Peace sign: fingertip-to-wrist distance relative to knuckle-to-wrist (world space, any hand rotation).
+        // Straight finger ≈ 1.9, folded into the palm ≈ 1.0
+        private const val FINGER_EXTENDED = 1.6f
+        private const val FINGER_CURLED = 1.35f
+        // Detections in a row (~20/s) before it fires, misses in a row before it can fire again, min gap
+        private const val PEACE_HOLD = 5
+        private const val PEACE_RELEASE = 3
+        private const val PEACE_COOLDOWN_MS = 1200L
+        val FINGER_MCPS = intArrayOf(5, 9, 13, 17)
 
         // Landmark pairs forming the hand skeleton (MediaPipe hand topology)
         val CONNECTIONS = intArrayOf(
@@ -48,6 +57,27 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
 
     /** 21 landmarks as x,y pairs, normalized to the upright (and mirrored for front cam) analysis image. */
     val landmarks = FloatArray(42)
+
+    /** Peace sign (index + middle up, ring + pinky folded) triggers [onPeace] once per showing, on the analysis thread. */
+    @Volatile var peaceEnabled = true
+    var onPeace: (() -> Unit)? = null
+    private var peaceFrames = 0
+    private var releaseFrames = PEACE_RELEASE
+    private var lastPeaceMs = -PEACE_COOLDOWN_MS
+
+    private fun updatePeace(peace: Boolean, now: Long) {
+        if (peace) {
+            peaceFrames++
+            if (peaceFrames >= PEACE_HOLD && releaseFrames >= PEACE_RELEASE && now - lastPeaceMs >= PEACE_COOLDOWN_MS) {
+                releaseFrames = 0
+                lastPeaceMs = now
+                if (peaceEnabled) onPeace?.invoke()
+            }
+        } else {
+            peaceFrames = 0
+            if (releaseFrames < PEACE_RELEASE) releaseFrames++
+        }
+    }
 
     override fun createDetector(): AutoCloseable {
         val opts = HandLandmarker.HandLandmarkerOptions.builder()
@@ -65,7 +95,7 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
         val result = (detector as HandLandmarker).detectForVideo(BitmapImageBuilder(bmp).build(), timestampMs)
         val hand = result.landmarks().firstOrNull()
         val world = result.worldLandmarks().firstOrNull()
-        if (hand == null || world == null || hand.size < 21 || world.size < 21) return false
+        if (hand == null || world == null || hand.size < 21 || world.size < 21) { updatePeace(false, timestampMs); return false }
         for (i in 0 until 21) {
             landmarks[i * 2] = hand[i].x()
             landmarks[i * 2 + 1] = hand[i].y()
@@ -78,6 +108,14 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
             val dist = sqrt(dx * dx + dy * dy + dz * dz)
             accept(f, ((dist - PINCH_CLOSED_M) / (PINCH_OPEN_M[f] - PINCH_CLOSED_M)).coerceIn(0f, 1f))
         }
+        // Finger extension per finger: costs a few float ops on the landmarks we already have
+        val w = world[WRIST]
+        fun fromWrist(i: Int): Float {
+            val dx = world[i].x() - w.x(); val dy = world[i].y() - w.y(); val dz = world[i].z() - w.z()
+            return sqrt(dx * dx + dy * dy + dz * dz)
+        }
+        fun ext(f: Int): Float = fromWrist(FINGER_TIPS[f]) / maxOf(fromWrist(FINGER_MCPS[f]), 0.001f)
+        updatePeace(ext(0) > FINGER_EXTENDED && ext(1) > FINGER_EXTENDED && ext(2) < FINGER_CURLED && ext(3) < FINGER_CURLED, timestampMs)
         // Whole-hand tilt on screen: wrist → middle knuckle, in pixels (image space is upright + mirrored like the screen)
         val ax = (hand[MIDDLE_MCP].x() - hand[WRIST].x()) * bmp.width
         val ay = (hand[MIDDLE_MCP].y() - hand[WRIST].y()) * bmp.height

@@ -717,6 +717,7 @@ class MainActivity : AppCompatActivity() {
         undoManager.maxHistory = undoHistorySize
         forceScreenOn = prefs.getBoolean("FORCE_SCREEN_ON", false)
         handTracker.smoothing = prefs.getInt("HAND_SMOOTH", Tracker.DEFAULT_SMOOTHING)
+        handTracker.peaceEnabled = prefs.getBoolean("HAND_PEACE", true)
         faceTracker.smoothing = prefs.getInt("FACE_SMOOTH", Tracker.DEFAULT_SMOOTHING)
         maskManager.loadFromPrefs(prefs)
         val filterStr = prefs.getString("AP_FILTER", null)
@@ -1218,6 +1219,7 @@ class MainActivity : AppCompatActivity() {
         trackingOverlay = TrackingOverlayView(this, this, handTracker, faceTracker, sensorHelper).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
         val overlay = trackingOverlay!!
         handTracker.onUpdate = { overlay.postInvalidate() }
+        handTracker.onPeace = { runOnUiThread { gestureNextPreset() } }
         faceTracker.onUpdate = { overlay.postInvalidate() }
         vision.setDisplayRotation(glView.display?.rotation ?: Surface.ROTATION_0)
 
@@ -3217,6 +3219,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         applyPreset(nextIdx, fromAutoPlay = true)
+    }
+
+    /**
+     * Peace sign seen by the hand tracker: next preset the way auto-play picks it (order or random, preset filter),
+     * whether auto-play runs or not. Random never repeats the current preset. While auto-play runs, its timer restarts.
+     */
+    fun gestureNextPreset() {
+        val saved = (1..9).filter { presets[it] != null }
+        val pool = saved.filter { it in autoPlayFilter }.ifEmpty { saved }
+        if (pool.isEmpty()) return
+        val next = if (autoPlayRandom) pool.filter { it != activePreset }.ifEmpty { pool }.random()
+                   else pool.firstOrNull { it > activePreset } ?: pool.first()
+        applyPreset(next, fromAutoPlay = isAutoPlaying)
     }
 
 
