@@ -720,6 +720,9 @@ class MainActivity : AppCompatActivity() {
         forceScreenOn = prefs.getBoolean("FORCE_SCREEN_ON", false)
         handTracker.smoothing = prefs.getInt("HAND_SMOOTH", Tracker.DEFAULT_SMOOTHING)
         faceTracker.smoothing = prefs.getInt("FACE_SMOOTH", Tracker.DEFAULT_SMOOTHING)
+        for (g in HandGesture.values()) {
+            gestureActions[g] = prefs.getString(g.prefKey, null)?.takeIf { it in GestureActions.ALL } ?: g.defaultAction
+        }
         maskManager.loadFromPrefs(prefs)
         val filterStr = prefs.getString("AP_FILTER", null)
         if (filterStr != null) {
@@ -1241,10 +1244,10 @@ class MainActivity : AppCompatActivity() {
         trackingOverlay = TrackingOverlayView(this, this, handTracker, faceTracker, sensorHelper).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
         val overlay = trackingOverlay!!
         handTracker.onUpdate = { overlay.postInvalidate() }
-        handTracker.onPeace = { x, y ->
+        handTracker.onGesture = { g, x, y ->
             runOnUiThread {
-                val next = gestureNextPreset()
-                overlay.peaceBurst(x, y, next?.toString() ?: "")
+                val label = runGesture(g) ?: return@runOnUiThread
+                overlay.gestureBurst(x, y, label)
                 gestureBtn?.let { b ->
                     b.animate().cancel()
                     b.animate().scaleX(1.25f).scaleY(1.25f).setDuration(110).withEndAction {
@@ -3255,19 +3258,39 @@ class MainActivity : AppCompatActivity() {
         applyPreset(nextIdx, fromAutoPlay = true)
     }
 
+    /** Command per hand gesture (Settings → HAND GESTURES), keys from [GestureActions]. */
+    val gestureActions = mutableMapOf<HandGesture, String>()
+
+    fun setGestureAction(g: HandGesture, action: String) {
+        gestureActions[g] = action
+        getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE).edit().putString(g.prefKey, action).apply()
+    }
+
     /**
-     * Peace sign seen by the hand tracker: next preset the way auto-play picks it (order or random, preset filter),
-     * whether auto-play runs or not. Random never repeats the current preset. While auto-play runs, its timer restarts.
-     * Returns the preset switched to, null if there is none.
+     * Runs the command mapped to a gesture, whether auto-play runs or not (its timer restarts on a preset change).
+     * Next/previous only step through the presets ticked for auto-play (all saved ones if none are), random never
+     * repeats the current preset. Returns the label for the on-screen feedback, null if nothing happened.
      */
-    fun gestureNextPreset(): Int? {
+    fun runGesture(g: HandGesture): String? {
+        val action = gestureActions[g] ?: g.defaultAction
+        if (action == "OFF") return null
+        if (action == "AUTOPLAY") {
+            toggleAutoPlay()
+            return if (isAutoPlaying) "▶" else "❚❚"
+        }
         val saved = (1..9).filter { presets[it] != null }
         val pool = saved.filter { it in autoPlayFilter }.ifEmpty { saved }
-        if (pool.isEmpty()) return null
-        val next = if (autoPlayRandom) pool.filter { it != activePreset }.ifEmpty { pool }.random()
-                   else pool.firstOrNull { it > activePreset } ?: pool.first()
+        fun random() = pool.filter { it != activePreset }.ifEmpty { pool }.random()
+        fun inOrder() = pool.firstOrNull { it > activePreset } ?: pool.first()
+        val next = when (action) {
+            "NEXT" -> if (pool.isEmpty()) null else if (autoPlayRandom) random() else inOrder()
+            "NEXT_ORDER" -> if (pool.isEmpty()) null else inOrder()
+            "NEXT_RANDOM" -> if (pool.isEmpty()) null else random()
+            "PREVIOUS" -> if (pool.isEmpty()) null else pool.lastOrNull { it < activePreset } ?: pool.last()
+            else -> action.removePrefix("PRESET_").toIntOrNull()?.takeIf { presets[it] != null }
+        } ?: return null
         applyPreset(next, fromAutoPlay = isAutoPlaying)
-        return next
+        return next.toString()
     }
 
 

@@ -35,14 +35,15 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
         // Distance to camera from apparent palm size (fraction of the image's short side): close / far
         private const val PALM_SIZE_NEAR = 0.5f
         private const val PALM_SIZE_FAR = 0.08f
-        // Peace sign: fingertip-to-wrist distance relative to knuckle-to-wrist (world space, any hand rotation).
+        // Gestures: fingertip-to-wrist distance relative to knuckle-to-wrist (world space, any hand rotation).
         // Straight finger ≈ 1.9, folded into the palm ≈ 1.0
         private const val FINGER_EXTENDED = 1.6f
         private const val FINGER_CURLED = 1.35f
-        // Detections in a row (~20/s) before it fires, misses in a row before it can fire again, min gap
-        private const val PEACE_HOLD = 5
-        private const val PEACE_RELEASE = 3
-        private const val PEACE_COOLDOWN_MS = 1200L
+        // Detections in a row (~20/s) before a gesture fires, other frames in a row before the same one can fire
+        // again, min gap between any two
+        private const val GESTURE_HOLD = 5
+        private const val GESTURE_RELEASE = 3
+        private const val GESTURE_COOLDOWN_MS = 1200L
         val FINGER_MCPS = intArrayOf(5, 9, 13, 17)
 
         // Landmark pairs forming the hand skeleton (MediaPipe hand topology)
@@ -59,26 +60,29 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
     val landmarks = FloatArray(42)
 
     /**
-     * Peace sign (index + middle up, ring + pinky folded) calls [onPeace] once per showing while [gestures] is on,
-     * on the analysis thread, with the point between the two fingertips (normalized like [landmarks]).
+     * A recognized [HandGesture] calls [onGesture] once per showing while [gestures] is on, on the analysis thread,
+     * with the point between its raised fingertips (normalized like [landmarks]).
      */
-    var onPeace: ((x: Float, y: Float) -> Unit)? = null
-    private var peaceFrames = 0
-    private var releaseFrames = PEACE_RELEASE
-    private var lastPeaceMs = -PEACE_COOLDOWN_MS
+    var onGesture: ((gesture: HandGesture, x: Float, y: Float) -> Unit)? = null
+    private var heldGesture: HandGesture? = null
+    private var heldFrames = 0
+    private var latched: HandGesture? = null  // fired and still shown: must go away before it fires again
+    private var latchFrames = 0
+    private var lastGestureMs = -GESTURE_COOLDOWN_MS
 
-    private fun updatePeace(peace: Boolean, now: Long) {
-        if (peace) {
-            peaceFrames++
-            if (peaceFrames >= PEACE_HOLD && releaseFrames >= PEACE_RELEASE && now - lastPeaceMs >= PEACE_COOLDOWN_MS) {
-                releaseFrames = 0
-                lastPeaceMs = now
-                if (gestures) onPeace?.invoke((landmarks[16] + landmarks[24]) / 2f, (landmarks[17] + landmarks[25]) / 2f)
-            }
-        } else {
-            peaceFrames = 0
-            if (releaseFrames < PEACE_RELEASE) releaseFrames++
+    private fun updateGesture(g: HandGesture?, now: Long) {
+        if (g == heldGesture) heldFrames++ else { heldGesture = g; heldFrames = 1 }
+        if (latched != null) {
+            if (g == latched) latchFrames = 0
+            else if (++latchFrames >= GESTURE_RELEASE) latched = null
         }
+        if (g == null || g == latched || heldFrames < GESTURE_HOLD || now - lastGestureMs < GESTURE_COOLDOWN_MS) return
+        latched = g; latchFrames = 0
+        lastGestureMs = now
+        if (!gestures) return
+        var x = 0f; var y = 0f
+        for (f in g.raised) { x += landmarks[FINGER_TIPS[f] * 2]; y += landmarks[FINGER_TIPS[f] * 2 + 1] }
+        onGesture?.invoke(g, x / g.raised.size, y / g.raised.size)
     }
 
     override fun createDetector(): AutoCloseable {
@@ -97,7 +101,7 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
         val result = (detector as HandLandmarker).detectForVideo(BitmapImageBuilder(bmp).build(), timestampMs)
         val hand = result.landmarks().firstOrNull()
         val world = result.worldLandmarks().firstOrNull()
-        if (hand == null || world == null || hand.size < 21 || world.size < 21) { updatePeace(false, timestampMs); return false }
+        if (hand == null || world == null || hand.size < 21 || world.size < 21) { updateGesture(null, timestampMs); return false }
         for (i in 0 until 21) {
             landmarks[i * 2] = hand[i].x()
             landmarks[i * 2 + 1] = hand[i].y()
@@ -117,7 +121,10 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
             return sqrt(dx * dx + dy * dy + dz * dz)
         }
         fun ext(f: Int): Float = fromWrist(FINGER_TIPS[f]) / maxOf(fromWrist(FINGER_MCPS[f]), 0.001f)
-        updatePeace(ext(0) > FINGER_EXTENDED && ext(1) > FINGER_EXTENDED && ext(2) < FINGER_CURLED && ext(3) < FINGER_CURLED, timestampMs)
+        // Each finger up, down or in between (in between matches no gesture); the thumb is ignored
+        var up = 0; var down = 0
+        for (f in 0 until 4) { val e = ext(f); if (e > FINGER_EXTENDED) up = up or (1 shl f) else if (e < FINGER_CURLED) down = down or (1 shl f) }
+        updateGesture(HandGesture.values().firstOrNull { it.mask == up && (up or down) == 0xF }, timestampMs)
         // Whole-hand tilt on screen: wrist → middle knuckle, in pixels (image space is upright + mirrored like the screen)
         val ax = (hand[MIDDLE_MCP].x() - hand[WRIST].x()) * bmp.width
         val ay = (hand[MIDDLE_MCP].y() - hand[WRIST].y()) * bmp.height
@@ -133,6 +140,29 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
             accept(DIST, ((1f / palm - 1f / PALM_SIZE_NEAR) / (1f / PALM_SIZE_FAR - 1f / PALM_SIZE_NEAR)).coerceIn(0f, 1f))
         }
         return true
+    }
+}
+
+/** Hand gestures (raised fingers, 0 = index .. 3 = pinky; all others folded), with their Settings key and default command. */
+enum class HandGesture(val label: String, val raised: IntArray, val prefKey: String, val defaultAction: String) {
+    PEACE("PEACE ✌", intArrayOf(0, 1), "GESTURE_PEACE", "NEXT_RANDOM"),
+    METAL("METAL 🤘", intArrayOf(0, 3), "GESTURE_METAL", "PRESET_1");
+
+    val mask: Int = raised.fold(0) { m, f -> m or (1 shl f) }
+}
+
+/** Commands a gesture can run, stored by key in the Settings prefs. */
+object GestureActions {
+    val ALL = listOf("OFF", "NEXT", "NEXT_ORDER", "NEXT_RANDOM", "PREVIOUS", "AUTOPLAY") + (1..9).map { "PRESET_$it" }
+
+    fun label(action: String): String = when (action) {
+        "OFF" -> "Nothing"
+        "NEXT" -> "Next (Auto-Play order)"
+        "NEXT_ORDER" -> "Next in order"
+        "NEXT_RANDOM" -> "Next random"
+        "PREVIOUS" -> "Previous"
+        "AUTOPLAY" -> "Auto-Play on/off"
+        else -> "Load preset " + action.removePrefix("PRESET_")
     }
 }
 
@@ -166,7 +196,7 @@ class TrackingOverlayView(
     private val handMapped = BooleanArray(HandTracker.CHANNELS)
     private val faceMapped = BooleanArray(FaceTracker.CHANNELS)
 
-    // Peace sign feedback: two thin rings ripple out from between the fingertips, the new preset number fades through
+    // Gesture feedback: two thin rings ripple out from between the fingertips, the new preset number fades through
     private val burstPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.STROKE }
     private val burstTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE; textSize = 46f; textAlign = Paint.Align.CENTER
@@ -260,8 +290,8 @@ class TrackingOverlayView(
     private fun mapX(t: Tracker, x: Float): Float { val s = maxOf(width / t.imageWidth.toFloat(), height / t.imageHeight.toFloat()); return width / 2f + (x - 0.5f) * t.imageWidth * s }
     private fun mapY(t: Tracker, y: Float): Float { val s = maxOf(width / t.imageWidth.toFloat(), height / t.imageHeight.toFloat()); return height / 2f + (y - 0.5f) * t.imageHeight * s }
 
-    /** Peace sign feedback at a point in hand landmark coordinates, with the preset it switched to. UI thread. */
-    fun peaceBurst(nx: Float, ny: Float, label: String) {
+    /** Gesture feedback at a point in hand landmark coordinates, with what it did (e.g. the new preset number). UI thread. */
+    fun gestureBurst(nx: Float, ny: Float, label: String) {
         burstX = nx; burstY = ny; burstLabel = label
         burstStart = android.os.SystemClock.uptimeMillis()
         invalidate()

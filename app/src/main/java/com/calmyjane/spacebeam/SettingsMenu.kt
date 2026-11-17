@@ -421,6 +421,51 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 
         contentLayout.addView(createStyledDivider())
 
+        // --- HAND GESTURES: one command per gesture (active while the peace sign button is on) ---
+        contentLayout.addView(TextView(activity).apply {
+            text = "HAND GESTURES"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 10, 0, 20)
+        })
+        for (g in HandGesture.values()) {
+            val row = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 12 }
+            }
+            row.addView(TextView(activity).apply {
+                text = g.label; textSize = 14f; setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            })
+            row.addView(TextView(activity).apply {
+                fun refresh() { text = GestureActions.label(activity.gestureActions[g] ?: g.defaultAction) + "  ▾" }
+                refresh()
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                setPadding(30, 18, 30, 18)
+                background = GradientDrawable().apply {
+                    setColor(Color.argb(60, 255, 255, 255)); cornerRadius = 12f
+                }
+                setOnClickListener { anchor ->
+                    val menu = PopupMenu(ContextThemeWrapper(activity, android.R.style.Theme_DeviceDefault), anchor)
+                    GestureActions.ALL.forEachIndexed { i, a -> menu.menu.add(0, i, i, GestureActions.label(a)) }
+                    menu.setOnMenuItemClickListener { item ->
+                        activity.setGestureAction(g, GestureActions.ALL[item.itemId])
+                        refresh()
+                        true
+                    }
+                    menu.show()
+                }
+            })
+            contentLayout.addView(row)
+        }
+
+        contentLayout.addView(createStyledDivider())
+
         // --- SENSOR SMOOTHING ---
         contentLayout.addView(TextView(activity).apply {
             text = "SENSOR SMOOTHING"

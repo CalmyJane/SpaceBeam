@@ -344,8 +344,18 @@ On the phone screen (never on the projector or in recordings) you see a faint ha
 
 Tap the **peace sign button** (top of the button column on the right) to control the app with hand gestures. It works on its own: the hand button does not need to be on, so you can switch presets by gesture without the hand moving any parameters.
 
-- **Peace sign** (index and middle finger up, ring and pinky finger folded), held for a moment: switches to the next preset. It picks the next one like Auto-Play does (in order or random, only the presets ticked under **Include Presets**), whether Auto-Play is running or not. If Auto-Play is running, its timer starts over.
-- One sign switches once -- lower your hand or change the gesture, then show it again for the next one.
+| Gesture | Fingers | Default |
+|---------|---------|---------|
+| **Peace** ✌ | Index and middle finger up, ring and pinky finger folded | Next random preset |
+| **Metal** 🤘 | Index and pinky finger up, middle and ring finger folded | Load preset 1 |
+
+The thumb doesn't matter. Hold the gesture for a moment to trigger it.
+
+Choose what each gesture does in Settings -> **Hand Gestures**: nothing, next (in Auto-Play order), next in order, next random, previous, Auto-Play on/off, or load preset 1-9.
+
+- Next, previous and random only step through the presets ticked under Auto-Play -> **Include Presets** (all saved presets if none are ticked). Random never picks the preset that is already showing.
+- Everything works whether Auto-Play is running or not. If Auto-Play is running, its timer starts over.
+- One gesture triggers once -- lower your hand or change the gesture, then show it again.
 - On the phone screen a ring ripples out from your fingers with the number of the new preset (never on the projector or in recordings).
 - Long-press the button to map it to a MIDI button.
 
@@ -493,7 +503,8 @@ Access via the gear icon in the bottom-right corner:
 | **Connect Bluetooth MIDI** | Scan and connect to MIDI controllers |
 | **BPM** | Set beats-per-minute for LFO sync |
 | **Undo Steps** | Configure undo history depth |
-| **Auto-Play** | Duration, random order, preset filter (also used by the peace sign gesture) |
+| **Auto-Play** | Duration, random order, preset filter (also used by the hand gestures) |
+| **Hand Gestures** | What the peace and metal gesture do: next / random / previous preset, Auto-Play on/off or a fixed preset |
 | **MIDI Mapping** | Load/Save/Clear MIDI mappings (visible when MIDI connected) |
 | **Sensor Smoothing** | How smooth Pitch, Roll, Yaw, **Hand** and **Face** values follow your movement. Left = direct, right = slow and soft |
 
