@@ -421,48 +421,8 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
 
         contentLayout.addView(createStyledDivider())
 
-        // --- HAND GESTURES: one command per gesture (active while the peace sign button is on) ---
-        contentLayout.addView(TextView(activity).apply {
-            text = "HAND GESTURES"
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.LTGRAY)
-            gravity = Gravity.CENTER
-            setPadding(0, 10, 0, 20)
-        })
-        for (g in HandGesture.values()) {
-            val row = LinearLayout(activity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 12 }
-            }
-            row.addView(TextView(activity).apply {
-                text = g.label; textSize = 14f; setTextColor(Color.WHITE)
-                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-            })
-            row.addView(TextView(activity).apply {
-                fun refresh() { text = GestureActions.label(activity.gestureActions[g] ?: g.defaultAction) + "  ▾" }
-                refresh()
-                textSize = 14f
-                setTextColor(Color.WHITE)
-                gravity = Gravity.CENTER
-                setPadding(30, 18, 30, 18)
-                background = GradientDrawable().apply {
-                    setColor(Color.argb(60, 255, 255, 255)); cornerRadius = 12f
-                }
-                setOnClickListener { anchor ->
-                    val menu = PopupMenu(ContextThemeWrapper(activity, android.R.style.Theme_DeviceDefault), anchor)
-                    GestureActions.ALL.forEachIndexed { i, a -> menu.menu.add(0, i, i, GestureActions.label(a)) }
-                    menu.setOnMenuItemClickListener { item ->
-                        activity.setGestureAction(g, GestureActions.ALL[item.itemId])
-                        refresh()
-                        true
-                    }
-                    menu.show()
-                }
-            })
-            contentLayout.addView(row)
-        }
+        // --- HAND GESTURES: submenu with one command per gesture ---
+        contentLayout.addView(createStyledButton("gestures") { showGestureMenu() })
 
         contentLayout.addView(createStyledDivider())
 
@@ -1031,6 +991,95 @@ li { margin: 4px 0; }
         overlay?.addView(scanOverlay, ViewGroup.LayoutParams(-1,-1))
 
         activity.midiHelper.startLeScan()
+    }
+
+    /**
+     * Submenu over the settings: one row per hand gesture with a dropdown of commands. Changes apply at once;
+     * a tap outside the panel closes it.
+     */
+    private fun showGestureMenu() {
+        if (confirmationOverlay != null) return
+
+        confirmationOverlay = FrameLayout(activity).apply {
+            setBackgroundColor(Color.argb(170, 0, 0, 0))
+            isClickable = true
+            elevation = 550f
+            setOnClickListener { dismissConfirmation() }
+            alpha = 0f
+            animate().alpha(1f).setDuration(150).start()
+        }
+
+        val dm = activity.resources.displayMetrics
+        val targetWidth = (min(dm.widthPixels, dm.heightPixels) * 0.9f).toInt()
+
+        val scroll = ScrollView(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(targetWidth, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER).apply {
+                setMargins(20, 40, 20, 40)
+            }
+            background = getPanelBackground()
+            isVerticalScrollBarEnabled = false
+            setOnClickListener { }
+        }
+        val panel = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 40, 40, 30)
+        }
+        panel.addView(TextView(activity).apply {
+            text = "GESTURES"
+            textSize = 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+        })
+        panel.addView(TextView(activity).apply {
+            text = "Active while the peace sign button is on. Hold a gesture for a moment to run its command."
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 10, 0, 30)
+        })
+
+        for (g in HandGesture.values()) {
+            val row = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 14 }
+            }
+            row.addView(TextView(activity).apply {
+                text = g.label; textSize = 15f; setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            })
+            row.addView(TextView(activity).apply {
+                fun refresh() {
+                    val action = activity.gestureActions[g] ?: g.defaultAction
+                    text = GestureActions.label(action) + "  ▾"
+                    setTextColor(if (action == "OFF") Color.GRAY else Color.WHITE)
+                }
+                refresh()
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setPadding(30, 18, 30, 18)
+                background = GradientDrawable().apply {
+                    setColor(Color.argb(255, 45, 45, 50)); cornerRadius = 12f
+                    setStroke(2, Color.parseColor("#555555"))
+                }
+                setOnClickListener { anchor ->
+                    val menu = PopupMenu(ContextThemeWrapper(activity, android.R.style.Theme_DeviceDefault), anchor)
+                    GestureActions.ALL.forEachIndexed { i, a -> menu.menu.add(0, i, i, GestureActions.label(a)) }
+                    menu.setOnMenuItemClickListener { item ->
+                        activity.setGestureAction(g, GestureActions.ALL[item.itemId])
+                        refresh()
+                        true
+                    }
+                    menu.show()
+                }
+            })
+            panel.addView(row)
+        }
+
+        scroll.addView(panel)
+        confirmationOverlay!!.addView(scroll)
+        overlay!!.addView(confirmationOverlay, ViewGroup.LayoutParams(-1, -1))
     }
 
     private fun showCustomDialog(title: String, subtitle: String, contentFiller: (LinearLayout) -> Unit) {

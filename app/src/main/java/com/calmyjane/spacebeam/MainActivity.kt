@@ -723,6 +723,7 @@ class MainActivity : AppCompatActivity() {
         for (g in HandGesture.values()) {
             gestureActions[g] = prefs.getString(g.prefKey, null)?.takeIf { it in GestureActions.ALL } ?: g.defaultAction
         }
+        updateActiveGestures()
         maskManager.loadFromPrefs(prefs)
         val filterStr = prefs.getString("AP_FILTER", null)
         if (filterStr != null) {
@@ -3263,7 +3264,12 @@ class MainActivity : AppCompatActivity() {
 
     fun setGestureAction(g: HandGesture, action: String) {
         gestureActions[g] = action
+        updateActiveGestures()
         getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE).edit().putString(g.prefKey, action).apply()
+    }
+
+    private fun updateActiveGestures() {
+        handTracker.activeGestures = gestureActions.filterValues { it != "OFF" }.keys.toSet()
     }
 
     /**

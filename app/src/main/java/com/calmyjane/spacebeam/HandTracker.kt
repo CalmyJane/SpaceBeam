@@ -11,6 +11,7 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.sqrt
 
@@ -39,6 +40,10 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
         // Straight finger ≈ 1.9, folded into the palm ≈ 1.0
         private const val FINGER_EXTENDED = 1.6f
         private const val FINGER_CURLED = 1.35f
+        private const val THUMB_OUT = 1.35f
+        const val THUMB_MCP = 2
+        const val INDEX_MCP = 5
+        const val PINKY_MCP = 17
         // Detections in a row (~20/s) before a gesture fires, other frames in a row before the same one can fire
         // again, min gap between any two
         private const val GESTURE_HOLD = 5
@@ -80,9 +85,20 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
         latched = g; latchFrames = 0
         lastGestureMs = now
         if (!gestures) return
-        var x = 0f; var y = 0f
-        for (f in g.raised) { x += landmarks[FINGER_TIPS[f] * 2]; y += landmarks[FINGER_TIPS[f] * 2 + 1] }
-        onGesture?.invoke(g, x / g.raised.size, y / g.raised.size)
+        // Feedback point: between the raised fingertips (and the thumb tip when it is part of the gesture),
+        // the middle knuckle for a fist
+        val points = g.raised.map { FINGER_TIPS[it] } + (if (g.thumb != Thumb.ANY) listOf(THUMB_TIP) else emptyList())
+        val at = points.ifEmpty { listOf(MIDDLE_MCP) }
+        onGesture?.invoke(g, at.sumOf { landmarks[it * 2].toDouble() }.toFloat() / at.size,
+            at.sumOf { landmarks[it * 2 + 1].toDouble() }.toFloat() / at.size)
+    }
+
+    /** Gestures with a command (set from the UI thread): only these are matched, so unused ones never block others. */
+    @Volatile var activeGestures: Set<HandGesture> = emptySet()
+
+    private fun dist(l: List<com.google.mediapipe.tasks.components.containers.Landmark>, a: Int, b: Int): Float {
+        val dx = l[a].x() - l[b].x(); val dy = l[a].y() - l[b].y(); val dz = l[a].z() - l[b].z()
+        return sqrt(dx * dx + dy * dy + dz * dz)
     }
 
     override fun createDetector(): AutoCloseable {
@@ -121,10 +137,25 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
             return sqrt(dx * dx + dy * dy + dz * dz)
         }
         fun ext(f: Int): Float = fromWrist(FINGER_TIPS[f]) / maxOf(fromWrist(FINGER_MCPS[f]), 0.001f)
-        // Each finger up, down or in between (in between matches no gesture); the thumb is ignored
+        // Each finger up, down or in between (in between matches no gesture)
         var up = 0; var down = 0
         for (f in 0 until 4) { val e = ext(f); if (e > FINGER_EXTENDED) up = up or (1 shl f) else if (e < FINGER_CURLED) down = down or (1 shl f) }
-        updateGesture(HandGesture.values().firstOrNull { it.mask == up && (up or down) == 0xF }, timestampMs)
+        // Thumb sticks out when its tip is far from the pinky knuckle compared to the knuckle span (folded across ≈ 0.7,
+        // spread ≈ 1.7); up/down from its on-screen direction (thumb knuckle → tip, mostly vertical)
+        val thumbOut = dist(world, THUMB_TIP, PINKY_MCP) / maxOf(dist(world, INDEX_MCP, PINKY_MCP), 0.001f) > THUMB_OUT
+        val tdx = (hand[THUMB_TIP].x() - hand[THUMB_MCP].x()) * bmp.width
+        val tdy = (hand[THUMB_TIP].y() - hand[THUMB_MCP].y()) * bmp.height
+        val vertical = abs(tdy) > abs(tdx) * 1.2f
+        fun thumbOk(t: Thumb) = when (t) {
+            Thumb.ANY -> true
+            Thumb.OUT -> thumbOut
+            Thumb.UP -> thumbOut && vertical && tdy < 0f
+            Thumb.DOWN -> thumbOut && vertical && tdy > 0f
+        }
+        val active = activeGestures
+        val g = if ((up or down) != 0xF) null
+                else HandGesture.values().firstOrNull { it in active && it.mask == up && thumbOk(it.thumb) }
+        updateGesture(g, timestampMs)
         // Whole-hand tilt on screen: wrist → middle knuckle, in pixels (image space is upright + mirrored like the screen)
         val ax = (hand[MIDDLE_MCP].x() - hand[WRIST].x()) * bmp.width
         val ay = (hand[MIDDLE_MCP].y() - hand[WRIST].y()) * bmp.height
@@ -144,11 +175,28 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
 }
 
 /** Hand gestures (raised fingers, 0 = index .. 3 = pinky; all others folded), with their Settings key and default command. */
-enum class HandGesture(val label: String, val raised: IntArray, val prefKey: String, val defaultAction: String) {
-    PEACE("PEACE ✌", intArrayOf(0, 1), "GESTURE_PEACE", "NEXT_RANDOM"),
-    METAL("METAL 🤘", intArrayOf(0, 3), "GESTURE_METAL", "PRESET_1");
+enum class Thumb { ANY, OUT, UP, DOWN }
+
+/**
+ * Hand gestures: raised fingers (0 = index .. 3 = pinky; all others folded) plus the thumb. Detection tries them in
+ * this order among the ones with a command, so the stricter thumb-out variants come before their thumb-any twins
+ * (Love you before Metal, L before Point, thumbs up/down before Fist).
+ */
+enum class HandGesture(val label: String, val raised: IntArray, val thumb: Thumb, val defaultAction: String = "OFF") {
+    PEACE("Peace  ✌", intArrayOf(0, 1), Thumb.ANY, "NEXT_RANDOM"),
+    LOVE("Love you  🤟", intArrayOf(0, 3), Thumb.OUT),
+    METAL("Metal  🤘", intArrayOf(0, 3), Thumb.ANY, "PRESET_1"),
+    L_SHAPE("L  (thumb + index)", intArrayOf(0), Thumb.OUT),
+    POINT("Point  ☝", intArrayOf(0), Thumb.ANY),
+    THREE("Three fingers", intArrayOf(0, 1, 2), Thumb.ANY),
+    OPEN("Open hand  ✋", intArrayOf(0, 1, 2, 3), Thumb.ANY),
+    SHAKA("Shaka  🤙", intArrayOf(3), Thumb.OUT),
+    THUMBS_UP("Thumbs up  👍", intArrayOf(), Thumb.UP),
+    THUMBS_DOWN("Thumbs down  👎", intArrayOf(), Thumb.DOWN),
+    FIST("Fist  ✊", intArrayOf(), Thumb.ANY);
 
     val mask: Int = raised.fold(0) { m, f -> m or (1 shl f) }
+    val prefKey: String get() = "GESTURE_$name"
 }
 
 /** Commands a gesture can run, stored by key in the Settings prefs. */
