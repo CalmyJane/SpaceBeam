@@ -369,28 +369,6 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         randomRow.addView(randomCheck)
         contentLayout.addView(randomRow)
 
-        // Peace sign → next preset (needs hand tracking on)
-        val peaceRow = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -2).apply { bottomMargin = 10 }
-        }
-        peaceRow.addView(TextView(activity).apply {
-            text = "PEACE SIGN = NEXT (HAND ON)"
-            textSize = 14f
-            setTextColor(Color.WHITE)
-            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-        })
-        peaceRow.addView(CheckBox(activity).apply {
-            isChecked = activity.handTracker.peaceEnabled
-            buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-            setOnCheckedChangeListener { _, isChecked ->
-                activity.handTracker.peaceEnabled = isChecked
-                activity.getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
-                    .edit().putBoolean("HAND_PEACE", isChecked).apply()
-            }
-        })
-        contentLayout.addView(peaceRow)
 
         // Preset Filter Row (Grid 1-9)
         contentLayout.addView(TextView(activity).apply {

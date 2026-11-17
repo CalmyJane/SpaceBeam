@@ -340,7 +340,16 @@ Map them in the **HAND** section of any parameter's details menu:
 
 On the phone screen (never on the projector or in recordings) you see a faint hand skeleton, a colored line for every mapped channel and one colored bar per mapped channel.
 
-**Peace sign = next preset:** show a peace sign (index and middle finger up, ring and pinky finger folded) for a moment to switch to the next preset. It picks the next one like Auto-Play does (in order or random, only the presets ticked under **Include Presets**), whether Auto-Play is running or not. One sign switches once -- lower your hand or change the gesture, then show it again for the next one. Switch it off in Settings -> Auto-Play -> **Peace sign = next**. The check reuses the hand points that tracking already measures, so it costs no extra performance.
+### Hand Gesture Commands
+
+Tap the **peace sign button** (top of the button column on the right) to control the app with hand gestures. It works on its own: the hand button does not need to be on, so you can switch presets by gesture without the hand moving any parameters.
+
+- **Peace sign** (index and middle finger up, ring and pinky finger folded), held for a moment: switches to the next preset. It picks the next one like Auto-Play does (in order or random, only the presets ticked under **Include Presets**), whether Auto-Play is running or not. If Auto-Play is running, its timer starts over.
+- One sign switches once -- lower your hand or change the gesture, then show it again for the next one.
+- On the phone screen a ring ripples out from your fingers with the number of the new preset (never on the projector or in recordings).
+- Long-press the button to map it to a MIDI button.
+
+Gestures use the same hand detection as hand tracking. With only gestures on, the phone does about the same work as with hand tracking on; with both on, the detection runs once and serves both.
 
 ### Face Tracking
 
@@ -409,7 +418,6 @@ Configure in the Settings menu:
 |---------|------------|
 | **Duration** | How long each preset holds after its transition before switching. Tap **DURATION** for **SYNC: BEATS** to count in beats and bars (up to 128 bars) instead of seconds. In sync, Duration is the whole cycle with the transition included, so 4 bars means a new preset every 4 bars, on the beat. If the transition is longer, it sets the cycle |
 | **Random Order** | Shuffle vs. sequential preset cycling |
-| **Peace Sign = Next** | With hand tracking on, a peace sign switches to the next preset (same order and preset selection as Auto-Play, also while Auto-Play is off) |
 | **Include Presets** | Checkboxes to include/exclude specific preset slots |
 
 Toggle auto-play with the play/pause button in the preset section.
@@ -462,7 +470,7 @@ Once connected, MIDI mapping options appear in the Settings menu:
   - in the **clear midi mappings** menu, move any midi control to see what parameters it is mapped to
   - remove single mappings or all
   - press "show all" to display all midi mappings for all parameters (useful for clearing all mappings)
-- Long-press any parameter slider name or button, then move a MIDI control to map it. This also works for the hand, face, gyro and beat buttons
+- Long-press any parameter slider name or button, then move a MIDI control to map it. This also works for the hand, face, gyro, beat and peace sign buttons
 
 ---
 
@@ -485,7 +493,7 @@ Access via the gear icon in the bottom-right corner:
 | **Connect Bluetooth MIDI** | Scan and connect to MIDI controllers |
 | **BPM** | Set beats-per-minute for LFO sync |
 | **Undo Steps** | Configure undo history depth |
-| **Auto-Play** | Duration, random order, peace sign = next preset, preset filter |
+| **Auto-Play** | Duration, random order, preset filter (also used by the peace sign gesture) |
 | **MIDI Mapping** | Load/Save/Clear MIDI mappings (visible when MIDI connected) |
 | **Sensor Smoothing** | How smooth Pitch, Roll, Yaw, **Hand** and **Face** values follow your movement. Left = direct, right = slow and soft |
 

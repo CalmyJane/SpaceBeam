@@ -58,9 +58,11 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
     /** 21 landmarks as x,y pairs, normalized to the upright (and mirrored for front cam) analysis image. */
     val landmarks = FloatArray(42)
 
-    /** Peace sign (index + middle up, ring + pinky folded) triggers [onPeace] once per showing, on the analysis thread. */
-    @Volatile var peaceEnabled = true
-    var onPeace: (() -> Unit)? = null
+    /**
+     * Peace sign (index + middle up, ring + pinky folded) calls [onPeace] once per showing while [gestures] is on,
+     * on the analysis thread, with the point between the two fingertips (normalized like [landmarks]).
+     */
+    var onPeace: ((x: Float, y: Float) -> Unit)? = null
     private var peaceFrames = 0
     private var releaseFrames = PEACE_RELEASE
     private var lastPeaceMs = -PEACE_COOLDOWN_MS
@@ -71,7 +73,7 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
             if (peaceFrames >= PEACE_HOLD && releaseFrames >= PEACE_RELEASE && now - lastPeaceMs >= PEACE_COOLDOWN_MS) {
                 releaseFrames = 0
                 lastPeaceMs = now
-                if (peaceEnabled) onPeace?.invoke()
+                if (gestures) onPeace?.invoke((landmarks[16] + landmarks[24]) / 2f, (landmarks[17] + landmarks[25]) / 2f)
             }
         } else {
             peaceFrames = 0
@@ -164,6 +166,17 @@ class TrackingOverlayView(
     private val handMapped = BooleanArray(HandTracker.CHANNELS)
     private val faceMapped = BooleanArray(FaceTracker.CHANNELS)
 
+    // Peace sign feedback: two thin rings ripple out from between the fingertips, the new preset number fades through
+    private val burstPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.STROKE }
+    private val burstTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 46f; textAlign = Paint.Align.CENTER
+        typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+    }
+    private var burstStart = 0L
+    private var burstX = 0.5f
+    private var burstY = 0.5f
+    private var burstLabel = ""
+
     // HUD obstacle rects (in this view's coordinates), rebuilt per draw from a reused pool
     private val hudRects = ArrayList<RectF>()
     private val rectPool = ArrayList<RectF>()
@@ -247,7 +260,37 @@ class TrackingOverlayView(
     private fun mapX(t: Tracker, x: Float): Float { val s = maxOf(width / t.imageWidth.toFloat(), height / t.imageHeight.toFloat()); return width / 2f + (x - 0.5f) * t.imageWidth * s }
     private fun mapY(t: Tracker, y: Float): Float { val s = maxOf(width / t.imageWidth.toFloat(), height / t.imageHeight.toFloat()); return height / 2f + (y - 0.5f) * t.imageHeight * s }
 
+    /** Peace sign feedback at a point in hand landmark coordinates, with the preset it switched to. UI thread. */
+    fun peaceBurst(nx: Float, ny: Float, label: String) {
+        burstX = nx; burstY = ny; burstLabel = label
+        burstStart = android.os.SystemClock.uptimeMillis()
+        invalidate()
+    }
+
+    private fun drawBurst(canvas: Canvas) {
+        val t = (android.os.SystemClock.uptimeMillis() - burstStart) / 700f
+        if (t >= 1f) { burstStart = 0L; return }
+        val x = mapX(hand, burstX); val y = mapY(hand, burstY)
+        // Second ring trails the first a little; each eases out (fast start, soft stop) while thinning and fading
+        for (k in 0 until 2) {
+            val p = ((t - k * 0.16f) / 0.84f).coerceIn(0f, 1f)
+            if (p <= 0f || p >= 1f) continue
+            val q = 1f - p
+            val e = 1f - q * q * q
+            burstPaint.strokeWidth = 1.5f + 4f * q
+            burstPaint.alpha = ((if (k == 0) 220 else 130) * q).toInt()
+            canvas.drawCircle(x, y, 24f + 150f * e, burstPaint)
+        }
+        if (burstLabel.isNotEmpty()) {
+            val a = if (t < 0.12f) t / 0.12f else ((1f - t) / 0.88f)
+            burstTextPaint.alpha = (230 * a).toInt().coerceIn(0, 255)
+            canvas.drawText(burstLabel, x, y + burstTextPaint.textSize * 0.35f - 18f * t, burstTextPaint)
+        }
+        postInvalidateOnAnimation()
+    }
+
     override fun onDraw(canvas: Canvas) {
+        if (burstStart != 0L) drawBurst(canvas)
         if (!hand.enabled && !face.enabled && !sensors.enabled) return
         // Sensors change continuously without a detection callback: keep refreshing (~20 Hz) while they are shown
         if (sensors.enabled && !refreshScheduled) { refreshScheduled = true; postDelayed(refresh, 50) }
@@ -393,6 +436,29 @@ class HandIconDrawable : Drawable() {
         for (i in 0 until 4) canvas.drawLine(ox + w * fx[i], oy + h * 0.58f, ox + w * fx[i], oy + h * tipY[i], paint)
         // Thumb, angled out to the side
         canvas.drawLine(ox + w * 0.36f, oy + h * 0.74f, ox + w * 0.14f, oy + h * 0.50f, paint)
+    }
+
+    override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+    override fun setColorFilter(colorFilter: ColorFilter?) { paint.colorFilter = colorFilter }
+    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+    override fun getIntrinsicWidth(): Int = 90
+    override fun getIntrinsicHeight(): Int = 90
+}
+
+/** Button icon: peace sign (palm with two fingers spread in a V). */
+class PeaceIconDrawable : Drawable() {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeCap = Paint.Cap.ROUND }
+    private val palm = RectF()
+
+    override fun draw(canvas: Canvas) {
+        val w = bounds.width().toFloat(); val h = bounds.height().toFloat()
+        val ox = bounds.left.toFloat(); val oy = bounds.top.toFloat()
+        paint.style = Paint.Style.FILL
+        palm.set(ox + w * 0.30f, oy + h * 0.52f, ox + w * 0.72f, oy + h * 0.92f)
+        canvas.drawRoundRect(palm, w * 0.13f, w * 0.13f, paint)
+        paint.style = Paint.Style.STROKE; paint.strokeWidth = w * 0.10f
+        canvas.drawLine(ox + w * 0.43f, oy + h * 0.60f, ox + w * 0.30f, oy + h * 0.12f, paint)
+        canvas.drawLine(ox + w * 0.57f, oy + h * 0.60f, ox + w * 0.70f, oy + h * 0.12f, paint)
     }
 
     override fun setAlpha(alpha: Int) { paint.alpha = alpha }
