@@ -340,6 +340,8 @@ Map them in the **HAND** section of any parameter's details menu:
 
 On the phone screen (never on the projector or in recordings) you see a faint hand skeleton, a colored line for every mapped channel and one colored bar per mapped channel.
 
+**Peace sign = next preset:** show a peace sign (index and middle finger up, ring and pinky finger folded) for a moment to switch to the next preset. It picks the next one like Auto-Play does (in order or random, only the presets ticked under **Include Presets**), whether Auto-Play is running or not. One sign switches once -- lower your hand or change the gesture, then show it again for the next one. Switch it off in Settings -> Auto-Play -> **Peace sign = next**. The check reuses the hand points that tracking already measures, so it costs no extra performance.
+
 ### Face Tracking
 
 The **face button** works the same way with your face:
@@ -407,6 +409,7 @@ Configure in the Settings menu:
 |---------|------------|
 | **Duration** | How long each preset holds after its transition before switching. Tap **DURATION** for **SYNC: BEATS** to count in beats and bars (up to 128 bars) instead of seconds. In sync, Duration is the whole cycle with the transition included, so 4 bars means a new preset every 4 bars, on the beat. If the transition is longer, it sets the cycle |
 | **Random Order** | Shuffle vs. sequential preset cycling |
+| **Peace Sign = Next** | With hand tracking on, a peace sign switches to the next preset (same order and preset selection as Auto-Play, also while Auto-Play is off) |
 | **Include Presets** | Checkboxes to include/exclude specific preset slots |
 
 Toggle auto-play with the play/pause button in the preset section.
@@ -482,7 +485,7 @@ Access via the gear icon in the bottom-right corner:
 | **Connect Bluetooth MIDI** | Scan and connect to MIDI controllers |
 | **BPM** | Set beats-per-minute for LFO sync |
 | **Undo Steps** | Configure undo history depth |
-| **Auto-Play** | Duration, random order, preset filter |
+| **Auto-Play** | Duration, random order, peace sign = next preset, preset filter |
 | **MIDI Mapping** | Load/Save/Clear MIDI mappings (visible when MIDI connected) |
 | **Sensor Smoothing** | How smooth Pitch, Roll, Yaw, **Hand** and **Face** values follow your movement. Left = direct, right = slow and soft |
 
