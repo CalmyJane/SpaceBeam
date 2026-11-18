@@ -285,7 +285,14 @@ class MediaSourceControl(
     private companion object {
         const val CHECK_INTERVAL_MS = 50L
         const val HARD_CUT_LEAD_S = CHECK_INTERVAL_MS / 1000f
+        // Image decoding (tens to 100+ ms) must never run under the playlist lock: the GL thread takes that
+        // lock every frame, so a decode there froze all visuals. One low-priority thread for all playlists.
+        val decoder: java.util.concurrent.ExecutorService = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "image-decode").apply { priority = Thread.NORM_PRIORITY - 1; isDaemon = true }
+        }
     }
+    // Per layer: bumped on every image load, so a slow decode that was overtaken by a newer one is dropped
+    private val imageLoadToken = IntArray(2)
 
     init {
         mainActivity.runOnUiThread {
@@ -402,13 +409,18 @@ class MediaSourceControl(
                     }
                 }
             } else {
-                val bmp = mainActivity.loadScaledBitmap(item.uri)
-                if (bmp != null) {
-                    layer.bitmap = bmp
-                    layer.imageUploaded = false
-                    layer.width = bmp.width
-                    layer.height = bmp.height
-                    layer.rotation = if (bmp.height > bmp.width) -90f else 0f
+                val token = ++imageLoadToken[targetLayer]
+                val uri = item.uri
+                decoder.execute {
+                    val bmp = mainActivity.loadScaledBitmap(uri) ?: return@execute
+                    synchronized(playlist) {
+                        if (imageLoadToken[targetLayer] != token) { bmp.recycle(); return@execute }
+                        layer.bitmap = bmp
+                        layer.imageUploaded = false
+                        layer.width = bmp.width
+                        layer.height = bmp.height
+                        layer.rotation = if (bmp.height > bmp.width) -90f else 0f
+                    }
                 }
             }
         }

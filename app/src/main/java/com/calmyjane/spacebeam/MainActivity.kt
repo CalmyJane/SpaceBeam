@@ -430,6 +430,11 @@ class MainActivity : AppCompatActivity() {
 
         // 1. Close active UI menus
         PropertyControl.closeActiveMenu()
+        // The HUD rebuild drops the MIDI learn / clear-mapping overlays: end their modes too, otherwise the next
+        // knob or fader move would silently get mapped with no overlay showing
+        midiHelper.learningTargetId = null
+        midiHelper.onLearningComplete = null
+        midiHelper.onCCReceived = null
 
         // 2. Handle Settings state
         var wasSettingsOpen = false
@@ -719,6 +724,9 @@ class MainActivity : AppCompatActivity() {
         handTracker.smoothing = prefs.getInt("HAND_SMOOTH", Tracker.DEFAULT_SMOOTHING)
         faceTracker.smoothing = prefs.getInt("FACE_SMOOTH", Tracker.DEFAULT_SMOOTHING)
         maskManager.loadFromPrefs(prefs)
+        sensorHelper.pitchSmoothing = prefs.getInt("PITCH_SMOOTH", sensorHelper.pitchSmoothing)
+        sensorHelper.rollSmoothing = prefs.getInt("ROLL_SMOOTH", sensorHelper.rollSmoothing)
+        sensorHelper.yawSmoothing = prefs.getInt("YAW_SMOOTH", sensorHelper.yawSmoothing)
         val filterStr = prefs.getString("AP_FILTER", null)
         if (filterStr != null) {
             autoPlayFilter.clear()
@@ -945,6 +953,7 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
         sensorHelper.stop()
         restoreScreenTimeout()
+        saveSettings()
     }
 
     override fun onStop() {
@@ -962,6 +971,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // Pending auto-play steps, delayed preset starts, record ticker, RTSP retries: none may run on a dead activity
+        handler.removeCallbacksAndMessages(null)
+        // Players hold hardware decoders / network streams and a self-reposting poller: free them
+        controls.forEach { c ->
+            if (c is MediaSourceControl || c is RtspSourceControl) try { (c as SourcePropertyControl).onRemove() } catch (e: Exception) {}
+        }
         super.onDestroy()
         restoreScreenTimeout()
         midiHelper.close()
@@ -3035,6 +3050,7 @@ class MainActivity : AppCompatActivity() {
             controls.add(transCtrl)
             controlsMap[transId] = transCtrl
         }
+        autoPlayDurationControl()
 
         val sliderWrapper = LinearLayout(this).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) }
         transCtrl.attachTo(this, sliderWrapper)
@@ -3187,16 +3203,21 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(autoPlayRunnable)
         if (::playBtn.isInitialized) updatePlayBtnBackground() // Grey
 
-        // Save Settings on stop
-        val prefs = getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE)
-        val filterStr = autoPlayFilter.joinToString(",")
-        prefs.edit()
+        saveSettings()
+        maskManager.saveToPrefs(getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE))
+    }
+
+    /** Settings-menu values without their own pref write: saved on every change and in onPause. */
+    fun saveSettings() {
+        getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE).edit()
             .putBoolean("AP_RANDOM", autoPlayRandom)
-            .putString("AP_FILTER", filterStr)
+            .putString("AP_FILTER", autoPlayFilter.joinToString(","))
             .putInt("UNDO_HISTORY", undoHistorySize)
             .putBoolean("FORCE_SCREEN_ON", forceScreenOn)
+            .putInt("PITCH_SMOOTH", sensorHelper.pitchSmoothing)
+            .putInt("ROLL_SMOOTH", sensorHelper.rollSmoothing)
+            .putInt("YAW_SMOOTH", sensorHelper.yawSmoothing)
             .apply()
-        maskManager.saveToPrefs(prefs)
     }
 
     private fun triggerNextAutoPlay() {
@@ -3895,6 +3916,20 @@ class MainActivity : AppCompatActivity() {
                 or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                 or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 or View.SYSTEM_UI_FLAG_FULLSCREEN)
+    }
+
+    /**
+     * Auto-play DURATION slider: one registered instance (MIDI can drive it while Settings is closed),
+     * attached to the Settings menu while that is open.
+     */
+    fun autoPlayDurationControl(): PropertyControl {
+        controlsMap["AUTO_DUR"]?.let { return it }
+        val c = BeatDurationControl(
+            "AUTO_DUR", "DURATION", maxMs = 300000, sliderMaxMs = 60000, duration = autoPlayDuration
+        ) { saveSyncSetting("AUTO_DUR_SYNC", it) }
+        controls.add(c)
+        controlsMap[c.id] = c
+        return c
     }
 
     fun saveSyncSetting(key: String, on: Boolean) {

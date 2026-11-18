@@ -43,7 +43,9 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         confirmationOverlay?.animate()?.cancel()
 
         PropertyControl.closeActiveMenu()
+        autoPlayDurationControl?.detach()  // the control lives on in MainActivity (MIDI), only its views go
         autoPlayDurationControl = null
+        activity.saveSettings()
 
         if (overlay != null && overlay!!.parent != null) {
             parentView.removeView(overlay)
@@ -266,6 +268,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
                         activity.undoHistorySize = clamped
                         activity.undoManager.maxHistory = clamped
                         v.text = clamped.toString()
+                        activity.saveSettings()
                     }
                     val imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
                     imm.hideSoftInputFromWindow(v.windowToken, 0)
@@ -364,7 +367,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         val randomCheck = CheckBox(activity).apply {
             isChecked = activity.autoPlayRandom
             buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-            setOnCheckedChangeListener { _, isChecked -> activity.autoPlayRandom = isChecked }
+            setOnCheckedChangeListener { _, isChecked -> activity.autoPlayRandom = isChecked; activity.saveSettings() }
         }
         randomRow.addView(randomCheck)
         contentLayout.addView(randomRow)
@@ -402,6 +405,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
                 setOnCheckedChangeListener { _, isChecked ->
                     if (isChecked) activity.autoPlayFilter.add(i) else activity.autoPlayFilter.remove(i)
                     activity.updatePlayButtonState()
+                    activity.saveSettings()
                 }
             }
             val lbl = TextView(activity).apply { text = "$i"; textSize = 10f; setTextColor(Color.LTGRAY); gravity = Gravity.CENTER }
@@ -411,9 +415,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
         contentLayout.addView(filterContainer)
 
         // Auto-Play Duration
-        autoPlayDurationControl = BeatDurationControl(
-            "AUTO_DUR", "DURATION", maxMs = 300000, sliderMaxMs = 60000, duration = activity.autoPlayDuration
-        ) { activity.saveSyncSetting("AUTO_DUR_SYNC", it) }
+        autoPlayDurationControl = activity.autoPlayDurationControl()
 
         autoPlayDurationControl?.popupElevation = 600f
         autoPlayDurationControl?.attachTo(activity, contentLayout)
@@ -453,6 +455,7 @@ class SettingsMenu(private val activity: MainActivity, private val parentView: V
             })
             contentLayout.addView(row)
         }
+        // Sensor values are saved when the menu closes (cleanup) and in onPause, not on every slider step
         addSmoothRow("Pitch", { activity.sensorHelper.pitchSmoothing }) { activity.sensorHelper.pitchSmoothing = it }
         addSmoothRow("Roll",  { activity.sensorHelper.rollSmoothing  }) { activity.sensorHelper.rollSmoothing  = it }
         addSmoothRow("Yaw",   { activity.sensorHelper.yawSmoothing   }) { activity.sensorHelper.yawSmoothing   = it }

@@ -28,6 +28,7 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
     private var audioTrackIndex = -1
     private var audioThread: Thread? = null
     @Volatile private var isRecording = true // read by the audio thread
+    private var audioGaveUp = false // under the muxer lock: mic failed before any audio, the muxer starts without it
 
     private val sampleRate = 44100
     private val channelCount = 1
@@ -66,29 +67,45 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
             val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
             val bufferSize = minBufferSize * 4
 
-            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                audioRecord = AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize)
-
-                if (audioRecord?.state == AudioRecord.STATE_INITIALIZED) {
-                    val aFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channelCount).apply {
-                        setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                        setInteger(MediaFormat.KEY_BIT_RATE, audioBitRate)
-                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
-                    }
-
-                    audioEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-                    audioEncoder?.configure(aFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                    audioEncoder?.start()
-
-                    isRecording = true
-                    audioRecord?.startRecording()
-                    audioThread = Thread { audioLoop() }
-                    audioThread?.start()
-                }
+            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
+            val rec = AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize)
+            audioRecord = rec
+            if (rec.state != AudioRecord.STATE_INITIALIZED) { dropAudio(); return }
+            // The mic can be busy (another app recording): then record video only. An audio encoder without input
+            // never reports its format, the muxer would wait for it forever and the whole recording would be lost.
+            rec.startRecording()
+            if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                Log.w("VideoRecorder", "Mic not available, recording without sound")
+                dropAudio(); return
             }
+
+            val aFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channelCount).apply {
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                setInteger(MediaFormat.KEY_BIT_RATE, audioBitRate)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+            }
+            val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+            audioEncoder = enc
+            enc.configure(aFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            enc.start()
+
+            isRecording = true
+            audioThread = Thread { audioLoop() }
+            audioThread?.start()
         } catch (e: Exception) {
-            Log.e("VideoRecorder", "Audio setup failed", e)
+            Log.e("VideoRecorder", "Audio setup failed, recording without sound", e)
+            dropAudio()
         }
+    }
+
+    /** Setup thread only, before the audio thread runs: free the mic + encoder and continue video-only. */
+    private fun dropAudio() {
+        step("drop audioRecord") { audioRecord?.stop() }
+        step("drop audioRecord") { audioRecord?.release() }
+        step("drop audioEncoder") { audioEncoder?.stop() }
+        step("drop audioEncoder") { audioEncoder?.release() }
+        audioRecord = null
+        audioEncoder = null
     }
 
     fun drain(endOfStream: Boolean) {
@@ -106,8 +123,21 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
         val buffer = ByteArray(2048)
         var totalBytesRead = 0L
 
+        var readErrors = 0
         while (isRecording && audioEncoder != null && audioRecord != null) {
             val readBytes = audioRecord!!.read(buffer, 0, buffer.size)
+            if (readBytes < 0) {
+                // Mic lost (e.g. taken by another app): back off instead of spinning at 100% CPU. If no audio
+                // reached the encoder yet, stop waiting for an audio track so the video still gets written.
+                if (++readErrors >= 100) {
+                    Log.w("VideoRecorder", "Mic read keeps failing ($readBytes), continuing without sound")
+                    synchronized(this) { audioGaveUp = true; startMuxerIfReady() }
+                    return
+                }
+                try { Thread.sleep(10) } catch (e: InterruptedException) { return }
+                continue
+            }
+            readErrors = 0
             if (readBytes > 0) {
                 totalBytesRead += readBytes
                 try {
@@ -175,7 +205,7 @@ class VideoRecorder(private val context: Context, val rawWidth: Int, val rawHeig
     }
 
     private fun startMuxerIfReady() {
-        val audioReady = (audioEncoder == null) || (audioTrackIndex >= 0)
+        val audioReady = (audioEncoder == null) || (audioTrackIndex >= 0) || audioGaveUp
         val videoReady = (videoTrackIndex >= 0)
         if (videoReady && audioReady && !muxerStarted) {
             muxer.start()

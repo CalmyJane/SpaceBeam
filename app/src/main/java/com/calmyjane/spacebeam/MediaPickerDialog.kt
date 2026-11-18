@@ -17,7 +17,10 @@ class MediaPickerDialog(
     private val onMediaSelected: (List<android.net.Uri>) -> Unit
 ) {
     companion object {
-        private val thumbnailCache = LruCache<String, Bitmap>(200)
+        // Sized in bytes (not entries): 200 thumbnails of up to 300x300 were ~70 MB kept for the app's lifetime
+        private val thumbnailCache = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
+            override fun sizeOf(key: String, value: Bitmap) = value.byteCount
+        }
         private val executor = Executors.newFixedThreadPool(4)
     }
 
@@ -34,7 +37,7 @@ class MediaPickerDialog(
         val files = mutableListOf<MediaEntry>()
     }
 
-    private val rootDir = VDir("Device", "", null)
+    private var rootDir = VDir("Device", "", null)  // replaced as a whole on the UI thread once loaded
     private var currentDir: VDir = rootDir
 
     private var displayItems = mutableListOf<Any>()
@@ -269,16 +272,16 @@ class MediaPickerDialog(
             query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, false)
             query(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true)
 
-            rootDir.subDirs.clear()
-            rootDir.files.clear()
-
+            // Build the tree off-thread into a fresh root; the UI thread (filter buttons, navigation) keeps reading
+            // the old one until it is swapped in below, so nothing is modified while it is being iterated
+            val root = VDir("Device", "", null)
             for (entry in allMedia) {
                 val cleanPath = entry.path.replace("//", "/")
                 val parts = cleanPath.split("/").filter { it.isNotEmpty() }
                 if (parts.isEmpty()) continue
                 val folderParts = parts.dropLast(1)
 
-                var curr = rootDir
+                var curr = root
                 var curPath = ""
                 for (part in folderParts) {
                     curPath += "/$part"
@@ -287,13 +290,14 @@ class MediaPickerDialog(
                 curr.files.add(entry)
             }
 
-            var start = rootDir
+            var start = root
             while (start.subDirs.size == 1 && start.files.isEmpty()) {
                 start = start.subDirs.values.first()
             }
-            currentDir = start
 
             activityContext.runOnUiThread {
+                rootDir = root
+                currentDir = start
                 loadingSpinner?.visibility = View.GONE
                 refreshGrid()
             }
