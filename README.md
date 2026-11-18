@@ -347,7 +347,6 @@ Tap the **peace sign button** (top of the button column on the right) to control
 | Gesture | Fingers up (all others folded) | Default |
 |---------|---------|---------|
 | **Peace** ✌ | Index + middle | Next random preset |
-| **Love you** 🤟 | Index + pinky + thumb sticking out | Nothing |
 | **Metal** 🤘 | Index + pinky | Load preset 1 |
 | **L** | Index + thumb sticking out | Nothing |
 | **Point** ☝ | Index | Nothing |
@@ -362,7 +361,7 @@ Where the thumb isn't mentioned it doesn't matter. Hold the gesture for a moment
 
 Choose what each gesture does in Settings -> **gestures**: nothing, next (in Auto-Play order), next in order, next random, previous, Auto-Play on/off, or load preset 1-9. Tap outside the list to close it.
 
-- Only gestures with a command are recognized. So Metal also accepts a thumb sticking out as long as Love you is set to nothing, and Point and Fist work the same with L and the thumbs.
+- Only gestures with a command are recognized. So Point also accepts a thumb sticking out as long as L is set to nothing, and Fist works the same with the thumbs.
 - Open hand and Fist happen easily by accident, especially while the hand also steers parameters -- keep them for commands where a surprise doesn't hurt.
 
 - Next, previous and random only step through the presets ticked under Auto-Play -> **Include Presets** (all saved presets if none are ticked). Random never picks the preset that is already showing.

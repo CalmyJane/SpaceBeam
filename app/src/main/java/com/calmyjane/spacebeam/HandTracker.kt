@@ -180,11 +180,10 @@ enum class Thumb { ANY, OUT, UP, DOWN }
 /**
  * Hand gestures: raised fingers (0 = index .. 3 = pinky; all others folded) plus the thumb. Detection tries them in
  * this order among the ones with a command, so the stricter thumb-out variants come before their thumb-any twins
- * (Love you before Metal, L before Point, thumbs up/down before Fist).
+ * (L before Point, thumbs up/down before Fist).
  */
 enum class HandGesture(val label: String, val raised: IntArray, val thumb: Thumb, val defaultAction: String = "OFF") {
     PEACE("Peace  ✌", intArrayOf(0, 1), Thumb.ANY, "NEXT_RANDOM"),
-    LOVE("Love you  🤟", intArrayOf(0, 3), Thumb.OUT),
     METAL("Metal  🤘", intArrayOf(0, 3), Thumb.ANY, "PRESET_1"),
     L_SHAPE("L  (thumb + index)", intArrayOf(0), Thumb.OUT),
     POINT("Point  ☝", intArrayOf(0), Thumb.ANY),
