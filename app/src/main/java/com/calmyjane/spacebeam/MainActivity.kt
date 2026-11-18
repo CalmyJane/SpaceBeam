@@ -159,7 +159,8 @@ class MainActivity : AppCompatActivity() {
 
         fpsTextView?.text = "FPS: $fps  ${cachedTempC}°C$cachedHeadroomStr"
         val sh = sensorHelper
-        sensorDebugTextView?.text = "P:${"%.2f".format(sh.pitch)}  R:${"%.2f".format(sh.roll)}  Y:${"%.2f".format(sh.yaw)}"
+        sensorDebugTextView?.text = if (!sh.listening) "GYRO OFF"
+            else "P:${"%.2f".format(sh.pitch)}  R:${"%.2f".format(sh.roll)}  Y:${"%.2f".format(sh.yaw)}"
     }
 
     private var activeShaderInput: EditText? = null

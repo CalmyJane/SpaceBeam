@@ -126,6 +126,12 @@ open class PropertyControl(
     private var lastLfoOutput = -1f
 
     private var sliderView: SliderBox? = null
+    // GL thread: last state pushed to the views, to skip redraws when nothing changed
+    private var lastSyncedSlider: SliderBox? = null
+    private var lastSyncedText: String? = null
+    private var lastSyncedT = -1f
+    private var lastIndicatorView: View? = null
+    private var lastIndicatorKey = -2f
     private var modIndicator: View? = null
     private var mainRowLayout: LinearLayout? = null
     protected var floatingPanel: LinearLayout? = null
@@ -466,7 +472,15 @@ open class PropertyControl(
         modulatedNormalized = currentCalculatedOutput
 
         syncUiElements()
-        modIndicator?.postInvalidate()
+        // Redraw the modulation dot only when it visibly changes (was a UI message per control per frame)
+        val ind = modIndicator
+        if (ind != null) {
+            val key = if (modDepth > 0) abs(modulatedNormalized - (preciseValue / sliderMax.toFloat())) else -1f
+            if (ind !== lastIndicatorView || abs(key - lastIndicatorKey) > 0.002f || (key < 0f) != (lastIndicatorKey < 0f)) {
+                lastIndicatorView = ind; lastIndicatorKey = key
+                ind.postInvalidate()
+            }
+        }
 
         val displayVal = (modulatedNormalized * sliderMax).roundToInt()
         updateLiveValueUI(displayVal)
@@ -509,8 +523,15 @@ open class PropertyControl(
         val slider = sliderView // detach() can null it from the UI thread
         if (slider != null) {
             val visualT = if (logPower > 1) smoothedNormalized.toDouble().pow(1.0/logPower).toFloat() else smoothedNormalized
-            // setVisualState uses postInvalidate() internally, so it is inherently thread-safe
-            slider.setVisualState(visualT, formatValue(value))
+            // Only when the bar or its text changes (a fresh view always gets its first state). Sub-pixel
+            // threshold: 0.0005 of a ~800 px slider is 0.4 px, so movement stays perfectly smooth.
+            // The text is compared as shown: some labels change without the value (beat-synced durations follow the BPM)
+            val text = formatValue(value)
+            if (slider !== lastSyncedSlider || text != lastSyncedText || abs(visualT - lastSyncedT) > 0.0005f) {
+                lastSyncedSlider = slider; lastSyncedText = text; lastSyncedT = visualT
+                // setVisualState uses postInvalidate() internally, so it is inherently thread-safe
+                slider.setVisualState(visualT, text)
+            }
         }
 
         if (activeControl == this) {
