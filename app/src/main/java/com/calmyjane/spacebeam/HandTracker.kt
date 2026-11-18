@@ -48,6 +48,7 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
         // again, min gap between any two
         private const val GESTURE_HOLD = 5
         private const val GESTURE_RELEASE = 3
+        private const val GESTURE_LOST = 10  // ~0.5 s without a clear hand
         private const val GESTURE_COOLDOWN_MS = 1200L
         val FINGER_MCPS = intArrayOf(5, 9, 13, 17)
 
@@ -73,18 +74,31 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
     private var heldFrames = 0
     private var latched: HandGesture? = null  // fired and still shown: must go away before it fires again
     private var latchFrames = 0
+    private var unclearFrames = 0
     private var lastGestureMs = -GESTURE_COOLDOWN_MS
+    private var lastFrameMs = 0L
 
-    private fun updateGesture(g: HandGesture?, now: Long) {
+    /**
+     * Pipeline thread, once per detection. [clear] = a hand was seen with every finger clearly up or down; frames without
+     * a hand or with a finger half bent don't count as "the gesture went away", so a held gesture that flickers in bad
+     * light doesn't fire again. Only a clearly different hand, or no clear hand for [GESTURE_LOST] frames, re-arms it.
+     */
+    private fun updateGesture(g: HandGesture?, clear: Boolean, now: Long) {
+        // Gestures off, or detection paused (switched off, app in background): start from scratch next time
+        if (!gestures || now - lastFrameMs > 500L) {
+            heldGesture = null; heldFrames = 0; latched = null; latchFrames = 0; unclearFrames = 0
+        }
+        lastFrameMs = now
+        if (!gestures) return
         if (g == heldGesture) heldFrames++ else { heldGesture = g; heldFrames = 1 }
         if (latched != null) {
-            if (g == latched) latchFrames = 0
-            else if (++latchFrames >= GESTURE_RELEASE) latched = null
+            if (g == latched) { latchFrames = 0; unclearFrames = 0 }
+            else if (clear) { unclearFrames = 0; if (++latchFrames >= GESTURE_RELEASE) latched = null }
+            else if (++unclearFrames >= GESTURE_LOST) latched = null
         }
         if (g == null || g == latched || heldFrames < GESTURE_HOLD || now - lastGestureMs < GESTURE_COOLDOWN_MS) return
-        latched = g; latchFrames = 0
+        latched = g; latchFrames = 0; unclearFrames = 0
         lastGestureMs = now
-        if (!gestures) return
         // Feedback point: between the raised fingertips (and the thumb tip when it is part of the gesture),
         // the middle knuckle for a fist
         val points = g.raised.map { FINGER_TIPS[it] } + (if (g.thumb != Thumb.ANY) listOf(THUMB_TIP) else emptyList())
@@ -117,7 +131,7 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
         val result = (detector as HandLandmarker).detectForVideo(BitmapImageBuilder(bmp).build(), timestampMs)
         val hand = result.landmarks().firstOrNull()
         val world = result.worldLandmarks().firstOrNull()
-        if (hand == null || world == null || hand.size < 21 || world.size < 21) { updateGesture(null, timestampMs); return false }
+        if (hand == null || world == null || hand.size < 21 || world.size < 21) { updateGesture(null, false, timestampMs); return false }
         for (i in 0 until 21) {
             landmarks[i * 2] = hand[i].x()
             landmarks[i * 2 + 1] = hand[i].y()
@@ -153,9 +167,10 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
             Thumb.DOWN -> thumbOut && vertical && tdy > 0f
         }
         val active = activeGestures
-        val g = if ((up or down) != 0xF) null
+        val clear = (up or down) == 0xF
+        val g = if (!clear) null
                 else HandGesture.values().firstOrNull { it in active && it.mask == up && thumbOk(it.thumb) }
-        updateGesture(g, timestampMs)
+        updateGesture(g, clear, timestampMs)
         // Whole-hand tilt on screen: wrist → middle knuckle, in pixels (image space is upright + mirrored like the screen)
         val ax = (hand[MIDDLE_MCP].x() - hand[WRIST].x()) * bmp.width
         val ay = (hand[MIDDLE_MCP].y() - hand[WRIST].y()) * bmp.height

@@ -845,17 +845,20 @@ class MainActivity : AppCompatActivity() {
         if (on == (if (gesture) tracker.gestures else tracker.enabled)) return
         fun switchOff() { if (gesture) tracker.disableGestures() else tracker.disable() }
         if (renderer.getSource("CAM_MAIN") == null) {
-            // Camera not in the mixer: it only runs while tracking needs it, so (re)bind on every toggle
+            // Camera not in the mixer: it only runs while tracking needs it. Bind it when the first tracker switch goes
+            // on and unbind after the last goes off; in between only the analyzer changes, so other trackers
+            // (and gestures) keep running without a camera restart
             if (on) {
                 tracker.enable(gesture) { ok ->
-                    if (ok) startCamera()
-                    else Toast.makeText(this, "Tracking model missing (${tracker.modelAsset})", Toast.LENGTH_LONG).show()
+                    if (!ok) Toast.makeText(this, "Tracking model missing (${tracker.modelAsset})", Toast.LENGTH_LONG).show()
+                    else if (vision.available) vision.updateAnalyzer()
+                    else startCamera()
                     updateTrackingButtons()
                 }
             } else {
                 switchOff()
                 vision.updateAnalyzer()
-                startCamera()
+                if (!handTracker.running && !faceTracker.running) startCamera()
                 updateTrackingButtons()
             }
             return
