@@ -399,8 +399,22 @@ open class PropertyControl(
                     rampAccum += baseSpeed * depthNorm * deltaTime.toDouble()
                     currentCalculatedOutput = ((smoothedNormalized + rampAccum.toFloat()) % 1.0f + 1.0f) % 1.0f
                 } else {
-                    // During transitions/crossfade: use waveform*depth model with rampAccum fraction
-                    val raw = smoothedNormalized + (rawWave.toFloat() * depthNorm)
+                    // During transitions / shape crossfades. The RAMP term is the accumulated turn itself, NOT
+                    // scaled by depth, exactly as in the steady state above: scaling it rotated the image by
+                    // frac(turn) * (1 - depth) on the first transition frame. rampAccum glides to a whole turn
+                    // meanwhile, so the term ends at 0 (= 1) and the steady state takes over seamlessly.
+                    fun term(shape: WaveShape): Float =
+                        if (shape == WaveShape.RAMP) (((rampAccum % 1.0) + 1.0) % 1.0).toFloat()
+                        else getWaveValue(shape, lfoPhase).toFloat() * depthNorm
+                    var t = term(modShape)
+                    val old = oldModShape
+                    if (old != null && shapeFadeProgress < 1f) {
+                        val from = term(old)
+                        val fe = shapeFadeProgress * shapeFadeProgress * (3.0f - 2.0f * shapeFadeProgress)
+                        // Crossfade the short way around (0.95 -> 0.05 is a small step, not a turn back)
+                        t = from + (((t - from + 0.5f) % 1f + 1f) % 1f - 0.5f) * fe
+                    }
+                    val raw = smoothedNormalized + t
                     currentCalculatedOutput = ((raw % 1.0f) + 1.0f) % 1.0f
                 }
             } else {
