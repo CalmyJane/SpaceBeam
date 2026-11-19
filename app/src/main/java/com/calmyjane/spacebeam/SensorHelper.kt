@@ -37,9 +37,20 @@ class SensorHelper(private val activity: MainActivity) : SensorEventListener {
     private var refRoll = 0f
     private var refYaw = 0f
 
+    // The sensors only run while modulation is on or still fading out (they were on all the time before, for
+    // nothing: battery). UI thread owns registering.
+    @Volatile private var resumed = false
+    /** Sensors delivering values right now (the HUD readout shows "GYRO OFF" otherwise). */
+    @Volatile var listening = false; private set
+    @Volatile private var pendingRef = false
+    @Volatile private var stopPosted = false
+
+    /** UI thread. */
     fun setEnabled(on: Boolean) {
-        if (on && blend <= 0f) { refPitch = pitch; refRoll = roll; refYaw = yaw }
+        // Neutral reference = the first fresh sample after switching on (values are stale while the sensors slept)
+        if (on && blend <= 0f) pendingRef = true
         enabled = on
+        if (on) register()
     }
 
     /** Called once per rendered frame. */
@@ -48,10 +59,29 @@ class SensorHelper(private val activity: MainActivity) : SensorEventListener {
         val step = deltaTime / 0.8f
         blendLinear = if (blendLinear < goal) minOf(goal, blendLinear + step) else maxOf(goal, blendLinear - step)
         blend = blendLinear * blendLinear * (3f - 2f * blendLinear)
+        // Faded out completely: let the sensors sleep
+        if (!enabled && blend <= 0f && listening && !stopPosted) {
+            stopPosted = true
+            activity.runOnUiThread { stopPosted = false; if (!enabled && blend <= 0f) unregister() }
+        }
+    }
+
+    private fun register() {
+        if (!resumed || listening) return
+        listening = true
+        hasRotation = false  // first sample snaps instead of gliding from the stale value
+        linearAccelSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        rotationVectorSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+    }
+
+    private fun unregister() {
+        if (!listening) return
+        listening = false
+        sensorManager.unregisterListener(this)
     }
 
     /** Channel relative to the neutral reference, -1..1: 0 pitch, 1 roll, 2 yaw (wraps), 3-5 accel X/Y/Z. */
-    fun relative(channel: Int): Float = when (channel) {
+    fun relative(channel: Int): Float = if (pendingRef && channel < 3) 0f else when (channel) {
         0 -> pitch - refPitch
         1 -> roll - refRoll
         2 -> { var d = yaw - refYaw; if (d > 1f) d -= 2f; if (d < -1f) d += 2f; d }
@@ -93,13 +123,16 @@ class SensorHelper(private val activity: MainActivity) : SensorEventListener {
         const val MAX_STEP = 0.06f       // per sample, ~3 range units per second
     }
 
+    /** onResume: sensors back on only if modulation needs them. */
     fun start() {
-        linearAccelSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
-        rotationVectorSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        resumed = true
+        if (enabled || blend > 0f) register()
     }
 
+    /** onPause. */
     fun stop() {
-        sensorManager.unregisterListener(this)
+        resumed = false
+        unregister()
     }
 
     override fun onSensorChanged(event: SensorEvent) {
@@ -137,6 +170,7 @@ class SensorHelper(private val activity: MainActivity) : SensorEventListener {
                 val rawPitch = despike(0, adjustedRotMatrix[8].coerceIn(-1f, 1f), false)
                 val rawRoll  = despike(1, (orientation[2] / halfPi).coerceIn(-1f, 1f), false)
                 val rawYaw   = despike(2, (orientation[0] / Math.PI.toFloat()).coerceIn(-1f, 1f), true)
+                if (!hasRotation) { smoothedPitch = rawPitch; smoothedRoll = rawRoll; smoothedYaw = rawYaw }
                 hasRotation = true
                 // Apply per-axis EMA smoothing
                 val pa = 1f - (pitchSmoothing / 1000f) * 0.97f
@@ -151,6 +185,7 @@ class SensorHelper(private val activity: MainActivity) : SensorEventListener {
                 pitch = smoothedPitch
                 roll  = smoothedRoll
                 yaw   = smoothedYaw
+                if (pendingRef) { refPitch = pitch; refRoll = roll; refYaw = yaw; pendingRef = false }
             }
         }
     }

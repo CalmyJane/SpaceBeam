@@ -470,6 +470,18 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
 
+        /** Set per frame: mix above 0, i.e. the mixer or an injection reads this source's FBO this frame. */
+        var live = true
+
+        /**
+         * Faded-out source: nothing reads its FBO, so skip the full-screen draw (+ transform passes) but keep
+         * draining video/camera frames. The frame it is faded in, it is drawn again before anything reads it,
+         * so turning it up (fader, LFO, preset) shows a current image with no extra delay.
+         */
+        fun idle() {
+            if (isReady && type != SourceType.FEEDBACK) updateSurfaces()
+        }
+
         fun processToFbo() {
             if (!isReady) return
 
@@ -786,10 +798,13 @@ class KaleidoscopeRenderer(val ctx: MainActivity) : GLSurfaceView.Renderer {
         ctx.controls.forEach { it.update(deltaTime) }
         ctx.effectChain.effects.forEach { if(it.active) it.update(deltaTime) }
 
-        sources.forEach { it.processToFbo() }
+        for (src in sources) {
+            src.live = (ctx.controlsMap[src.id]?.computedValue ?: 0f) > 0f
+            if (src.live) src.processToFbo() else src.idle()
+        }
         // Apply per-source transform (zoom, angle, move) if non-default
         sources.forEach { src ->
-            if (src.srcZoom != 1.0f || src.srcAngle != 0f || src.srcMoveX != 0f || src.srcMoveY != 0f || src.srcWrapMode != 0) {
+            if (src.live && (src.srcZoom != 1.0f || src.srcAngle != 0f || src.srcMoveX != 0f || src.srcMoveY != 0f || src.srcWrapMode != 0)) {
                 // Render from source FBO through transform shader into temp FBO
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, srcTransformFbo)
                 GLES20.glViewport(0, 0, renderWidth, renderHeight)
