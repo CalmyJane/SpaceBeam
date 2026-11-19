@@ -17,6 +17,11 @@ import org.json.JSONObject
 import kotlin.math.abs
 
 class MidiHelper(private val activity: MainActivity) {
+    companion object {
+        private const val PREFS = "SpaceBeam_Settings"
+        private const val PREF_KEY = "MIDI_MAPPING"
+        private const val PREF_MODIFIED = "MIDI_MAPPING_MODIFIED"
+    }
     // Standard BLE MIDI UUIDs
     private val MIDI_SERVICE_UUID = java.util.UUID.fromString("03B80E5A-EDE8-4B33-A751-6CE34EC4C700")
     private val MIDI_CHAR_UUID    = java.util.UUID.fromString("7772E5DB-3868-4112-A1A9-F2669D106BF3")
@@ -87,7 +92,17 @@ class MidiHelper(private val activity: MainActivity) {
     var onCCReceived: ((cc: Int) -> Unit)? = null
 
     init {
-        importConfig(DEFAULT_MAPPING_JSON)
+        // The last mapping in use (learned, edited, loaded) survives restarts; factory layout on first start
+        val prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val saved = prefs.getString(PREF_KEY, null)
+        if (saved != null && importConfig(saved, persist = false)) isModified = prefs.getBoolean(PREF_MODIFIED, false)
+        else importConfig(DEFAULT_MAPPING_JSON, persist = false)
+    }
+
+    /** Store the current mapping (after every change, so a crash or restart never loses it). */
+    private fun persist() {
+        activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(PREF_KEY, exportConfig()).putBoolean(PREF_MODIFIED, isModified).apply()
     }
 
     fun exportConfig(): String {
@@ -110,34 +125,33 @@ class MidiHelper(private val activity: MainActivity) {
     }
 
     // NEW: Imports JSON string, clears old map, fills new map
-    fun importConfig(jsonString: String): Boolean {
+    fun importConfig(jsonString: String, persist: Boolean = true): Boolean {
         return try {
-            // Clear current
-            bindingMap.clear()
-            reverseMap.clear()
-
+            // Parse everything first: a broken file must not wipe the current mapping
             // Detect if it's the old array format or new object format
+            val newName: String
             val isArray = jsonString.trim().startsWith("[")
 
             val mapArray: JSONArray
             if (isArray) {
                 mapArray = JSONArray(jsonString)
-                mappingName = "Imported Legacy"
+                newName = "Imported Legacy"
             } else {
                 val root = JSONObject(jsonString)
-                mappingName = root.optString("name", "Imported")
+                newName = root.optString("name", "Imported")
                 mapArray = root.getJSONArray("map")
             }
 
-            for (i in 0 until mapArray.length()) {
+            val parsed = (0 until mapArray.length()).map { i ->
                 val obj = mapArray.getJSONObject(i)
-                val cc = obj.getInt("cc")
-                val t = obj.getString("t")
-                val m = obj.getString("m")
-                val s = obj.optDouble("s", 1.0).toFloat()
-                addBinding(cc, t, m, s, updateReverse = true)
+                Pair(obj.getInt("cc"), MidiBinding(obj.getString("t"), obj.getString("m"), obj.optDouble("s", 1.0).toFloat()))
             }
+            bindingMap.clear()
+            reverseMap.clear()
+            mappingName = newName
+            for ((cc, b) in parsed) addBinding(cc, b.target, b.mode, b.scale, updateReverse = true)
             isModified = false
+            if (persist) persist()
             true
         } catch (e: Exception) {
             Log.e("MIDI", "Import failed", e)
@@ -186,6 +200,7 @@ class MidiHelper(private val activity: MainActivity) {
             }
         }
         isModified = true
+        persist()
     }
 
     fun getAllBindings(): List<Triple<Int, String, MidiBinding>> {
@@ -200,6 +215,7 @@ class MidiHelper(private val activity: MainActivity) {
         bindingMap.clear()
         reverseMap.clear()
         isModified = true
+        persist()
     }
 
     fun getMappedCC(controlId: String): Int? {
@@ -213,6 +229,8 @@ class MidiHelper(private val activity: MainActivity) {
         if (bindingMap[cc]?.isEmpty() == true) {
             bindingMap.remove(cc)
         }
+        isModified = true
+        persist()
     }
 
     fun startLeScan() {
@@ -414,6 +432,7 @@ class MidiHelper(private val activity: MainActivity) {
                 bindingMap[cc]?.removeIf { it.target == target && it.mode == mode }
 
                 addBinding(cc, target, mode, 1.0f, true)
+                persist()
 
                 learningTargetId = null
                 onLearningComplete?.invoke()

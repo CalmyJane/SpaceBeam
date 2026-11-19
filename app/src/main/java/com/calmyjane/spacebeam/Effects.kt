@@ -97,10 +97,7 @@ class MaskManager {
         val nyArr = FloatArray(n) { nodes[it].y }
         maskExecutor.execute {
             val bmp = computeMaskBitmap(w, h, curSmooth, nxArr, nyArr, n, myGen, 120)
-            if (bmp != null) {
-                pendingMaskBitmap?.recycle()
-                pendingMaskBitmap = bmp
-            }
+            if (bmp != null) pendingMaskBitmap.getAndSet(bmp)?.recycle()
         }
     }
 
@@ -113,10 +110,7 @@ class MaskManager {
         val nyArr = FloatArray(n) { nodes[it].y }
         maskExecutor.execute {
             val bmp = computeMaskBitmap(w, h, curSmooth, nxArr, nyArr, n, myGen, 480)
-            if (bmp != null) {
-                pendingMaskBitmap?.recycle()
-                pendingMaskBitmap = bmp
-            }
+            if (bmp != null) pendingMaskBitmap.getAndSet(bmp)?.recycle()
         }
     }
 
@@ -226,8 +220,9 @@ class MaskManager {
 
     /** Upload pending bitmap to GL texture — call on GL thread */
     fun uploadPendingMask() {
-        val bmp = pendingMaskBitmap ?: return
-        pendingMaskBitmap = null
+        // Take it atomically: the worker recycles whatever is still pending when it publishes a newer one,
+        // so a read-then-clear here could hand a bitmap to texImage2D that the worker just recycled
+        val bmp = pendingMaskBitmap.getAndSet(null) ?: return
 
         if (maskTexId == 0) {
             val tex = IntArray(1)
@@ -267,9 +262,9 @@ class MaskManager {
 
     @Volatile var needsRegenerate = false
     @Volatile var needsHiResRegenerate = false
-    @Volatile var pendingMaskBitmap: Bitmap? = null
+    val pendingMaskBitmap = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
     private val maskExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
-    private var genCounter = 0
+    @Volatile private var genCounter = 0  // read by the worker to drop outdated jobs
 
     fun saveToPrefs(prefs: android.content.SharedPreferences) {
         val nodesStr = nodes.joinToString(";") { "${it.x},${it.y}" }
