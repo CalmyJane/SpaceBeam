@@ -1,0 +1,7 @@
+-Hand gestures: new peace sign button, switch presets with a peace sign, metal sign and more (command per gesture in Settings)
+-Fixed a sudden rotation at the start of some preset transitions
+-MIDI mappings and more settings are now saved automatically
+-Image playlists no longer stutter on crossfades
+-Recordings keep the video when the mic is busy
+-Better performance: faded-out sources and an unused gyro cost nothing
+-Stability fixes

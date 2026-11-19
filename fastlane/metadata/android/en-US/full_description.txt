@@ -10,6 +10,7 @@
     * Feedback as input-source
     * Different merge modes (add, subtract, multiply ...)
     * Hand tracking: control parameters with finger pinch, hand tilt and hand distance
+    * Hand gestures: switch presets with a peace sign, metal sign, thumbs up and more
     * Face tracking: control parameters with head tilt, distance and mouth width
     * Accelerometer/Gyroscope as modulation for parameters, look around in the tunnel effects
     * Bluetooth MIDI controller as modulation source
