@@ -11,6 +11,7 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.sqrt
 
@@ -35,6 +36,21 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
         // Distance to camera from apparent palm size (fraction of the image's short side): close / far
         private const val PALM_SIZE_NEAR = 0.5f
         private const val PALM_SIZE_FAR = 0.08f
+        // Gestures: fingertip-to-wrist distance relative to knuckle-to-wrist (world space, any hand rotation).
+        // Straight finger ≈ 1.9, folded into the palm ≈ 1.0
+        private const val FINGER_EXTENDED = 1.6f
+        private const val FINGER_CURLED = 1.35f
+        private const val THUMB_OUT = 1.35f
+        const val THUMB_MCP = 2
+        const val INDEX_MCP = 5
+        const val PINKY_MCP = 17
+        // Detections in a row (~20/s) before a gesture fires, other frames in a row before the same one can fire
+        // again, min gap between any two
+        private const val GESTURE_HOLD = 5
+        private const val GESTURE_RELEASE = 3
+        private const val GESTURE_LOST = 10  // ~0.5 s without a clear hand
+        private const val GESTURE_COOLDOWN_MS = 1200L
+        val FINGER_MCPS = intArrayOf(5, 9, 13, 17)
 
         // Landmark pairs forming the hand skeleton (MediaPipe hand topology)
         val CONNECTIONS = intArrayOf(
@@ -48,6 +64,56 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
 
     /** 21 landmarks as x,y pairs, normalized to the upright (and mirrored for front cam) analysis image. */
     val landmarks = FloatArray(42)
+
+    /**
+     * A recognized [HandGesture] calls [onGesture] once per showing while [gestures] is on, on the analysis thread,
+     * with the point between its raised fingertips (normalized like [landmarks]).
+     */
+    var onGesture: ((gesture: HandGesture, x: Float, y: Float) -> Unit)? = null
+    private var heldGesture: HandGesture? = null
+    private var heldFrames = 0
+    private var latched: HandGesture? = null  // fired and still shown: must go away before it fires again
+    private var latchFrames = 0
+    private var unclearFrames = 0
+    private var lastGestureMs = -GESTURE_COOLDOWN_MS
+    private var lastFrameMs = 0L
+
+    /**
+     * Pipeline thread, once per detection. [clear] = a hand was seen with every finger clearly up or down; frames without
+     * a hand or with a finger half bent don't count as "the gesture went away", so a held gesture that flickers in bad
+     * light doesn't fire again. Only a clearly different hand, or no clear hand for [GESTURE_LOST] frames, re-arms it.
+     */
+    private fun updateGesture(g: HandGesture?, clear: Boolean, now: Long) {
+        // Gestures off, or detection paused (switched off, app in background): start from scratch next time
+        if (!gestures || now - lastFrameMs > 500L) {
+            heldGesture = null; heldFrames = 0; latched = null; latchFrames = 0; unclearFrames = 0
+        }
+        lastFrameMs = now
+        if (!gestures) return
+        if (g == heldGesture) heldFrames++ else { heldGesture = g; heldFrames = 1 }
+        if (latched != null) {
+            if (g == latched) { latchFrames = 0; unclearFrames = 0 }
+            else if (clear) { unclearFrames = 0; if (++latchFrames >= GESTURE_RELEASE) latched = null }
+            else if (++unclearFrames >= GESTURE_LOST) latched = null
+        }
+        if (g == null || g == latched || heldFrames < GESTURE_HOLD || now - lastGestureMs < GESTURE_COOLDOWN_MS) return
+        latched = g; latchFrames = 0; unclearFrames = 0
+        lastGestureMs = now
+        // Feedback point: between the raised fingertips (and the thumb tip when it is part of the gesture),
+        // the middle knuckle for a fist
+        val points = g.raised.map { FINGER_TIPS[it] } + (if (g.thumb != Thumb.ANY) listOf(THUMB_TIP) else emptyList())
+        val at = points.ifEmpty { listOf(MIDDLE_MCP) }
+        onGesture?.invoke(g, at.sumOf { landmarks[it * 2].toDouble() }.toFloat() / at.size,
+            at.sumOf { landmarks[it * 2 + 1].toDouble() }.toFloat() / at.size)
+    }
+
+    /** Gestures with a command (set from the UI thread): only these are matched, so unused ones never block others. */
+    @Volatile var activeGestures: Set<HandGesture> = emptySet()
+
+    private fun dist(l: List<com.google.mediapipe.tasks.components.containers.Landmark>, a: Int, b: Int): Float {
+        val dx = l[a].x() - l[b].x(); val dy = l[a].y() - l[b].y(); val dz = l[a].z() - l[b].z()
+        return sqrt(dx * dx + dy * dy + dz * dz)
+    }
 
     override fun createDetector(): AutoCloseable {
         val opts = HandLandmarker.HandLandmarkerOptions.builder()
@@ -65,7 +131,7 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
         val result = (detector as HandLandmarker).detectForVideo(BitmapImageBuilder(bmp).build(), timestampMs)
         val hand = result.landmarks().firstOrNull()
         val world = result.worldLandmarks().firstOrNull()
-        if (hand == null || world == null || hand.size < 21 || world.size < 21) return false
+        if (hand == null || world == null || hand.size < 21 || world.size < 21) { updateGesture(null, false, timestampMs); return false }
         for (i in 0 until 21) {
             landmarks[i * 2] = hand[i].x()
             landmarks[i * 2 + 1] = hand[i].y()
@@ -78,6 +144,33 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
             val dist = sqrt(dx * dx + dy * dy + dz * dz)
             accept(f, ((dist - PINCH_CLOSED_M) / (PINCH_OPEN_M[f] - PINCH_CLOSED_M)).coerceIn(0f, 1f))
         }
+        // Finger extension per finger: costs a few float ops on the landmarks we already have
+        val w = world[WRIST]
+        fun fromWrist(i: Int): Float {
+            val dx = world[i].x() - w.x(); val dy = world[i].y() - w.y(); val dz = world[i].z() - w.z()
+            return sqrt(dx * dx + dy * dy + dz * dz)
+        }
+        fun ext(f: Int): Float = fromWrist(FINGER_TIPS[f]) / maxOf(fromWrist(FINGER_MCPS[f]), 0.001f)
+        // Each finger up, down or in between (in between matches no gesture)
+        var up = 0; var down = 0
+        for (f in 0 until 4) { val e = ext(f); if (e > FINGER_EXTENDED) up = up or (1 shl f) else if (e < FINGER_CURLED) down = down or (1 shl f) }
+        // Thumb sticks out when its tip is far from the pinky knuckle compared to the knuckle span (folded across ≈ 0.7,
+        // spread ≈ 1.7); up/down from its on-screen direction (thumb knuckle → tip, mostly vertical)
+        val thumbOut = dist(world, THUMB_TIP, PINKY_MCP) / maxOf(dist(world, INDEX_MCP, PINKY_MCP), 0.001f) > THUMB_OUT
+        val tdx = (hand[THUMB_TIP].x() - hand[THUMB_MCP].x()) * bmp.width
+        val tdy = (hand[THUMB_TIP].y() - hand[THUMB_MCP].y()) * bmp.height
+        val vertical = abs(tdy) > abs(tdx) * 1.2f
+        fun thumbOk(t: Thumb) = when (t) {
+            Thumb.ANY -> true
+            Thumb.OUT -> thumbOut
+            Thumb.UP -> thumbOut && vertical && tdy < 0f
+            Thumb.DOWN -> thumbOut && vertical && tdy > 0f
+        }
+        val active = activeGestures
+        val clear = (up or down) == 0xF
+        val g = if (!clear) null
+                else HandGesture.values().firstOrNull { it in active && it.mask == up && thumbOk(it.thumb) }
+        updateGesture(g, clear, timestampMs)
         // Whole-hand tilt on screen: wrist → middle knuckle, in pixels (image space is upright + mirrored like the screen)
         val ax = (hand[MIDDLE_MCP].x() - hand[WRIST].x()) * bmp.width
         val ay = (hand[MIDDLE_MCP].y() - hand[WRIST].y()) * bmp.height
@@ -93,6 +186,45 @@ class HandTracker(activity: MainActivity, pipeline: VisionPipeline) :
             accept(DIST, ((1f / palm - 1f / PALM_SIZE_NEAR) / (1f / PALM_SIZE_FAR - 1f / PALM_SIZE_NEAR)).coerceIn(0f, 1f))
         }
         return true
+    }
+}
+
+/** Hand gestures (raised fingers, 0 = index .. 3 = pinky; all others folded), with their Settings key and default command. */
+enum class Thumb { ANY, OUT, UP, DOWN }
+
+/**
+ * Hand gestures: raised fingers (0 = index .. 3 = pinky; all others folded) plus the thumb. Detection tries them in
+ * this order among the ones with a command, so the stricter thumb-out variants come before their thumb-any twins
+ * (L before Point, thumbs up/down before Fist).
+ */
+enum class HandGesture(val label: String, val raised: IntArray, val thumb: Thumb, val defaultAction: String = "OFF") {
+    PEACE("Peace  ✌", intArrayOf(0, 1), Thumb.ANY, "NEXT_RANDOM"),
+    METAL("Metal  🤘", intArrayOf(0, 3), Thumb.ANY, "PRESET_1"),
+    L_SHAPE("L  (thumb + index)", intArrayOf(0), Thumb.OUT),
+    POINT("Point  ☝", intArrayOf(0), Thumb.ANY),
+    THREE("Three fingers", intArrayOf(0, 1, 2), Thumb.ANY),
+    OPEN("Open hand  ✋", intArrayOf(0, 1, 2, 3), Thumb.ANY),
+    SHAKA("Shaka  🤙", intArrayOf(3), Thumb.OUT),
+    THUMBS_UP("Thumbs up  👍", intArrayOf(), Thumb.UP),
+    THUMBS_DOWN("Thumbs down  👎", intArrayOf(), Thumb.DOWN),
+    FIST("Fist  ✊", intArrayOf(), Thumb.ANY);
+
+    val mask: Int = raised.fold(0) { m, f -> m or (1 shl f) }
+    val prefKey: String get() = "GESTURE_$name"
+}
+
+/** Commands a gesture can run, stored by key in the Settings prefs. */
+object GestureActions {
+    val ALL = listOf("OFF", "NEXT", "NEXT_ORDER", "NEXT_RANDOM", "PREVIOUS", "AUTOPLAY") + (1..9).map { "PRESET_$it" }
+
+    fun label(action: String): String = when (action) {
+        "OFF" -> "Nothing"
+        "NEXT" -> "Next (Auto-Play order)"
+        "NEXT_ORDER" -> "Next in order"
+        "NEXT_RANDOM" -> "Next random"
+        "PREVIOUS" -> "Previous"
+        "AUTOPLAY" -> "Auto-Play on/off"
+        else -> "Load preset " + action.removePrefix("PRESET_")
     }
 }
 
@@ -125,6 +257,17 @@ class TrackingOverlayView(
     private val facePath = Path()
     private val handMapped = BooleanArray(HandTracker.CHANNELS)
     private val faceMapped = BooleanArray(FaceTracker.CHANNELS)
+
+    // Gesture feedback: two thin rings ripple out from between the fingertips, the new preset number fades through
+    private val burstPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.STROKE }
+    private val burstTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 46f; textAlign = Paint.Align.CENTER
+        typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+    }
+    private var burstStart = 0L
+    private var burstX = 0.5f
+    private var burstY = 0.5f
+    private var burstLabel = ""
 
     // HUD obstacle rects (in this view's coordinates), rebuilt per draw from a reused pool
     private val hudRects = ArrayList<RectF>()
@@ -209,7 +352,37 @@ class TrackingOverlayView(
     private fun mapX(t: Tracker, x: Float): Float { val s = maxOf(width / t.imageWidth.toFloat(), height / t.imageHeight.toFloat()); return width / 2f + (x - 0.5f) * t.imageWidth * s }
     private fun mapY(t: Tracker, y: Float): Float { val s = maxOf(width / t.imageWidth.toFloat(), height / t.imageHeight.toFloat()); return height / 2f + (y - 0.5f) * t.imageHeight * s }
 
+    /** Gesture feedback at a point in hand landmark coordinates, with what it did (e.g. the new preset number). UI thread. */
+    fun gestureBurst(nx: Float, ny: Float, label: String) {
+        burstX = nx; burstY = ny; burstLabel = label
+        burstStart = android.os.SystemClock.uptimeMillis()
+        invalidate()
+    }
+
+    private fun drawBurst(canvas: Canvas) {
+        val t = (android.os.SystemClock.uptimeMillis() - burstStart) / 700f
+        if (t >= 1f) { burstStart = 0L; return }
+        val x = mapX(hand, burstX); val y = mapY(hand, burstY)
+        // Second ring trails the first a little; each eases out (fast start, soft stop) while thinning and fading
+        for (k in 0 until 2) {
+            val p = ((t - k * 0.16f) / 0.84f).coerceIn(0f, 1f)
+            if (p <= 0f || p >= 1f) continue
+            val q = 1f - p
+            val e = 1f - q * q * q
+            burstPaint.strokeWidth = 1.5f + 4f * q
+            burstPaint.alpha = ((if (k == 0) 220 else 130) * q).toInt()
+            canvas.drawCircle(x, y, 24f + 150f * e, burstPaint)
+        }
+        if (burstLabel.isNotEmpty()) {
+            val a = if (t < 0.12f) t / 0.12f else ((1f - t) / 0.88f)
+            burstTextPaint.alpha = (230 * a).toInt().coerceIn(0, 255)
+            canvas.drawText(burstLabel, x, y + burstTextPaint.textSize * 0.35f - 18f * t, burstTextPaint)
+        }
+        postInvalidateOnAnimation()
+    }
+
     override fun onDraw(canvas: Canvas) {
+        if (burstStart != 0L) drawBurst(canvas)
         if (!hand.enabled && !face.enabled && !sensors.enabled) return
         // Sensors change continuously without a detection callback: keep refreshing (~20 Hz) while they are shown
         if (sensors.enabled && !refreshScheduled) { refreshScheduled = true; postDelayed(refresh, 50) }
@@ -355,6 +528,29 @@ class HandIconDrawable : Drawable() {
         for (i in 0 until 4) canvas.drawLine(ox + w * fx[i], oy + h * 0.58f, ox + w * fx[i], oy + h * tipY[i], paint)
         // Thumb, angled out to the side
         canvas.drawLine(ox + w * 0.36f, oy + h * 0.74f, ox + w * 0.14f, oy + h * 0.50f, paint)
+    }
+
+    override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+    override fun setColorFilter(colorFilter: ColorFilter?) { paint.colorFilter = colorFilter }
+    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+    override fun getIntrinsicWidth(): Int = 90
+    override fun getIntrinsicHeight(): Int = 90
+}
+
+/** Button icon: peace sign (palm with two fingers spread in a V). */
+class PeaceIconDrawable : Drawable() {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeCap = Paint.Cap.ROUND }
+    private val palm = RectF()
+
+    override fun draw(canvas: Canvas) {
+        val w = bounds.width().toFloat(); val h = bounds.height().toFloat()
+        val ox = bounds.left.toFloat(); val oy = bounds.top.toFloat()
+        paint.style = Paint.Style.FILL
+        palm.set(ox + w * 0.30f, oy + h * 0.52f, ox + w * 0.72f, oy + h * 0.92f)
+        canvas.drawRoundRect(palm, w * 0.13f, w * 0.13f, paint)
+        paint.style = Paint.Style.STROKE; paint.strokeWidth = w * 0.10f
+        canvas.drawLine(ox + w * 0.43f, oy + h * 0.60f, ox + w * 0.30f, oy + h * 0.12f, paint)
+        canvas.drawLine(ox + w * 0.57f, oy + h * 0.60f, ox + w * 0.70f, oy + h * 0.12f, paint)
     }
 
     override fun setAlpha(alpha: Int) { paint.alpha = alpha }

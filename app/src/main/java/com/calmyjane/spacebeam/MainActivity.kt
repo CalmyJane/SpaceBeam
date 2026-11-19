@@ -203,6 +203,7 @@ class MainActivity : AppCompatActivity() {
     private var handBtn: ImageButton? = null
     private var faceBtn: ImageButton? = null
     private var gyroBtn: ImageButton? = null
+    private var gestureBtn: ImageButton? = null
     private var beatBtn: ImageButton? = null
     private var trackingOverlay: TrackingOverlayView? = null
     // A 180° turn (landscape <-> reverse landscape) triggers no onConfigurationChanged, only a display change:
@@ -540,6 +541,7 @@ class MainActivity : AppCompatActivity() {
                 "CMD_AUTOPLAY" -> toggleAutoPlay()
                 "CMD_CAM_SWITCH" -> switchCamera()
                 "CMD_HAND" -> setTracking(handTracker, !handTracker.enabled)
+                "CMD_GESTURE" -> setTracking(handTracker, !handTracker.gestures, gesture = true)
                 "CMD_FACE" -> setTracking(faceTracker, !faceTracker.enabled)
                 "CMD_GYRO" -> setSensorModulation(!sensorHelper.enabled)
                 "CMD_BEAT" -> setBeatSync(!bpmManager.syncEnabled)
@@ -718,6 +720,10 @@ class MainActivity : AppCompatActivity() {
         forceScreenOn = prefs.getBoolean("FORCE_SCREEN_ON", false)
         handTracker.smoothing = prefs.getInt("HAND_SMOOTH", Tracker.DEFAULT_SMOOTHING)
         faceTracker.smoothing = prefs.getInt("FACE_SMOOTH", Tracker.DEFAULT_SMOOTHING)
+        for (g in HandGesture.values()) {
+            gestureActions[g] = prefs.getString(g.prefKey, null)?.takeIf { it in GestureActions.ALL } ?: g.defaultAction
+        }
+        updateActiveGestures()
         maskManager.loadFromPrefs(prefs)
         val filterStr = prefs.getString("AP_FILTER", null)
         if (filterStr != null) {
@@ -784,7 +790,7 @@ class MainActivity : AppCompatActivity() {
             afterUnbind?.invoke()
             val cam = allCameras.getOrNull(currentCameraIndex) ?: return@addListener
             val hasPreview = renderer.getSource("CAM_MAIN") != null
-            if (!hasPreview && !handTracker.enabled && !faceTracker.enabled) {
+            if (!hasPreview && !handTracker.running && !faceTracker.running) {
                 vision.stop()
                 return@addListener
             }
@@ -802,7 +808,7 @@ class MainActivity : AppCompatActivity() {
                         } catch (e: Exception) {
                             Log.e("Camera", "Bind analysis failed", e)
                             vision.dropAnalysis()
-                            handTracker.disable(); faceTracker.disable()
+                            handTracker.disable(); handTracker.disableGestures(); faceTracker.disable()
                             updateTrackingButtons()
                             Toast.makeText(this, "Hand/face tracking not supported on this camera", Toast.LENGTH_SHORT).show()
                         }
@@ -823,8 +829,8 @@ class MainActivity : AppCompatActivity() {
                         // Camera can't stream preview + analysis together: keep the visuals, drop tracking
                         Log.w("Camera", "Bind with analysis failed, falling back to preview only", e)
                         vision.dropAnalysis()
-                        val wasTracking = handTracker.enabled || faceTracker.enabled
-                        handTracker.disable(); faceTracker.disable()
+                        val wasTracking = handTracker.running || faceTracker.running
+                        handTracker.disable(); handTracker.disableGestures(); faceTracker.disable()
                         updateTrackingButtons()
                         if (wasTracking) Toast.makeText(this, "Hand/face tracking not supported on this camera", Toast.LENGTH_SHORT).show()
                         try { provider.unbindAll(); provider.bindToLifecycle(this, currentSelector, preview) } catch (e2: Exception) { Log.e("Camera", "Bind failed", e2) }
@@ -834,20 +840,25 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    fun setTracking(tracker: Tracker, on: Boolean) {
-        if (on == tracker.enabled) return
+    /** Modulation on/off, or with [gesture] the gesture commands (detection runs while either is on). */
+    fun setTracking(tracker: Tracker, on: Boolean, gesture: Boolean = false) {
+        if (on == (if (gesture) tracker.gestures else tracker.enabled)) return
+        fun switchOff() { if (gesture) tracker.disableGestures() else tracker.disable() }
         if (renderer.getSource("CAM_MAIN") == null) {
-            // Camera not in the mixer: it only runs while tracking needs it, so (re)bind on every toggle
+            // Camera not in the mixer: it only runs while tracking needs it. Bind it when the first tracker switch goes
+            // on and unbind after the last goes off; in between only the analyzer changes, so other trackers
+            // (and gestures) keep running without a camera restart
             if (on) {
-                tracker.enable { ok ->
-                    if (ok) startCamera()
-                    else Toast.makeText(this, "Tracking model missing (${tracker.modelAsset})", Toast.LENGTH_LONG).show()
+                tracker.enable(gesture) { ok ->
+                    if (!ok) Toast.makeText(this, "Tracking model missing (${tracker.modelAsset})", Toast.LENGTH_LONG).show()
+                    else if (vision.available) vision.updateAnalyzer()
+                    else startCamera()
                     updateTrackingButtons()
                 }
             } else {
-                tracker.disable()
+                switchOff()
                 vision.updateAnalyzer()
-                startCamera()
+                if (!handTracker.running && !faceTracker.running) startCamera()
                 updateTrackingButtons()
             }
             return
@@ -859,14 +870,14 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
                 return
             }
-            tracker.enable { ok ->
+            tracker.enable(gesture) { ok ->
                 // The analysis stream is already running next to the preview: just attach the analyzer (no camera restart)
                 if (ok) vision.updateAnalyzer()
                 else Toast.makeText(this, "Tracking model missing (${tracker.modelAsset})", Toast.LENGTH_LONG).show()
                 updateTrackingButtons()
             }
         } else {
-            tracker.disable()
+            switchOff()
             vision.updateAnalyzer()
             updateTrackingButtons()
         }
@@ -887,6 +898,7 @@ class MainActivity : AppCompatActivity() {
         handBtn?.alpha = if (handTracker.enabled) 1.0f else 0.45f
         faceBtn?.alpha = if (faceTracker.enabled) 1.0f else 0.45f
         gyroBtn?.alpha = if (sensorHelper.enabled) 1.0f else 0.45f
+        gestureBtn?.alpha = if (handTracker.gestures) 1.0f else 0.45f
         beatBtn?.alpha = if (bpmManager.syncEnabled) 1.0f else 0.45f
         trackingOverlay?.invalidate()
     }
@@ -1214,10 +1226,40 @@ class MainActivity : AppCompatActivity() {
                 } else false
             }
         }
+        gestureBtn = ImageButton(this).apply {
+            setImageDrawable(PeaceIconDrawable())
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(28, 28, 28, 28)
+            setBackgroundColor(Color.TRANSPARENT)
+            layoutParams = FrameLayout.LayoutParams(130, 130).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                bottomMargin = 780
+                rightMargin = 35
+            }
+            setOnClickListener { setTracking(handTracker, !handTracker.gestures, gesture = true) }
+            setOnLongClickListener {
+                if (midiHelper.isConnected) {
+                    showMidiLearnOverlay("CMD_GESTURE", "TOGGLE GESTURE COMMANDS")
+                    true
+                } else false
+            }
+        }
         // Phone-only overlay: lives in the HUD, never in the GL output that goes to projector/recording
         trackingOverlay = TrackingOverlayView(this, this, handTracker, faceTracker, sensorHelper).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
         val overlay = trackingOverlay!!
         handTracker.onUpdate = { overlay.postInvalidate() }
+        handTracker.onGesture = { g, x, y ->
+            runOnUiThread {
+                val label = runGesture(g) ?: return@runOnUiThread
+                overlay.gestureBurst(x, y, label)
+                gestureBtn?.let { b ->
+                    b.animate().cancel()
+                    b.animate().scaleX(1.25f).scaleY(1.25f).setDuration(110).withEndAction {
+                        b.animate().scaleX(1f).scaleY(1f).setDuration(260).start()
+                    }.start()
+                }
+            }
+        }
         faceTracker.onUpdate = { overlay.postInvalidate() }
         vision.setDisplayRotation(glView.display?.rotation ?: Surface.ROTATION_0)
 
@@ -1257,6 +1299,7 @@ class MainActivity : AppCompatActivity() {
         overlayHUD.addView(faceBtn)
         overlayHUD.addView(gyroBtn)
         overlayHUD.addView(beatBtn)
+        overlayHUD.addView(gestureBtn)
         updateTrackingButtons()
 
         updateSidebarVisuals()
@@ -3219,6 +3262,46 @@ class MainActivity : AppCompatActivity() {
         applyPreset(nextIdx, fromAutoPlay = true)
     }
 
+    /** Command per hand gesture (Settings → HAND GESTURES), keys from [GestureActions]. */
+    val gestureActions = mutableMapOf<HandGesture, String>()
+
+    fun setGestureAction(g: HandGesture, action: String) {
+        gestureActions[g] = action
+        updateActiveGestures()
+        getSharedPreferences("SpaceBeam_Settings", Context.MODE_PRIVATE).edit().putString(g.prefKey, action).apply()
+    }
+
+    private fun updateActiveGestures() {
+        handTracker.activeGestures = gestureActions.filterValues { it != "OFF" }.keys.toSet()
+    }
+
+    /**
+     * Runs the command mapped to a gesture, whether auto-play runs or not (its timer restarts on a preset change).
+     * Next/previous only step through the presets ticked for auto-play (all saved ones if none are), random never
+     * repeats the current preset. Returns the label for the on-screen feedback, null if nothing happened.
+     */
+    fun runGesture(g: HandGesture): String? {
+        val action = gestureActions[g] ?: g.defaultAction
+        if (action == "OFF") return null
+        if (action == "AUTOPLAY") {
+            toggleAutoPlay()
+            return if (isAutoPlaying) "▶" else "❚❚"
+        }
+        val saved = (1..9).filter { presets[it] != null }
+        val pool = saved.filter { it in autoPlayFilter }.ifEmpty { saved }
+        fun random() = pool.filter { it != activePreset }.ifEmpty { pool }.random()
+        fun inOrder() = pool.firstOrNull { it > activePreset } ?: pool.first()
+        val next = when (action) {
+            "NEXT" -> if (pool.isEmpty()) null else if (autoPlayRandom) random() else inOrder()
+            "NEXT_ORDER" -> if (pool.isEmpty()) null else inOrder()
+            "NEXT_RANDOM" -> if (pool.isEmpty()) null else random()
+            "PREVIOUS" -> if (pool.isEmpty()) null else pool.lastOrNull { it < activePreset } ?: pool.last()
+            else -> action.removePrefix("PRESET_").toIntOrNull()?.takeIf { presets[it] != null }
+        } ?: return null
+        applyPreset(next, fromAutoPlay = isAutoPlaying)
+        return next.toString()
+    }
+
 
     inner class ProgressButtonDrawable(private val label: String) : android.graphics.drawable.Drawable() {
         private var progress = 0f
@@ -3715,7 +3798,7 @@ class MainActivity : AppCompatActivity() {
         val getCircleBg = { alpha: Int -> getBg(alpha).apply { shape = GradientDrawable.OVAL } }
 
         val panels = listOf(controlBox, presetPanel)
-        val utils = listOfNotNull(menuBtn, settingsBtn, handBtn, faceBtn, gyroBtn, beatBtn)
+        val utils = listOfNotNull(menuBtn, settingsBtn, handBtn, faceBtn, gyroBtn, beatBtn, gestureBtn)
 
         // Reset clip
         panels.forEach { it.clipToOutline = true }

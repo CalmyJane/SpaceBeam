@@ -340,6 +340,38 @@ Map them in the **HAND** section of any parameter's details menu:
 
 On the phone screen (never on the projector or in recordings) you see a faint hand skeleton, a colored line for every mapped channel and one colored bar per mapped channel.
 
+### Hand Gesture Commands
+
+Tap the **peace sign button** (top of the button column on the right) to control the app with hand gestures. It works on its own: the hand button does not need to be on, so you can switch presets by gesture without the hand moving any parameters.
+
+| Gesture | Fingers up (all others folded) | Default |
+|---------|---------|---------|
+| **Peace** ✌ | Index + middle | Next random preset |
+| **Metal** 🤘 | Index + pinky | Load preset 1 |
+| **L** | Index + thumb sticking out | Nothing |
+| **Point** ☝ | Index | Nothing |
+| **Three fingers** | Index + middle + ring | Nothing |
+| **Open hand** ✋ | All four fingers | Nothing |
+| **Shaka** 🤙 | Pinky + thumb sticking out | Nothing |
+| **Thumbs up** 👍 | Only the thumb, pointing up | Nothing |
+| **Thumbs down** 👎 | Only the thumb, pointing down | Nothing |
+| **Fist** ✊ | None | Nothing |
+
+Where the thumb isn't mentioned it doesn't matter. Hold the gesture for a moment to trigger it.
+
+Choose what each gesture does in Settings -> **gestures**: nothing, next (in Auto-Play order), next in order, next random, previous, Auto-Play on/off, or load preset 1-9. Tap outside the list to close it.
+
+- Only gestures with a command are recognized. So Point also accepts a thumb sticking out as long as L is set to nothing, and Fist works the same with the thumbs.
+- Open hand and Fist happen easily by accident, especially while the hand also steers parameters -- keep them for commands where a surprise doesn't hurt.
+
+- Next, previous and random only step through the presets ticked under Auto-Play -> **Include Presets** (all saved presets if none are ticked). Random never picks the preset that is already showing.
+- Everything works whether Auto-Play is running or not. If Auto-Play is running, its timer starts over.
+- One gesture triggers once -- lower your hand or change the gesture, then show it again.
+- On the phone screen a ring ripples out from your fingers with the number of the new preset (never on the projector or in recordings).
+- Long-press the button to map it to a MIDI button.
+
+Gestures use the same hand detection as hand tracking. With only gestures on, the phone does about the same work as with hand tracking on; with both on, the detection runs once and serves both.
+
 ### Face Tracking
 
 The **face button** works the same way with your face:
@@ -459,7 +491,7 @@ Once connected, MIDI mapping options appear in the Settings menu:
   - in the **clear midi mappings** menu, move any midi control to see what parameters it is mapped to
   - remove single mappings or all
   - press "show all" to display all midi mappings for all parameters (useful for clearing all mappings)
-- Long-press any parameter slider name or button, then move a MIDI control to map it. This also works for the hand, face, gyro and beat buttons
+- Long-press any parameter slider name or button, then move a MIDI control to map it. This also works for the hand, face, gyro, beat and peace sign buttons
 
 ---
 
@@ -482,7 +514,8 @@ Access via the gear icon in the bottom-right corner:
 | **Connect Bluetooth MIDI** | Scan and connect to MIDI controllers |
 | **BPM** | Set beats-per-minute for LFO sync |
 | **Undo Steps** | Configure undo history depth |
-| **Auto-Play** | Duration, random order, preset filter |
+| **Auto-Play** | Duration, random order, preset filter (also used by the hand gestures) |
+| **Gestures** | What each hand gesture does: next / random / previous preset, Auto-Play on/off or a fixed preset |
 | **MIDI Mapping** | Load/Save/Clear MIDI mappings (visible when MIDI connected) |
 | **Sensor Smoothing** | How smooth Pitch, Roll, Yaw, **Hand** and **Face** values follow your movement. Left = direct, right = slow and soft |
 

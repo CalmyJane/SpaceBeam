@@ -68,7 +68,7 @@ class VisionPipeline {
     /** Attach the analyzer while any tracker is on, detach it otherwise (no frames are converted then). */
     fun updateAnalyzer() {
         val a = analysis ?: return
-        if (trackers.none { it.enabled }) { a.clearAnalyzer(); return }
+        if (trackers.none { it.running }) { a.clearAnalyzer(); return }
         a.setAnalyzer(executor) { proxy ->
             try {
                 val now = SystemClock.uptimeMillis()
@@ -104,7 +104,7 @@ class VisionPipeline {
     }
 
     fun close() {
-        trackers.forEach { it.disable(); it.release() }
+        trackers.forEach { it.disable(); it.disableGestures(); it.release() }
         analysis?.clearAnalyzer()
         executor.shutdown()
     }
@@ -145,7 +145,12 @@ abstract class Tracker(
 
     init { pipeline.trackers.add(this) }
 
+    /** Modulation on (the hand/face button). */
     @Volatile var enabled = false; private set
+    /** Gesture commands on: detection also runs while modulation is off. */
+    @Volatile var gestures = false; private set
+    /** Detection runs (camera analysis needed): for modulation and/or gesture commands. */
+    val running: Boolean get() = enabled || gestures
     /** Smoothed channels 0..1. Hold their last values while nothing is visible. */
     val values = FloatArray(channels)
     private val targets = FloatArray(channels)  // latest accepted detection, written on the analysis thread
@@ -180,8 +185,11 @@ abstract class Tracker(
     /** Run detection; fill landmarks and call [accept] per channel. Returns whether the subject was found. */
     protected abstract fun runDetection(detector: AutoCloseable, bmp: Bitmap, timestampMs: Long): Boolean
 
-    /** Loads the model off the UI thread, then calls [onDone] on the UI thread with success. */
-    fun enable(onDone: (Boolean) -> Unit) {
+    /**
+     * Loads the model off the UI thread, then switches modulation (or, with [gesture], gesture commands) on and
+     * calls [onDone] on the UI thread with success.
+     */
+    fun enable(gesture: Boolean = false, onDone: (Boolean) -> Unit) {
         pipeline.executor.execute {
             val ok = try {
                 if (detector == null) detector = createDetector()
@@ -190,8 +198,8 @@ abstract class Tracker(
                 Log.e("Tracker", "Failed to load $modelAsset", e)
                 false
             }
-            hasData = false
-            enabled = ok
+            if (gesture) gestures = ok
+            else { hasData = false; enabled = ok }
             activity.runOnUiThread { onDone(ok); onUpdate?.invoke() }
         }
     }
@@ -208,7 +216,13 @@ abstract class Tracker(
     /** The detector stays loaded so the next switch-on is instant; [release] frees it. */
     fun disable() {
         enabled = false
-        visible = false
+        if (!running) visible = false
+        onUpdate?.invoke()
+    }
+
+    fun disableGestures() {
+        gestures = false
+        if (!running) visible = false
         onUpdate?.invoke()
     }
 
@@ -216,7 +230,7 @@ abstract class Tracker(
         try { pipeline.executor.execute { detector?.close(); detector = null } } catch (_: Exception) {}
     }
 
-    fun isDue(now: Long) = enabled && detector != null && now - lastRunMs >= MIN_INTERVAL_MS
+    fun isDue(now: Long) = running && detector != null && now - lastRunMs >= MIN_INTERVAL_MS
 
     /** Pipeline thread. */
     fun process(bmp: Bitmap, now: Long) {
