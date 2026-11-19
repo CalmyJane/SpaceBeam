@@ -153,4 +153,42 @@ class PropertyControlTest {
         c.run(1f)
         assertEquals(100, c.value)
     }
+
+    /**
+     * A RAMP on a wrapping parameter (rotation) below full depth: starting a preset transition must not jump the
+     * angle. It used to switch from "value + accumulated turn" to "value + accumulated turn * depth" on the first
+     * transition frame, a sudden rotation of frac(turn) * (1 - depth).
+     */
+    @Test fun rampOnWrapParamHasNoJumpWhenTransitionStarts() {
+        fun circDiff(a: Float, b: Float): Float { val d = ((a - b) % 1f + 1f) % 1f; return kotlin.math.min(d, 1f - d) }
+        val c = PropertyControl("M_ANGLE", "ANGLE", hasModulation = true, modMode = PropertyControl.ModMode.WRAP)
+        val snap = lfoSnapshot(300, PropertyControl.WaveShape.RAMP, rate = 600, depth = 600)
+        c.restore(snap, 0f)
+        c.run(3.3f)  // accumulate some rotation
+        var last = c.computedValue
+        c.restore(lfoSnapshot(700, PropertyControl.WaveShape.RAMP, rate = 600, depth = 600), 2f)
+        c.run(2.5f) {
+            val d = circDiff(it.computedValue, last)
+            assertTrue("angle jumped by $d in one frame", d < 0.02f)
+            last = it.computedValue
+        }
+    }
+
+    /** Same between a RAMP preset and a SINE preset on a rotation, in both directions. */
+    @Test fun rampToSineOnWrapParamIsContinuous() {
+        fun circDiff(a: Float, b: Float): Float { val d = ((a - b) % 1f + 1f) % 1f; return kotlin.math.min(d, 1f - d) }
+        val c = PropertyControl("M_ANGLE", "ANGLE", hasModulation = true, modMode = PropertyControl.ModMode.WRAP)
+        c.restore(lfoSnapshot(200, PropertyControl.WaveShape.RAMP, rate = 600, depth = 700), 0f)
+        c.run(2.7f)
+        var last = c.computedValue
+        val check: (PropertyControl) -> Unit = {
+            val d = circDiff(it.computedValue, last)
+            assertTrue("angle jumped by $d in one frame", d < 0.03f)
+            last = it.computedValue
+        }
+        c.restore(lfoSnapshot(600, PropertyControl.WaveShape.SINE, rate = 300, depth = 400), 2f)
+        c.run(3f, check)
+        c.restore(lfoSnapshot(100, PropertyControl.WaveShape.RAMP, rate = 600, depth = 700), 2f)
+        c.run(3f, check)
+    }
 }
